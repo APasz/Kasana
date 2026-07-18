@@ -27,7 +27,7 @@ dependencies = [
 kasana = "kasana.__main__:console_main"
 kasana-katalog = "kasana.katalog.cli.app:console_main"
 kasana-katalog-api = "kasana.katalog.api.server:main"
-kasana-kanvas = "kasana.kanvas.__main__:main"
+kasana-kanvas = "kasana.kanvas.__main__:console_main"
 kasana-kestrel = "kasana.kestrel.__main__:console_main"
 kasana-kourier = "kasana.kourier.__main__:main"
 

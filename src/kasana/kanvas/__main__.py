@@ -2,11 +2,16 @@
 
 import logging
 
+from nicegui import ui
+
+from kasana.kanvas.dashboard import build_dashboard
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.shared import SharedSettings, configure_logging
 
 
 def main() -> None:
+    """Configure logging without starting a server (useful to embedding callers)."""
+
     shared_settings = SharedSettings()
     settings = Kanvas_Settings()
     configure_logging(shared_settings.log_level)
@@ -15,5 +20,22 @@ def main() -> None:
     )
 
 
-if __name__ == "__main__":  # pragma: no cover
+def console_main() -> None:
+    """Run the local Kanvas NiceGUI process."""
+
     main()
+    settings = Kanvas_Settings()
+    build_dashboard(settings)
+    ui.run(  # pyright: ignore[reportUnknownMemberType]
+        host=settings.host,
+        port=settings.port,
+        title="Kanvas",
+        dark=True,
+        reload=False,
+        tailwind=False,
+        show_welcome_message=False,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    console_main()
