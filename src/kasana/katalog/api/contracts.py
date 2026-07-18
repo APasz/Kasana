@@ -82,6 +82,7 @@ class JobStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class APIModel(BaseModel):
@@ -100,13 +101,24 @@ class UserSummary(APIModel):
 
 
 class StatusResponse(APIModel):
+    katalog_version: str = Field(default="1.0.0", min_length=1, max_length=100)
     database_revision: str | None
+    database_healthy: bool = True
+    providers: tuple[ProviderStatus, ...] = ()
+    artwork_cache_size_bytes: int = Field(default=0, ge=0)
+    artwork_cache_file_count: int = Field(default=0, ge=0)
+    enabled_root_count: int = Field(default=0, ge=0)
+    unavailable_root_count: int = Field(default=0, ge=0)
     item_count: int = Field(ge=0)
     media_file_count: int = Field(ge=0)
     available_file_count: int = Field(ge=0)
     unresolved_audit_issue_count: int = Field(ge=0)
     active_job_count: int = Field(ge=0)
     failed_job_count: int = Field(ge=0)
+    queued_job_count: int = Field(default=0, ge=0)
+    running_job_count: int = Field(default=0, ge=0)
+    interrupted_job_count: int = Field(default=0, ge=0)
+    last_successful_scan_at: datetime | None = None
 
 
 class ArtworkSelection(APIModel):
@@ -432,6 +444,63 @@ class MetadataReviewCandidate(APIModel):
     status: str = Field(min_length=1, max_length=50)
 
 
+class ProviderStatus(APIModel):
+    name: str = Field(min_length=1, max_length=100)
+    configured: bool
+    available: bool
+    detail: str | None = Field(default=None, max_length=500)
+
+
+class JobProgress(APIModel):
+    phase: str | None = Field(default=None, max_length=100)
+    current: int = Field(default=0, ge=0)
+    total: int | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, max_length=100)
+
+
+class LibraryRootKind(StrEnum):
+    MOVIE = "movie"
+    SERIES = "series"
+
+
+class LibraryRootCreate(APIModel):
+    display_name: str | None = Field(default=None, max_length=200)
+    path: str = Field(min_length=1, max_length=10_000)
+    expected_kind: LibraryRootKind
+    default_tags: tuple[str, ...] = Field(default=(), max_length=50)
+    enabled: bool = True
+
+
+class LibraryRootUpdate(APIModel):
+    display_name: str | None = Field(default=None, max_length=200)
+    path: str | None = Field(default=None, min_length=1, max_length=10_000)
+    expected_kind: LibraryRootKind | None = None
+    default_tags: tuple[str, ...] | None = Field(default=None, max_length=50)
+    enabled: bool | None = None
+
+
+class LibraryRootSummary(APIModel):
+    id: int = Field(gt=0)
+    display_name: str | None = Field(default=None, max_length=200)
+    path: str = Field(min_length=1, max_length=10_000)
+    expected_kind: LibraryRootKind
+    default_tags: tuple[str, ...] = ()
+    enabled: bool
+    available: bool
+    item_count: int = Field(ge=0)
+    media_file_count: int = Field(ge=0)
+    last_scan_completed_at: datetime | None = None
+    last_scan_summary: dict[str, int] = Field(default_factory=dict)
+
+
+class LibraryRootDeletion(APIModel):
+    confirm: bool = False
+
+
+class ArtworkPruneRequest(APIModel):
+    dry_run: bool = True
+
+
 class BackgroundJob(APIModel):
     id: str = Field(min_length=1, max_length=100)
     kind: str = Field(min_length=1, max_length=100)
@@ -439,7 +508,16 @@ class BackgroundJob(APIModel):
     submitted_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    updated_at: datetime | None = None
+    progress: JobProgress = Field(default_factory=JobProgress)
     message: str | None = Field(default=None, max_length=2_000)
+    result_counters: dict[str, int] = Field(default_factory=dict)
+    failure_code: str | None = Field(default=None, max_length=100)
+    failure_message: str | None = Field(default=None, max_length=2_000)
+    cancellation_requested: bool = False
+    cancellable: bool = True
+    library_root_id: int | None = Field(default=None, gt=0)
+    request_id: str | None = Field(default=None, max_length=100)
 
 
 class PaginatedResponse[ItemT](APIModel):

@@ -33,7 +33,16 @@ from kasana.kanvas.components.shell import (
     page_shell,
 )
 from kasana.kanvas.dashboard import (
+    administration_action,
+    administration_artwork_page,
+    administration_jobs_data,
+    administration_jobs_page,
+    administration_libraries_page,
+    administration_metadata_data,
+    administration_metadata_page,
+    administration_overview_data,
     administration_page,
+    administration_roots_data,
     apply_watch_order_generation_action,
     artwork,
     build_dashboard,
@@ -75,6 +84,15 @@ from kasana.kanvas.services.playback import (
     watch_order_playback_plan_request,
 )
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.kanvas.viewmodels.administration import (
+    AdaptivePollingState,
+    AdministrationOverviewView,
+    JobView,
+    LibraryRootView,
+    MetadataCandidateView,
+    MetadataReviewItemView,
+    overview_from_status,
+)
 from kasana.kanvas.viewmodels.collections import (
     CollectionDetailView,
     CollectionMemberView,
@@ -89,20 +107,31 @@ from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.kanvas.viewmodels.item import ItemDetailView
 from kasana.kanvas.viewmodels.library import CursorPager, LibraryFilters, PosterState, PosterView
 from kasana.katalog.public import (
+    ArtworkFetchRequest,
     ArtworkKind,
     ArtworkSelection,
     Availability,
+    BackgroundJob,
     CollectionDetail,
     CollectionMembership,
+    JobProgress,
+    JobStatus,
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemDetail,
     LibraryItemKind,
     LibraryItemSummary,
+    LibraryRootCreate,
+    LibraryRootKind,
+    LibraryRootSummary,
+    LibraryRootUpdate,
+    MetadataReviewCandidate,
     PaginatedResponse,
     PlaybackStateResponse,
+    ScanRequest,
     SeriesPlaybackContext,
     StandalonePlaybackContext,
+    StatusResponse,
     WatchedFilter,
     WatchOrderPlaybackContext,
 )
@@ -128,6 +157,22 @@ def _playback(*, completed: bool = False) -> PlaybackStateResponse:
         completed=completed,
         play_count=0,
         last_played_at=datetime.now(UTC),
+    )
+
+
+def _admin_job() -> JobView:
+    return JobView(
+        id="job-1",
+        kind="scan",
+        status="running",
+        rootId=1,
+        phase="scanning",
+        progressCurrent=2,
+        progressTotal=4,
+        progressUnit="files",
+        submittedAt=datetime.now(UTC),
+        cancellable=True,
+        cancellationRequested=False,
     )
 
 
@@ -758,20 +803,405 @@ async def test_browser_data_endpoints_return_typed_katalog_failure_states(
     ]
 
 
+async def test_administration_data_and_mutation_endpoints_stay_within_katalog_boundary(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    overview = AdministrationOverviewView(
+        connected=True,
+        databaseRevision="revision",
+        databaseHealthy=True,
+        enabledRootCount=1,
+        unavailableRootCount=0,
+        unresolvedMetadataCount=1,
+        activeJobCount=1,
+        failedJobCount=0,
+        interruptedJobCount=0,
+        artworkCacheSizeBytes=8,
+        artworkCacheFileCount=1,
+    )
+    root = LibraryRootView(
+        id=1,
+        displayName="Films",
+        kind="movie",
+        enabled=True,
+        available=True,
+        itemCount=2,
+        mediaFileCount=3,
+    )
+    review = MetadataReviewItemView(
+        itemId=7,
+        title="Local title",
+        kind="movie",
+        candidates=(
+            MetadataCandidateView(
+                id=9,
+                provider="tmdb",
+                providerId="42",
+                title="Candidate",
+                kind="movie",
+                confidence=0.9,
+                status="suggested",
+            ),
+        ),
+    )
+
+    class AdminCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def administration_overview(self) -> AdministrationOverviewView:
+            return overview
+
+        async def administration_jobs(
+            self, *, cursor: str | None
+        ) -> tuple[tuple[JobView, ...], str | None]:
+            assert cursor is None
+            return (_admin_job(),), "next"
+
+        async def administration_roots(self) -> tuple[LibraryRootView, ...]:
+            return (root,)
+
+        async def metadata_review_items(
+            self, *, cursor: str | None
+        ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
+            assert cursor is None
+            return (review,), None
+
+        async def submit_scan(self, _request: object) -> JobView:
+            calls.append("scan")
+            return _admin_job()
+
+        async def submit_artwork_fetch(self, _request: object) -> JobView:
+            calls.append("artwork")
+            return _admin_job()
+
+        async def cancel_job(self, _job_id: str) -> JobView:
+            calls.append("cancel")
+            return _admin_job()
+
+        async def match_metadata_candidate(self, _item_id: int, **_kwargs: str) -> None:
+            calls.append("match")
+
+        async def reject_metadata_candidate(self, _item_id: int, **_kwargs: str) -> None:
+            calls.append("reject")
+
+        async def ignore_metadata_item(self, _item_id: int) -> None:
+            calls.append("ignore")
+
+        async def refresh_metadata_item(self, _item_id: int) -> None:
+            calls.append("refresh")
+
+        async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
+            calls.append("create-root")
+            assert request.expected_kind is LibraryRootKind.MOVIE
+            return LibraryRootSummary(
+                id=1,
+                path="media",
+                expected_kind=LibraryRootKind.MOVIE,
+                enabled=True,
+                available=True,
+                item_count=0,
+                media_file_count=0,
+            )
+
+        async def update_library_root(
+            self, _root_id: int, request: LibraryRootUpdate
+        ) -> LibraryRootSummary:
+            calls.append("update-root")
+            assert request.enabled is False
+            return await self.create_library_root(
+                LibraryRootCreate(path="media", expected_kind=LibraryRootKind.MOVIE)
+            )
+
+        async def delete_library_root(self, _root_id: int, *, confirm: bool) -> None:
+            assert confirm is True
+            calls.append("delete-root")
+
+    class JsonRequest:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        async def json(self) -> object:
+            return self._payload
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", AdminCatalog)
+    overview_response = await administration_overview_data()
+    jobs_response = await administration_jobs_data(
+        Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    roots_response = await administration_roots_data()
+    metadata_response = await administration_metadata_data(
+        Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    payloads: tuple[dict[str, object], ...] = (
+        {"operation": "scan", "rootId": 1, "dryRun": True},
+        {"operation": "artwork-fetch"},
+        {"operation": "cancel-job", "jobId": "job-1"},
+        {"operation": "match", "itemId": 7, "provider": "tmdb", "providerId": "42"},
+        {"operation": "reject", "itemId": 7, "provider": "tmdb", "providerId": "42"},
+        {"operation": "ignore", "itemId": 7},
+        {"operation": "refresh", "itemId": 7},
+        {"operation": "root-create", "path": "media", "kind": "movie", "tags": ["films"]},
+        {"operation": "root-update", "rootId": 1, "enabled": False, "tags": list[str]()},
+        {"operation": "root-delete", "rootId": 1, "confirm": True},
+    )
+    actions = [
+        await administration_action(cast(Request, JsonRequest(payload))) for payload in payloads
+    ]
+
+    assert json.loads(bytes(overview_response.body))["connected"] is True
+    assert json.loads(bytes(jobs_response.body))["nextCursor"] == "next"
+    assert json.loads(bytes(roots_response.body))["items"][0]["displayName"] == "Films"
+    assert json.loads(bytes(metadata_response.body))["items"][0]["itemId"] == 7
+    assert all(response.status_code == 200 for response in actions)
+    assert calls == [
+        "scan",
+        "artwork",
+        "cancel",
+        "match",
+        "reject",
+        "ignore",
+        "refresh",
+        "create-root",
+        "update-root",
+        "create-root",
+        "delete-root",
+    ]
+
+
+async def test_katalog_administration_service_transforms_only_public_contracts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    root = LibraryRootSummary(
+        id=1,
+        path="media",
+        display_name="Films",
+        expected_kind=LibraryRootKind.MOVIE,
+        enabled=True,
+        available=True,
+        item_count=3,
+        media_file_count=4,
+    )
+    candidate = MetadataReviewCandidate(
+        item_id=7,
+        candidate_id=9,
+        provider="tmdb",
+        provider_id="42",
+        title="Candidate",
+        kind=LibraryItemKind.MOVIE,
+        confidence=0.9,
+        status="suggested",
+    )
+    job = BackgroundJob(
+        id="job-1",
+        kind="scan",
+        status=JobStatus.RUNNING,
+        submitted_at=datetime.now(UTC),
+        started_at=datetime.now(UTC),
+        completed_at=None,
+        progress=JobProgress(phase="scan", current=1, total=2, unit="files"),
+    )
+    local = cast(
+        LibraryItemDetail,
+        SimpleNamespace(
+            id=7,
+            title="Local title",
+            year=2004,
+            kind=LibraryItemKind.MOVIE,
+            artwork=(),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def status(self) -> StatusResponse:
+            return StatusResponse(
+                database_revision="revision",
+                item_count=3,
+                media_file_count=4,
+                available_file_count=4,
+                unresolved_audit_issue_count=0,
+                active_job_count=1,
+                failed_job_count=0,
+            )
+
+        async def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
+            return (root,)
+
+        async def metadata_review(
+            self, *, cursor: str | None = None, limit: int = 50
+        ) -> PaginatedResponse[MetadataReviewCandidate]:
+            assert limit in {50, 100}
+            return PaginatedResponse(items=(candidate,), next_cursor=cursor, limit=limit)
+
+        async def list_jobs(
+            self, *, cursor: str | None, limit: int
+        ) -> PaginatedResponse[BackgroundJob]:
+            assert limit == 50
+            return PaginatedResponse(items=(job,), next_cursor=cursor, limit=limit)
+
+        async def get_library_item(self, item_id: int) -> object:
+            assert item_id == 7
+            return SimpleNamespace(item=local)
+
+        async def match_metadata(self, *_args: object) -> None:
+            calls.append("match")
+
+        async def reject_metadata(self, *_args: object) -> None:
+            calls.append("reject")
+
+        async def ignore_metadata(self, *_args: object) -> None:
+            calls.append("ignore")
+
+        async def refresh_metadata(self, *_args: object) -> None:
+            calls.append("refresh")
+
+        async def submit_scan(self, *_args: object) -> SimpleNamespace:
+            calls.append("scan")
+            return SimpleNamespace(job=job)
+
+        async def submit_artwork_fetch(self, *_args: object) -> SimpleNamespace:
+            calls.append("artwork")
+            return SimpleNamespace(job=job)
+
+        async def cancel_job(self, *_args: object) -> BackgroundJob:
+            calls.append("cancel")
+            return job
+
+        async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
+            calls.append("create-root")
+            assert request.path == "media"
+            return root
+
+        async def update_library_root(
+            self, _root_id: int, request: LibraryRootUpdate
+        ) -> LibraryRootSummary:
+            calls.append("update-root")
+            assert request.enabled is False
+            return root
+
+        async def delete_library_root(self, _root_id: int, *, confirm: bool) -> None:
+            assert confirm is True
+            calls.append("delete-root")
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", FakeClient)
+    service = KanvasKatalogService(Kanvas_Settings())
+    overview = await service.administration_overview()
+    jobs, next_jobs = await service.administration_jobs(cursor="jobs")
+    roots = await service.administration_roots()
+    review, next_review = await service.metadata_review_items(cursor="review")
+    await service.match_metadata_candidate(7, provider="tmdb", provider_id="42")
+    await service.reject_metadata_candidate(7, provider="tmdb", provider_id="42")
+    await service.ignore_metadata_item(7)
+    await service.refresh_metadata_item(7)
+    await service.submit_scan(ScanRequest(library_root_id=1))
+    await service.submit_artwork_fetch(ArtworkFetchRequest(library_root_id=1))
+    await service.cancel_job("job-1")
+    await service.create_library_root(
+        LibraryRootCreate(path="media", expected_kind=LibraryRootKind.MOVIE)
+    )
+    await service.update_library_root(1, LibraryRootUpdate(enabled=False))
+    await service.delete_library_root(1, confirm=True)
+
+    assert overview.unresolved_metadata_count == 1
+    assert (jobs[0].phase, next_jobs) == ("scan", "jobs")
+    assert roots[0].display_name == "Films"
+    assert (review[0].title, review[0].candidates[0].provider_id, next_review) == (
+        "Local title",
+        "42",
+        "review",
+    )
+    assert calls == [
+        "match",
+        "reject",
+        "ignore",
+        "refresh",
+        "scan",
+        "artwork",
+        "cancel",
+        "create-root",
+        "update-root",
+        "delete-root",
+    ]
+
+
+async def test_administration_error_states_and_local_section_routes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FailingAdminCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def administration_overview(self) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def administration_jobs(self, **_arguments: object) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
+
+        async def administration_roots(self) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
+
+        async def metadata_review_items(self, **_arguments: object) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+    class JsonRequest:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        async def json(self) -> object:
+            return self._payload
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalog)
+    responses = (
+        await administration_overview_data(),
+        await administration_jobs_data(
+            Request({"type": "http", "query_string": b"", "headers": []})
+        ),
+        await administration_roots_data(),
+        await administration_metadata_data(
+            Request({"type": "http", "query_string": b"", "headers": []})
+        ),
+        await administration_action(cast(Request, JsonRequest({"operation": "unknown"}))),
+        await administration_action(
+            cast(Request, JsonRequest({"operation": "root-delete", "rootId": 1}))
+        ),
+        await administration_action(cast(Request, JsonRequest({"operation": "root-create"}))),
+    )
+
+    assert [response.status_code for response in responses] == [503, 503, 503, 503, 422, 422, 422]
+    with Client(page("")):
+        await administration_page()
+        await administration_metadata_page()
+        await administration_libraries_page()
+        await administration_jobs_page()
+        await administration_artwork_page()
+
+
 def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> None:
     settings = Kanvas_Settings()
     poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
 
-    with page_shell(settings, "/library", "Library"):
-        primary_navigation("/library")
-        poster_card(poster)
-        progress_indicator(None)
-        progress_indicator(50)
-        media_rail(MediaRailView(title="Empty", posters=()))
-        media_rail(MediaRailView(title="Items", posters=(poster,)))
-        feedback_state("Empty", "No entries")
-        feedback_state("Retry", "Try again", retry=lambda: None)
-        skeleton_posters(2)
+    with Client(page("")):
+        with page_shell(settings, "/library", "Library"):
+            primary_navigation("/library")
+            poster_card(poster)
+            progress_indicator(None)
+            progress_indicator(50)
+            media_rail(MediaRailView(title="Empty", posters=()))
+            media_rail(MediaRailView(title="Items", posters=(poster,)))
+            feedback_state("Empty", "No entries")
+            feedback_state("Retry", "Try again", retry=lambda: None)
+            skeleton_posters(2)
 
 
 def test_native_icon_builder_rejects_unknown_icon() -> None:
@@ -1215,6 +1645,10 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/watch-orders/{watch_order_id}/edit",
         "/search",
         "/administration",
+        "/administration/metadata",
+        "/administration/libraries",
+        "/administration/jobs",
+        "/administration/artwork",
         "/_design",
     } <= paths
     assert keyboard_action("Enter") is NavigationAction.ACTIVATE
@@ -1249,3 +1683,35 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-poster" in javascript
     assert "posterMarkup" in javascript
     assert "sessionStorage" in javascript
+
+
+def test_administration_overview_transformation_and_adaptive_polling() -> None:
+    overview = overview_from_status(
+        StatusResponse(
+            database_revision="20260719_0008",
+            item_count=4,
+            media_file_count=5,
+            available_file_count=4,
+            unresolved_audit_issue_count=2,
+            active_job_count=1,
+            failed_job_count=2,
+            interrupted_job_count=3,
+            artwork_cache_size_bytes=123,
+            artwork_cache_file_count=2,
+        ),
+        unavailable_root_count=1,
+        unresolved_metadata_count=2,
+    )
+
+    assert overview.connected is True
+    assert overview.unavailable_root_count == 1
+    assert overview.unresolved_metadata_count == 2
+    state = AdaptivePollingState()
+    assert state.begin() is True
+    assert state.begin() is False
+    state.finish()
+    assert state.interval_seconds(active_jobs=1) == 5
+    assert state.interval_seconds(active_jobs=0) == 30
+    state.hidden = True
+    assert state.begin() is False
+    assert state.interval_seconds(active_jobs=1) is None

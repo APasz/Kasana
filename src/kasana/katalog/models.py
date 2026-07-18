@@ -18,6 +18,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Text,
+    false,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.orm import relationship as orm_relationship
@@ -118,6 +119,15 @@ class MetadataReviewAction(StrEnum):
     REFRESHED = "refreshed"
 
 
+class MaintenanceJobStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
 class CachedArtworkKind(StrEnum):
     POSTER = "poster"
     BACKDROP = "backdrop"
@@ -176,6 +186,46 @@ class Kura(Base):
     )
 
     __table_args__ = (Index("ix_library_root_path", "path", unique=True),)
+
+
+class MaintenanceJob(Base):
+    """Durable in-process maintenance job state, intentionally independent of task objects."""
+
+    __tablename__ = "maintenance_job"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[MaintenanceJobStatus] = mapped_column(
+        _enum(MaintenanceJobStatus, "maintenance_job_status"), nullable=False
+    )
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    phase: Mapped[str | None] = mapped_column(String(100))
+    progress_current: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    progress_total: Mapped[int | None] = mapped_column(Integer)
+    progress_unit: Mapped[str | None] = mapped_column(String(100))
+    message: Mapped[str | None] = mapped_column(Text)
+    result_counters: Mapped[dict[str, int]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    failure_message: Mapped[str | None] = mapped_column(Text)
+    cancellation_requested: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    library_root_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_root.id", ondelete="SET NULL")
+    )
+    request_id: Mapped[str | None] = mapped_column(String(100))
+
+    __table_args__ = (
+        Index("ix_maintenance_job_status_updated", "status", "updated_at"),
+        Index("ix_maintenance_job_root_status", "library_root_id", "status"),
+    )
 
 
 class AuditIssue(Base):

@@ -25,6 +25,7 @@ from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import add_kanvas_head, kanvas_asset_versions, page_shell
 from kasana.kanvas.components.typography import page_title, section_title
+from kasana.kanvas.routes.administration import render_administration
 from kasana.kanvas.routes.collections import (
     render_collection_detail,
     render_collection_edit,
@@ -47,9 +48,14 @@ from kasana.kanvas.viewmodels.collections import (
 )
 from kasana.kanvas.viewmodels.library import LibraryFilters, PosterState, PosterView
 from kasana.katalog.public import (
+    ArtworkFetchRequest,
     CollectionRelationship,
     KatalogClientError,
     KatalogClientErrorKind,
+    LibraryRootCreate,
+    LibraryRootKind,
+    LibraryRootUpdate,
+    ScanRequest,
     WatchOrderGenerationApplyMode,
     WatchOrderGenerationMode,
     WatchOrderKind,
@@ -117,6 +123,151 @@ async def collections_data(request: Request) -> JSONResponse:
             "nextCursor": next_cursor,
         }
     )
+
+
+@app.get("/kanvas/data/administration/overview", include_in_schema=False)
+async def administration_overview_data() -> JSONResponse:
+    """Return the small overview payload; browser polling manages refresh cadence."""
+
+    try:
+        overview = await KanvasKatalogService(_settings).administration_overview()
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog is unavailable.")
+    return JSONResponse(overview.model_dump(by_alias=True, mode="json"))
+
+
+@app.get("/kanvas/data/administration/jobs", include_in_schema=False)
+async def administration_jobs_data(request: Request) -> JSONResponse:
+    cursor = _query_text(request, "cursor", maximum_length=500)
+    try:
+        jobs, next_cursor = await KanvasKatalogService(_settings).administration_jobs(cursor=cursor)
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load jobs.")
+    return JSONResponse(
+        {
+            "items": [job.model_dump(by_alias=True, mode="json") for job in jobs],
+            "nextCursor": next_cursor,
+        }
+    )
+
+
+@app.get("/kanvas/data/administration/roots", include_in_schema=False)
+async def administration_roots_data() -> JSONResponse:
+    try:
+        roots = await KanvasKatalogService(_settings).administration_roots()
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load library roots.")
+    return JSONResponse({"items": [root.model_dump(by_alias=True, mode="json") for root in roots]})
+
+
+@app.get("/kanvas/data/administration/metadata", include_in_schema=False)
+async def administration_metadata_data(request: Request) -> JSONResponse:
+    cursor = _query_text(request, "cursor", maximum_length=500)
+    try:
+        items, next_cursor = await KanvasKatalogService(_settings).metadata_review_items(
+            cursor=cursor
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load metadata review.")
+    return JSONResponse(
+        {
+            "items": [item.model_dump(by_alias=True, mode="json") for item in items],
+            "nextCursor": next_cursor,
+        }
+    )
+
+
+@app.post("/kanvas/actions/administration", include_in_schema=False)
+async def administration_action(request: Request) -> JSONResponse:
+    """Apply explicit administration intents through the typed Kanvas service boundary."""
+
+    payload = await _json_object(request)
+    operation = payload.get("operation")
+    service = KanvasKatalogService(_settings)
+    try:
+        if operation == "scan":
+            job = await service.submit_scan(
+                ScanRequest(
+                    library_root_id=_optional_integer(payload.get("rootId")),
+                    include_unavailable=payload.get("includeUnavailable") is True,
+                    dry_run=payload.get("dryRun") is True,
+                )
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "artwork-fetch":
+            job = await service.submit_artwork_fetch(
+                ArtworkFetchRequest(library_root_id=_optional_integer(payload.get("rootId")))
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "cancel-job":
+            job = await service.cancel_job(_string(payload, "jobId", maximum_length=100))
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation in {"match", "reject"}:
+            item_id = _integer(payload, "itemId")
+            provider = _string(payload, "provider", maximum_length=100)
+            provider_id = _string(payload, "providerId", maximum_length=500)
+            if operation == "match":
+                await service.match_metadata_candidate(
+                    item_id, provider=provider, provider_id=provider_id
+                )
+            else:
+                await service.reject_metadata_candidate(
+                    item_id, provider=provider, provider_id=provider_id
+                )
+            return JSONResponse({"itemId": item_id})
+        if operation == "ignore":
+            item_id = _integer(payload, "itemId")
+            await service.ignore_metadata_item(item_id)
+            return JSONResponse({"itemId": item_id})
+        if operation == "refresh":
+            item_id = _integer(payload, "itemId")
+            await service.refresh_metadata_item(item_id)
+            return JSONResponse({"itemId": item_id})
+        if operation in {"root-create", "root-update"}:
+            root_id = _optional_integer(payload.get("rootId"))
+            name = _optional_string(payload.get("displayName"), maximum_length=200)
+            path = _optional_string(payload.get("path"), maximum_length=10_000)
+            kind = _optional_root_kind(payload.get("kind"))
+            tags = _tag_values(payload.get("tags"))
+            enabled_value = payload.get("enabled")
+            enabled: bool | None = enabled_value if isinstance(enabled_value, bool) else None
+            if operation == "root-create":
+                if path is None or kind is None:
+                    return _invalid_action("Path and kind are required.")
+                root = await service.create_library_root(
+                    LibraryRootCreate(
+                        display_name=name,
+                        path=path,
+                        expected_kind=kind,
+                        default_tags=tags,
+                        enabled=enabled is not False,
+                    )
+                )
+            else:
+                if root_id is None:
+                    return _invalid_action("rootId is required.")
+                root = await service.update_library_root(
+                    root_id,
+                    LibraryRootUpdate(
+                        display_name=name,
+                        path=path,
+                        expected_kind=kind,
+                        default_tags=tags,
+                        enabled=enabled,
+                    ),
+                )
+            return JSONResponse({"rootId": root.id})
+        if operation == "root-delete":
+            root_id = _integer(payload, "rootId")
+            if payload.get("confirm") is not True:
+                return _invalid_action("Root removal requires confirmation.")
+            await service.delete_library_root(root_id, confirm=True)
+            return JSONResponse({"rootId": root_id})
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Administration change could not be applied.")
+    except (ValueError, TypeError) as error:
+        return _invalid_action(str(error))
+    return _invalid_action("Unsupported administration operation.")
 
 
 @app.get("/kanvas/data/collections/{collection_id}/picker", include_in_schema=False)
@@ -451,6 +602,54 @@ def _integer(payload: dict[str, object], field: str) -> int:
     return value
 
 
+def _string(payload: dict[str, object], field: str, *, maximum_length: int) -> str:
+    value = _optional_string(payload.get(field), maximum_length=maximum_length)
+    if value is None:
+        raise ValueError(f"{field} is required.")
+    return value
+
+
+def _optional_string(value: object, *, maximum_length: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Expected a text value.")
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > maximum_length:
+        raise ValueError("Text value is too long.")
+    return cleaned
+
+
+def _optional_root_kind(value: object) -> LibraryRootKind | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError("kind must be a string.")
+    try:
+        return LibraryRootKind(value)
+    except ValueError as error:
+        raise ValueError("Invalid library root kind.") from error
+
+
+def _tag_values(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("tags must be a list of text values.")
+    raw_values = cast(list[object], value)
+    raw_tags: list[str] = []
+    for tag in raw_values:
+        if not isinstance(tag, str):
+            raise ValueError("tags must be a list of text values.")
+        raw_tags.append(tag)
+    tags = tuple(tag.strip() for tag in raw_tags if tag.strip())
+    if len(tags) != len(raw_values) or len(tags) > 50:
+        raise ValueError("tags must contain at most 50 non-empty values.")
+    return tags
+
+
 def _optional_integer(value: object) -> int | None:
     """Read a nullable positive JSON integer used by move anchors and playback starts."""
 
@@ -632,6 +831,16 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     )
     _kanvas_page("/search", "Kanvas · Search")(search_page)
     _kanvas_page("/administration", "Kanvas · Administration")(administration_page)
+    _kanvas_page("/administration/metadata", "Kanvas · Metadata review")(
+        administration_metadata_page
+    )
+    _kanvas_page("/administration/libraries", "Kanvas · Library roots")(
+        administration_libraries_page
+    )
+    _kanvas_page("/administration/jobs", "Kanvas · Jobs")(administration_jobs_page)
+    _kanvas_page("/administration/artwork", "Kanvas · Artwork maintenance")(
+        administration_artwork_page
+    )
     _kanvas_page("/_design", "Kanvas · Design review")(design_page)
     _pages_registered = True
 
@@ -733,14 +942,25 @@ async def search_page() -> None:
 
 
 async def administration_page() -> None:
-    """Keep future administration visible but deliberately unimplemented in this slice."""
+    """Serve the operational overview section."""
 
-    with page_shell(_settings, "/administration", "Administration"):
-        page_title("Administration")
-        feedback_state(
-            "Not in this pass",
-            "Metadata review and library administration remain in Katalog for now.",
-        )
+    render_administration(_settings, "overview")
+
+
+async def administration_metadata_page() -> None:
+    render_administration(_settings, "metadata")
+
+
+async def administration_libraries_page() -> None:
+    render_administration(_settings, "libraries")
+
+
+async def administration_jobs_page() -> None:
+    render_administration(_settings, "jobs")
+
+
+async def administration_artwork_page() -> None:
+    render_administration(_settings, "artwork")
 
 
 async def design_page() -> None:
@@ -854,4 +1074,40 @@ async def design_page() -> None:
             '<button type="button" class="k-button">Reload</button>'
             '<button type="button" class="k-button">Reapply</button>'
             "</div>"
+        )
+        section_title("Administration states")
+        ui.html(
+            """
+            <div class="k-admin-list">
+                <article class="k-job-row">
+                    <div><strong>Queued scan</strong><small>queued</small></div>
+                    <div class="k-job-row__progress">
+                        <span class="k-progress-edge k-progress-edge--unknown"></span>
+                        <small>Waiting</small>
+                    </div>
+                    <div><small>Unknown total</small></div>
+                </article>
+                <article class="k-job-row">
+                    <div><strong>Running artwork</strong><small>running</small></div>
+                    <div class="k-job-row__progress">
+                        <span class="k-progress-edge"><span style="--k-progress:62%"></span></span>
+                        <small>62/100 artwork</small>
+                    </div>
+                    <div><small>Progress edge</small></div>
+                </article>
+                <article class="k-job-row">
+                    <div><strong>Failed scan</strong><small>failed · interrupted</small></div>
+                    <div><small>Inspectable failure</small></div>
+                    <div><small>Cancelled / completed states</small></div>
+                </article>
+                <article class="k-root-row">
+                    <div><strong>Unavailable root</strong><small>movie · offline</small></div>
+                    <div><small>Edit or scan when available</small></div>
+                </article>
+                <div class="k-admin-status">
+                    Provider unavailable · candidate selected / rejected / matched
+                    · destructive confirmation
+                </div>
+            </div>
+            """
         )

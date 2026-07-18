@@ -739,6 +739,294 @@
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
   if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
 
+  const adminDate = (value) => {
+    if (typeof value !== 'string') return '—';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.valueOf()) ? '—' : parsed.toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+  };
+  const adminBytes = (value) => {
+    if (!Number.isFinite(value)) return '—';
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  class KanvasAdministration extends HTMLElement {
+    constructor() {
+      super();
+      this.section = 'overview';
+      this.overview = null;
+      this.jobs = [];
+      this.roots = [];
+      this.reviewItems = [];
+      this.reviewIndex = 0;
+      this.candidateIndex = 0;
+      this.cursor = null;
+      this.inFlight = false;
+      this.timer = null;
+      this.abort = null;
+      this.onVisibility = () => this.visibilityChanged();
+      this.onKeyDown = (event) => this.keyDown(event);
+    }
+
+    connectedCallback() {
+      this.section = this.getAttribute('section') || 'overview';
+      document.addEventListener('visibilitychange', this.onVisibility);
+      document.addEventListener('keydown', this.onKeyDown);
+      this.load();
+    }
+
+    disconnectedCallback() {
+      document.removeEventListener('visibilitychange', this.onVisibility);
+      document.removeEventListener('keydown', this.onKeyDown);
+      window.clearTimeout(this.timer);
+      this.abort?.abort();
+    }
+
+    source(name) { return this.getAttribute(name); }
+
+    async fetchJson(source, suffix = '') {
+      if (!source) throw new Error('Missing administration source');
+      const response = await fetch(`${source}${suffix}`, {headers: {'Accept': 'application/json'}, credentials: 'same-origin', signal: this.abort?.signal});
+      if (!response.ok) throw new Error(`Administration request failed (${response.status})`);
+      return response.json();
+    }
+
+    async load() {
+      if (this.inFlight || document.visibilityState === 'hidden') return;
+      this.inFlight = true;
+      this.abort?.abort();
+      this.abort = new AbortController();
+      this.renderLoading();
+      try {
+        if (this.section === 'overview' || this.section === 'artwork') {
+          this.overview = await this.fetchJson(this.source('overview-source'));
+        }
+        if (this.section === 'jobs') {
+          const page = await this.fetchJson(this.source('jobs-source'));
+          this.jobs = Array.isArray(page.items) ? page.items : [];
+          this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
+        }
+        if (this.section === 'libraries') {
+          const page = await this.fetchJson(this.source('roots-source'));
+          this.roots = Array.isArray(page.items) ? page.items : [];
+        }
+        if (this.section === 'metadata') {
+          const page = await this.fetchJson(this.source('metadata-source'));
+          this.reviewItems = Array.isArray(page.items) ? page.items : [];
+          this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
+          this.reviewIndex = Math.min(this.reviewIndex, Math.max(0, this.reviewItems.length - 1));
+        }
+        this.render();
+      } catch (error) {
+        if (error?.name !== 'AbortError') this.renderError();
+      } finally {
+        this.inFlight = false;
+        this.schedule();
+      }
+    }
+
+    schedule() {
+      window.clearTimeout(this.timer);
+      if (document.visibilityState === 'hidden') return;
+      const active = Number(this.overview?.activeJobCount || 0);
+      this.timer = window.setTimeout(() => this.load(), active ? 5000 : 30000);
+    }
+
+    visibilityChanged() {
+      if (document.visibilityState === 'hidden') {
+        window.clearTimeout(this.timer);
+        this.abort?.abort();
+      } else {
+        this.load();
+      }
+    }
+
+    renderLoading() {
+      if (!this.children.length) this.innerHTML = '<div class="k-admin-status" aria-live="polite">Loading administration…</div>';
+    }
+
+    renderError() {
+      this.innerHTML = '<div class="k-admin-status" aria-live="polite">Katalog is unavailable. <button type="button" class="k-button" data-admin-retry>Retry</button></div>';
+      this.querySelector('[data-admin-retry]')?.addEventListener('click', () => this.load());
+    }
+
+    render() {
+      if (this.section === 'metadata') return this.renderMetadata();
+      if (this.section === 'libraries') return this.renderLibraries();
+      if (this.section === 'jobs') return this.renderJobs();
+      if (this.section === 'artwork') return this.renderArtwork();
+      this.renderOverview();
+    }
+
+    statusRow(label, value, action, destination) {
+      const button = action ? `<a class="k-button" href="${escapeHtml(destination)}">${escapeHtml(action)}</a>` : '';
+      return `<div class="k-admin-row"><span>${escapeHtml(label)}</span><span class="k-admin-row__value">${escapeHtml(String(value))}</span>${button}</div>`;
+    }
+
+    renderOverview() {
+      const data = this.overview;
+      if (!data) return this.renderError();
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const providerRows = providers.length ? providers.map((provider) => this.statusRow(provider.name, provider.available ? 'Available' : 'Unavailable', !provider.available ? 'Review' : '', '/administration/metadata')).join('') : this.statusRow('Provider', 'Not configured', '', '');
+      this.innerHTML = `<section class="k-admin-panel" aria-live="polite">
+        ${this.statusRow('Katalog', data.connected ? 'Connected' : 'Unavailable', '', '')}
+        ${this.statusRow('Database', data.databaseHealthy ? (data.databaseRevision || 'Healthy') : 'Unhealthy', '', '')}
+        ${this.statusRow('Library roots', `${data.enabledRootCount} enabled · ${data.unavailableRootCount} unavailable`, data.unavailableRootCount ? 'Configure' : '', '/administration/libraries')}
+        ${this.statusRow('Metadata', `${data.unresolvedMetadataCount} unresolved`, data.unresolvedMetadataCount ? 'Review' : '', '/administration/metadata')}
+        ${this.statusRow('Jobs', `${data.activeJobCount} active · ${data.failedJobCount} failed · ${data.interruptedJobCount} interrupted`, (data.failedJobCount || data.interruptedJobCount) ? 'Inspect' : '', '/administration/jobs')}
+        ${this.statusRow('Last scan', adminDate(data.lastSuccessfulScanAt), '', '')}
+        ${this.statusRow('Artwork cache', `${adminBytes(data.artworkCacheSizeBytes)} · ${data.artworkCacheFileCount || 0} files`, 'Maintain', '/administration/artwork')}
+        <div class="k-admin-row"><span>Scan</span><button type="button" class="k-button k-button--primary" data-admin-operation="scan">Scan library</button></div>
+        <div class="k-admin-provider-list">${providerRows}</div>
+      </section>`;
+      this.bindActions();
+    }
+
+    renderJobs() {
+      const rows = this.jobs.map((job) => {
+        const total = Number.isInteger(job.progressTotal) ? job.progressTotal : null;
+        const current = Number.isInteger(job.progressCurrent) ? job.progressCurrent : 0;
+        const percent = total && total > 0 ? Math.min(100, Math.round((current / total) * 100)) : null;
+        const progress = total === null ? (job.phase ? `${current} ${job.progressUnit || ''}` : '—') : `${current}/${total} ${job.progressUnit || ''}`;
+        const counters = Array.isArray(job.counters) ? job.counters.map(([key, value]) => `${key}: ${value}`).join(' · ') : '';
+        return `<article class="k-job-row" data-job-id="${escapeHtml(job.id)}"><div><strong>${escapeHtml(job.kind)}</strong><small>${escapeHtml(job.status)}${job.phase ? ` · ${escapeHtml(job.phase)}` : ''}</small></div><div class="k-job-row__progress">${percent === null ? '<span class="k-progress-edge k-progress-edge--unknown"></span>' : `<span class="k-progress-edge"><span style="--k-progress:${percent}%"></span></span>`}<small>${escapeHtml(progress)}</small></div><div><small>${escapeHtml(counters || job.message || job.failure || '—')}</small><small>${adminDate(job.completedAt || job.startedAt || job.submittedAt)}</small></div>${job.cancellable ? `<button type="button" class="k-button" data-admin-cancel="${escapeHtml(job.id)}">Cancel</button>` : ''}</article>`;
+      }).join('');
+      this.innerHTML = `<section class="k-admin-list" aria-live="polite">${rows || '<div class="k-admin-status">No recent jobs.</div>'}${this.cursor ? '<button type="button" class="k-button" data-admin-more>More</button>' : ''}</section>`;
+      this.bindActions();
+    }
+
+    renderLibraries() {
+      const rows = this.roots.map((root) => `<article class="k-root-row" data-root-id="${root.id}"><div><strong>${escapeHtml(root.displayName || `Root ${root.id}`)}</strong><small>${escapeHtml(root.kind)} · ${(root.tags || []).map(escapeHtml).join(', ') || 'No tags'}</small></div><div><small>${root.enabled ? 'Enabled' : 'Disabled'} · ${root.available ? 'Available' : 'Unavailable'}</small><small>${root.itemCount || 0} items · ${root.mediaFileCount || 0} files · ${adminDate(root.lastScanCompletedAt)}</small></div><div class="k-row-actions"><button type="button" class="k-button" data-admin-operation="scan" data-root-id="${root.id}">Scan</button><button type="button" class="k-button" data-admin-root-edit="${root.id}">Edit</button><button type="button" class="k-button" data-admin-root-delete="${root.id}">Remove</button></div></article>`).join('');
+      this.innerHTML = `<section class="k-admin-list"><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-root-add>Add root</button></div>${rows || '<div class="k-admin-status">No library roots.</div>'}</section><dialog class="k-kanvas-dialog" data-admin-root-dialog></dialog>`;
+      this.bindActions();
+    }
+
+    renderArtwork() {
+      const data = this.overview;
+      if (!data) return this.renderError();
+      this.innerHTML = `<section class="k-admin-panel"><div class="k-admin-row"><span>Cache</span><span class="k-admin-row__value">${adminBytes(data.artworkCacheSizeBytes)} · ${data.artworkCacheFileCount || 0} files</span></div><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-operation="artwork-fetch">Fetch missing artwork</button><span class="k-quiet-copy">Pruning requires the Katalog prune contract.</span></div></section>`;
+      this.bindActions();
+    }
+
+    renderMetadata() {
+      const item = this.reviewItems[this.reviewIndex];
+      if (!item) {
+        this.innerHTML = '<div class="k-admin-status">No unresolved metadata items.</div>';
+        return;
+      }
+      const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+      this.candidateIndex = Math.min(this.candidateIndex, Math.max(0, candidates.length - 1));
+      const candidate = candidates[this.candidateIndex];
+      const candidateRows = candidates.map((entry, index) => `<button type="button" class="k-metadata-candidate${index === this.candidateIndex ? ' k-metadata-candidate--selected' : ''}" data-admin-candidate="${index}"><span>${escapeHtml(entry.title)}</span><small>${escapeHtml(entry.provider)} · ${Math.round(Number(entry.confidence || 0) * 100)}%</small><span class="k-progress-edge"><span style="--k-progress:${Math.round(Number(entry.confidence || 0) * 100)}%"></span></span></button>`).join('');
+      const selected = candidate ? `<div class="k-metadata-selected"><strong>${escapeHtml(candidate.title)}</strong><small>${escapeHtml(candidate.provider)} · ${candidate.year || '—'} · ${Math.round(Number(candidate.confidence || 0) * 100)}%</small><details><summary>Scoring</summary><p>Confidence is supplied by ${escapeHtml(candidate.provider)}. Match only when the local title, year, and kind agree.</p></details></div>` : '<div class="k-admin-status">No candidates.</div>';
+      this.innerHTML = `<section class="k-metadata-review" aria-live="polite"><div class="k-metadata-local">${item.posterUrl ? `<img src="${escapeHtml(item.posterUrl)}" alt="">` : '<span class="k-metadata-poster">?</span>'}<div><strong>${escapeHtml(item.title)}</strong><small>${item.year || '—'} · ${escapeHtml(item.kind)}</small></div></div><div class="k-metadata-candidates">${candidateRows}</div><div class="k-metadata-actions">${selected}<div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-metadata="match">Match</button><button type="button" class="k-button" data-admin-metadata="reject">Reject</button><button type="button" class="k-button" data-admin-metadata="ignore">Ignore</button><button type="button" class="k-button" data-admin-metadata="refresh">Refresh</button><button type="button" class="k-button" data-admin-search>Manual search</button></div><div class="k-action-row"><button type="button" class="k-button" data-admin-review-nav="previous">Previous</button><button type="button" class="k-button" data-admin-review-nav="next">Next</button></div></div></section><dialog class="k-kanvas-dialog" data-admin-search-dialog><form method="dialog" class="k-picker"><div class="k-picker__header"><label class="k-control-shell k-input-shell"><input class="k-input" data-admin-search-input placeholder="Filter current candidates" aria-label="Filter candidates"></label><button class="k-button">Close</button></div><p class="k-quiet-copy">Manual provider search is unavailable until Katalog exposes its public search contract.</p></form></dialog>`;
+      this.bindActions();
+    }
+
+    bindActions() {
+      this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => this.operation(button.dataset.adminOperation, {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null})));
+      this.querySelectorAll('[data-admin-cancel]').forEach((button) => button.addEventListener('click', () => { if (window.confirm('Cancel this job?')) this.operation('cancel-job', {jobId: button.dataset.adminCancel}); }));
+      this.querySelector('[data-admin-more]')?.addEventListener('click', () => this.moreJobs());
+      this.querySelectorAll('[data-admin-candidate]').forEach((button) => button.addEventListener('click', () => { this.candidateIndex = Number(button.dataset.adminCandidate); this.renderMetadata(); }));
+      this.querySelectorAll('[data-admin-metadata]').forEach((button) => this.querySelector('[data-admin-metadata]') && button.addEventListener('click', () => this.metadataAction(button.dataset.adminMetadata)));
+      this.querySelectorAll('[data-admin-review-nav]').forEach((button) => button.addEventListener('click', () => this.moveReview(button.dataset.adminReviewNav === 'next' ? 1 : -1)));
+      this.querySelector('[data-admin-search]')?.addEventListener('click', () => this.querySelector('[data-admin-search-dialog]')?.showModal());
+      this.querySelector('[data-admin-root-add]')?.addEventListener('click', () => this.rootDialog(null));
+      this.querySelectorAll('[data-admin-root-edit]').forEach((button) => button.addEventListener('click', () => this.rootDialog(this.roots.find((root) => root.id === Number(button.dataset.adminRootEdit)) || null)));
+      this.querySelectorAll('[data-admin-root-delete]').forEach((button) => button.addEventListener('click', () => { if (window.confirm('Remove this root configuration? Catalogued items require confirmation.')) this.operation('root-delete', {rootId: Number(button.dataset.adminRootDelete), confirm: true}); }));
+    }
+
+    async operation(operation, extra = {}, refresh = true) {
+      const source = this.getAttribute('action-source');
+      if (!source) return;
+      try {
+        const response = await fetch(source, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({operation, ...extra})});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || 'Action failed');
+        if (payload.job?.id) window.location.assign(`/administration/jobs#${encodeURIComponent(payload.job.id)}`);
+        else if (refresh) this.load();
+        return true;
+      } catch (error) {
+        this.renderInlineError(error?.message || 'Action could not be applied.');
+        return false;
+      }
+    }
+
+    renderInlineError(message) {
+      const status = this.querySelector('.k-admin-status') || this.querySelector('.k-admin-panel') || this;
+      const error = document.createElement('div');
+      error.className = 'k-admin-status k-admin-status--error';
+      error.textContent = message;
+      status.prepend(error);
+    }
+
+    async metadataAction(action) {
+      const item = this.reviewItems[this.reviewIndex];
+      const candidate = item?.candidates?.[this.candidateIndex];
+      if (!item || ((action === 'match' || action === 'reject') && !candidate)) return;
+      const payload = {itemId: item.itemId, ...(candidate ? {provider: candidate.provider, providerId: candidate.providerId} : {})};
+      try {
+        const succeeded = await this.operation(action, payload, false);
+        if (succeeded && action !== 'refresh') {
+          this.reviewItems.splice(this.reviewIndex, 1);
+          this.reviewIndex = Math.min(this.reviewIndex, Math.max(0, this.reviewItems.length - 1));
+          this.candidateIndex = 0;
+          this.renderMetadata();
+        }
+      } catch (_) { /* operation renders the inline failure */ }
+    }
+
+    moveReview(offset) {
+      if (!this.reviewItems.length) return;
+      this.reviewIndex = Math.min(Math.max(0, this.reviewIndex + offset), this.reviewItems.length - 1);
+      this.candidateIndex = 0;
+      this.renderMetadata();
+    }
+
+    async moreJobs() {
+      if (!this.cursor || this.inFlight) return;
+      this.inFlight = true;
+      try {
+        const page = await this.fetchJson(this.source('jobs-source'), `?cursor=${encodeURIComponent(this.cursor)}`);
+        this.jobs.push(...(Array.isArray(page.items) ? page.items : []));
+        this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
+        this.renderJobs();
+      } finally { this.inFlight = false; }
+    }
+
+    rootDialog(root) {
+      const dialog = this.querySelector('[data-admin-root-dialog]');
+      if (!(dialog instanceof HTMLDialogElement)) return;
+      dialog.innerHTML = `<form method="dialog" class="k-picker" data-admin-root-form><div class="k-picker__header"><strong>${root ? 'Edit root' : 'Add root'}</strong></div><label class="k-control-shell k-input-shell"><input class="k-input" name="displayName" value="${escapeHtml(root?.displayName || '')}" placeholder="Name" aria-label="Root name"></label><label class="k-control-shell k-input-shell"><input class="k-input" name="path" placeholder="Path" aria-label="Root path"></label><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Root kind"><option value="movie"${root?.kind === 'movie' ? ' selected' : ''}>Movie</option><option value="series"${root?.kind === 'series' ? ' selected' : ''}>Series</option></select></label><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((root?.tags || []).join(', '))}" placeholder="Tags" aria-label="Root tags"></label><label class="k-control-shell k-check"><input type="checkbox" name="enabled"${root?.enabled !== false ? ' checked' : ''}> Enabled</label><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save</button><button type="button" class="k-button" data-admin-root-close>Cancel</button></div></form>`;
+      dialog.querySelector('[data-admin-root-close]')?.addEventListener('click', () => dialog.close());
+      dialog.querySelector('[data-admin-root-form]')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        this.operation(root ? 'root-update' : 'root-create', {rootId: root?.id || null, displayName: form.get('displayName'), path: form.get('path'), kind: form.get('kind'), tags: String(form.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean), enabled: form.get('enabled') === 'on'});
+        dialog.close();
+      });
+      dialog.showModal();
+    }
+
+    keyDown(event) {
+      if (this.section !== 'metadata') return;
+      const editable = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
+      if (editable) return;
+      if (event.key === 'Enter') { event.preventDefault(); this.metadataAction('match'); }
+      else if (event.key.toLowerCase() === 'r') this.metadataAction('reject');
+      else if (event.key.toLowerCase() === 'i') this.metadataAction('ignore');
+      else if (event.key.toLowerCase() === 's') this.querySelector('[data-admin-search]')?.click();
+      else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); this.candidateIndex += 1; this.renderMetadata(); }
+      else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); this.candidateIndex = Math.max(0, this.candidateIndex - 1); this.renderMetadata(); }
+      else if (event.key.toLowerCase() === 'j') this.moveReview(1);
+      else if (event.key.toLowerCase() === 'k') this.moveReview(-1);
+      else if (event.key === 'Escape') this.querySelector('dialog[open]')?.close();
+    }
+  }
+
+  if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);
+
   window.kanvas = window.kanvas || {};
   window.kanvas.launch = (uri) => new Promise((resolve) => {
     let hidden = false;

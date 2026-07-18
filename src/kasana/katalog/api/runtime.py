@@ -7,7 +7,8 @@ from datetime import timedelta
 
 from pydantic import ValidationError
 
-from kasana.katalog.api.jobs import JobRegistry
+from kasana.katalog.api.contracts import BackgroundJob
+from kasana.katalog.api.jobs import JobContext, JobOutcome, JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTransferPolicy
 from kasana.katalog.database import KatalogDatabase
@@ -40,7 +41,12 @@ class KatalogApiRuntime:
         self.file_transfers: FileTransferPolicy = RangeStreamingFileTransferPolicy(
             chunk_size=settings.media_transfer_chunk_size
         )
-        self.jobs = JobRegistry()
+        self.jobs = JobRegistry(database, maximum_jobs=settings.maintenance_max_active_jobs)
+
+    async def start(self) -> None:
+        """Recover work that could not survive a prior process shutdown."""
+
+        await self.jobs.recover_interrupted()
 
     async def close(self) -> None:
         await self.jobs.close()
@@ -72,8 +78,9 @@ class KatalogApiRuntime:
 
     async def submit_scan(
         self, *, root_id: int | None, include_unavailable: bool, dry_run: bool
-    ) -> str:
-        async def scan() -> str:
+    ) -> BackgroundJob:
+        async def scan(context: JobContext) -> JobOutcome:
+            await context.report(phase="scanning", unit="files", message="Scanning library roots.")
             scanner = IncrementalScanner(
                 self.database,
                 video_extensions=self.settings.video_extensions,
@@ -86,23 +93,46 @@ class KatalogApiRuntime:
                 include_unavailable=include_unavailable,
                 dry_run=dry_run,
             )
-            return f"Scanned {result.totals.discovered} files."
+            await context.report(
+                phase="complete",
+                current=result.totals.discovered,
+                total=result.totals.discovered,
+                unit="files",
+                message="Scan complete.",
+                force=True,
+            )
+            return JobOutcome(
+                message=f"Scanned {result.totals.discovered} files.",
+                counters={"discovered": result.totals.discovered},
+            )
 
-        job = await self.jobs.submit("scan", scan)
-        return job.id
+        return await self.jobs.submit("scan", scan, library_root_id=root_id)
 
-    async def submit_artwork_fetch(self, *, root_id: int | None) -> str:
-        async def fetch() -> str:
+    async def submit_artwork_fetch(self, *, root_id: int | None) -> BackgroundJob:
+        async def fetch(context: JobContext) -> JobOutcome:
+            await context.report(phase="fetching", unit="artwork", message="Fetching artwork.")
+
             async def operation(
                 workflow: MetadataWorkflow, providers: tuple[MetadataProvider, ...]
-            ) -> str:
+            ) -> JobOutcome:
                 artwork = await workflow.fetch_posters(providers, root_id=root_id)
-                return f"Cached {len(artwork)} artwork records."
+                return JobOutcome(
+                    message=f"Cached {len(artwork)} artwork records.",
+                    counters={"cached": len(artwork)},
+                )
 
-            return await self._with_provider(operation)
+            result = await self._with_provider(operation)
+            await context.report(
+                phase="complete",
+                current=result.counters.get("cached", 0) if result.counters else 0,
+                total=result.counters.get("cached", 0) if result.counters else 0,
+                unit="artwork",
+                message="Artwork fetch complete.",
+                force=True,
+            )
+            return result
 
-        job = await self.jobs.submit("artwork-fetch", fetch)
-        return job.id
+        return await self.jobs.submit("artwork-fetch", fetch, library_root_id=root_id)
 
     def _workflow(self) -> MetadataWorkflow:
         return MetadataWorkflow(

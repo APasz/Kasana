@@ -32,6 +32,9 @@ from kasana.katalog.api.contracts import (
     LibraryItemDetail,
     LibraryItemKind,
     LibraryItemSummary,
+    LibraryRootCreate,
+    LibraryRootSummary,
+    LibraryRootUpdate,
     MediaTechnicalSummary,
     MetadataMatchRequest,
     MetadataRejectRequest,
@@ -527,6 +530,36 @@ class KatalogClient:
 
     async def get_job(self, job_id: str) -> BackgroundJob:
         return await self._get_model(f"/api/v1/jobs/{job_id}", BackgroundJob)
+
+    async def cancel_job(self, job_id: str) -> BackgroundJob:
+        return await self._send_model("POST", f"/api/v1/jobs/{job_id}/cancel", None, BackgroundJob)
+
+    async def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
+        response = await self._request("GET", "/api/v1/library/roots")
+        if not isinstance(response.payload, list):
+            raise _response_error(
+                "Katalog library roots response must be a JSON array.", response.request_id
+            )
+        try:
+            payload = cast(list[object], response.payload)
+            return tuple(LibraryRootSummary.model_validate(value) for value in payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned an invalid library roots response.", response.request_id
+            ) from error
+
+    async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
+        return await self._send_model("POST", "/api/v1/library/roots", request, LibraryRootSummary)
+
+    async def update_library_root(
+        self, root_id: int, request: LibraryRootUpdate
+    ) -> LibraryRootSummary:
+        return await self._send_model(
+            "PATCH", f"/api/v1/library/roots/{root_id}", request, LibraryRootSummary
+        )
+
+    async def delete_library_root(self, root_id: int, *, confirm: bool = False) -> None:
+        await self._request("DELETE", f"/api/v1/library/roots/{root_id}", json={"confirm": confirm})
 
     async def create_playback_plan(self, request: PlaybackPlanRequest) -> PlaybackPlanLaunch:
         return await self._send_model("POST", "/api/v1/playback/plans", request, PlaybackPlanLaunch)

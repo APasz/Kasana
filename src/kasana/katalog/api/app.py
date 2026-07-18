@@ -32,10 +32,15 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     HealthResponse,
+    JobStatus,
     JobSubmission,
     LibraryItemDetail,
     LibraryItemKind,
     LibraryItemSummary,
+    LibraryRootCreate,
+    LibraryRootDeletion,
+    LibraryRootSummary,
+    LibraryRootUpdate,
     MediaTechnicalSummary,
     MetadataMatchRequest,
     MetadataRejectRequest,
@@ -65,7 +70,7 @@ from kasana.katalog.api.contracts import (
     WatchOrderSummary,
     WatchOrderUpdate,
 )
-from kasana.katalog.api.jobs import JobNotFoundError, JobRegistryFullError
+from kasana.katalog.api.jobs import JobConflictError, JobNotFoundError, JobRegistryFullError
 from kasana.katalog.api.runtime import KatalogApiRuntime, MetadataProviderConfigurationError
 from kasana.katalog.api.service import (
     CatalogConflictError,
@@ -107,6 +112,7 @@ def create_app(
         runtime = KatalogApiRuntime(settings, active_database)
         app.state.runtime = runtime
         try:
+            await runtime.start()
             yield
         finally:
             await runtime.close()
@@ -142,9 +148,14 @@ def create_app(
         responses=_ERROR_RESPONSES,
     )
     async def get_status(runtime: KatalogApiRuntime = Depends(_runtime)) -> StatusResponse:
-        active_jobs, failed_jobs = await runtime.jobs.counts()
+        job_counts = await runtime.jobs.counts()
         return await run_blocking(
-            runtime.queries.status, active_jobs=active_jobs, failed_jobs=failed_jobs
+            runtime.queries.status,
+            active_jobs=job_counts[JobStatus.QUEUED] + job_counts[JobStatus.RUNNING],
+            failed_jobs=job_counts[JobStatus.FAILED],
+            queued_jobs=job_counts[JobStatus.QUEUED],
+            running_jobs=job_counts[JobStatus.RUNNING],
+            interrupted_jobs=job_counts[JobStatus.INTERRUPTED],
         )
 
     @app.get(
@@ -155,6 +166,56 @@ def create_app(
     )
     async def list_users(runtime: KatalogApiRuntime = Depends(_runtime)) -> tuple[UserSummary, ...]:
         return await run_blocking(runtime.queries.list_users)
+
+    @app.get(
+        "/api/v1/library/roots",
+        response_model=tuple[LibraryRootSummary, ...],
+        operation_id="v1_list_library_roots",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_library_roots(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[LibraryRootSummary, ...]:
+        return await run_blocking(runtime.queries.list_library_roots)
+
+    @app.post(
+        "/api/v1/library/roots",
+        response_model=LibraryRootSummary,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_library_root",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_library_root(
+        root: LibraryRootCreate, runtime: KatalogApiRuntime = Depends(_runtime)
+    ) -> LibraryRootSummary:
+        return await run_blocking(runtime.queries.create_library_root, root)
+
+    @app.patch(
+        "/api/v1/library/roots/{root_id}",
+        response_model=LibraryRootSummary,
+        operation_id="v1_update_library_root",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_library_root(
+        root_id: Annotated[int, Path(gt=0)],
+        root: LibraryRootUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> LibraryRootSummary:
+        return await run_blocking(runtime.queries.update_library_root, root_id, root)
+
+    @app.delete(
+        "/api/v1/library/roots/{root_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        operation_id="v1_delete_library_root",
+        responses=_ERROR_RESPONSES,
+    )
+    async def delete_library_root(
+        root_id: Annotated[int, Path(gt=0)],
+        deletion: LibraryRootDeletion,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        await run_blocking(runtime.queries.delete_library_root, root_id, confirm=deletion.confirm)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get(
         "/api/v1/library/items",
@@ -637,6 +698,18 @@ def create_app(
         return await runtime.jobs.get(job_id)
 
     @app.post(
+        "/api/v1/jobs/{job_id}/cancel",
+        response_model=BackgroundJob,
+        operation_id="v1_cancel_job",
+        responses=_ERROR_RESPONSES,
+    )
+    async def cancel_job(
+        job_id: str,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> BackgroundJob:
+        return await runtime.jobs.cancel(job_id)
+
+    @app.post(
         "/api/v1/playback/plans",
         response_model=PlaybackPlanLaunch,
         status_code=status.HTTP_201_CREATED,
@@ -945,12 +1018,12 @@ def create_app(
         scan: ScanRequest,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> JobSubmission:
-        job_id = await runtime.submit_scan(
+        job = await runtime.submit_scan(
             root_id=scan.library_root_id,
             include_unavailable=scan.include_unavailable,
             dry_run=scan.dry_run,
         )
-        return JobSubmission(job=await runtime.jobs.get(job_id))
+        return JobSubmission(job=job)
 
     @app.post(
         "/api/v1/artwork/fetch",
@@ -963,8 +1036,8 @@ def create_app(
         fetch: ArtworkFetchRequest,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> JobSubmission:
-        job_id = await runtime.submit_artwork_fetch(root_id=fetch.library_root_id)
-        return JobSubmission(job=await runtime.jobs.get(job_id))
+        job = await runtime.submit_artwork_fetch(root_id=fetch.library_root_id)
+        return JobSubmission(job=job)
 
     return app
 
@@ -1006,7 +1079,10 @@ def _install_exception_handlers(app: FastAPI) -> None:
         return _error_response(request, status.HTTP_404_NOT_FOUND, "not_found", str(error))
 
     @app.exception_handler(CatalogConflictError)
-    async def conflict(request: Request, error: CatalogConflictError) -> JSONResponse:
+    @app.exception_handler(JobConflictError)
+    async def conflict(
+        request: Request, error: CatalogConflictError | JobConflictError
+    ) -> JSONResponse:
         return _error_response(request, status.HTTP_409_CONFLICT, "revision_conflict", str(error))
 
     @app.exception_handler(CatalogValidationError)

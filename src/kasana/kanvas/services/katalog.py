@@ -10,6 +10,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.kanvas.viewmodels.administration import (
+    AdministrationOverviewView,
+    JobView,
+    LibraryRootView,
+    MetadataReviewItemView,
+    job_view,
+    library_root_view,
+    metadata_candidate_view,
+    overview_from_status,
+)
 from kasana.kanvas.viewmodels.collections import (
     CollectionDetailView,
     CollectionMemberView,
@@ -24,6 +34,7 @@ from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.kanvas.viewmodels.item import ItemDetailView
 from kasana.kanvas.viewmodels.library import LibraryFilters, PosterState, PosterView
 from kasana.katalog.public import (
+    ArtworkFetchRequest,
     ArtworkKind,
     ArtworkSelection,
     Availability,
@@ -36,7 +47,14 @@ from kasana.katalog.public import (
     KatalogClient,
     LibraryItemKind,
     LibraryItemSummary,
+    LibraryRootCreate,
+    LibraryRootSummary,
+    LibraryRootUpdate,
+    MetadataMatchRequest,
+    MetadataRejectRequest,
+    MetadataReviewCandidate,
     PlaybackStateResponse,
+    ScanRequest,
     WatchOrderCreate,
     WatchOrderDetail,
     WatchOrderEntryCreate,
@@ -130,6 +148,116 @@ class KanvasKatalogService:
                 posters=tuple(poster_from_summary(item) for item in added_page.items),
             ),
         )
+
+    async def administration_overview(self) -> AdministrationOverviewView:
+        """Load only the small operational inputs needed by the overview."""
+
+        async with self._client() as client:
+            status, roots, review = await gather(
+                client.status(), client.list_library_roots(), client.metadata_review(limit=100)
+            )
+        return overview_from_status(
+            status,
+            unavailable_root_count=sum(not root.available for root in roots),
+            unresolved_metadata_count=len({candidate.item_id for candidate in review.items}),
+        )
+
+    async def administration_jobs(
+        self, *, cursor: str | None, limit: int = 50
+    ) -> tuple[tuple[JobView, ...], str | None]:
+        """Return one bounded administration job page."""
+
+        async with self._client() as client:
+            page = await client.list_jobs(cursor=cursor, limit=limit)
+        return tuple(job_view(job) for job in page.items), page.next_cursor
+
+    async def administration_roots(self) -> tuple[LibraryRootView, ...]:
+        async with self._client() as client:
+            roots = await client.list_library_roots()
+        return tuple(library_root_view(root) for root in roots)
+
+    async def metadata_review_items(
+        self, *, cursor: str | None, limit: int = 50
+    ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
+        """Group the legacy candidate page by local item before rendering the workflow."""
+
+        async with self._client() as client:
+            page = await client.metadata_review(cursor=cursor, limit=limit)
+            grouped: dict[int, list[MetadataReviewCandidate]] = {}
+            for candidate in page.items:
+                grouped.setdefault(candidate.item_id, []).append(candidate)
+            local_items = await gather(*(client.get_library_item(item_id) for item_id in grouped))
+        views: list[MetadataReviewItemView] = []
+        for local in local_items:
+            if local.item is None:
+                continue
+            item = local.item
+            candidates = grouped[item.id]
+            views.append(
+                MetadataReviewItemView(
+                    itemId=item.id,
+                    title=item.title,
+                    year=item.year,
+                    kind=item.kind.value,
+                    posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+                    candidates=tuple(
+                        metadata_candidate_view(candidate) for candidate in candidates
+                    ),
+                )
+            )
+        return tuple(views), page.next_cursor
+
+    async def match_metadata_candidate(
+        self, item_id: int, *, provider: str, provider_id: str
+    ) -> None:
+        async with self._client() as client:
+            await client.match_metadata(
+                item_id, MetadataMatchRequest(provider=provider, provider_id=provider_id)
+            )
+
+    async def reject_metadata_candidate(
+        self, item_id: int, *, provider: str, provider_id: str
+    ) -> None:
+        async with self._client() as client:
+            await client.reject_metadata(
+                item_id, MetadataRejectRequest(provider=provider, provider_id=provider_id)
+            )
+
+    async def ignore_metadata_item(self, item_id: int) -> None:
+        async with self._client() as client:
+            await client.ignore_metadata(item_id)
+
+    async def refresh_metadata_item(self, item_id: int) -> None:
+        async with self._client() as client:
+            await client.refresh_metadata(item_id)
+
+    async def submit_scan(self, request: ScanRequest) -> JobView:
+        async with self._client() as client:
+            submission = await client.submit_scan(request)
+        return job_view(submission.job)
+
+    async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobView:
+        async with self._client() as client:
+            submission = await client.submit_artwork_fetch(request)
+        return job_view(submission.job)
+
+    async def cancel_job(self, job_id: str) -> JobView:
+        async with self._client() as client:
+            return job_view(await client.cancel_job(job_id))
+
+    async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
+        async with self._client() as client:
+            return await client.create_library_root(request)
+
+    async def update_library_root(
+        self, root_id: int, request: LibraryRootUpdate
+    ) -> LibraryRootSummary:
+        async with self._client() as client:
+            return await client.update_library_root(root_id, request)
+
+    async def delete_library_root(self, root_id: int, *, confirm: bool) -> None:
+        async with self._client() as client:
+            await client.delete_library_root(root_id, confirm=confirm)
 
     async def library_page(
         self, filters: LibraryFilters, *, cursor: str | None

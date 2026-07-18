@@ -32,3 +32,4 @@ class KatalogSettings(KSettings):
     media_access_token_ttl_seconds: int = Field(default=10 * 60, ge=30, le=60 * 60)
     playback_max_queue_size: int = Field(default=100, ge=1, le=500)
     media_transfer_chunk_size: int = Field(default=64 * 1024, ge=4 * 1024, le=1024 * 1024)
+    maintenance_max_active_jobs: int = Field(default=4, ge=1, le=32)

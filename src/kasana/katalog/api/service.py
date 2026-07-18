@@ -42,6 +42,10 @@ from kasana.katalog.api.contracts import (
     LibraryItemDetail,
     LibraryItemKind,
     LibraryItemSummary,
+    LibraryRootCreate,
+    LibraryRootKind,
+    LibraryRootSummary,
+    LibraryRootUpdate,
     ManualQueuePlaybackContext,
     MediaStreamSummary,
     MediaTechnicalSummary,
@@ -221,7 +225,15 @@ class KatalogQueryService:
         with self._database.engine.connect() as connection:
             connection.exec_driver_sql("SELECT 1")
 
-    def status(self, *, active_jobs: int, failed_jobs: int) -> StatusResponse:
+    def status(
+        self,
+        *,
+        active_jobs: int,
+        failed_jobs: int,
+        queued_jobs: int = 0,
+        running_jobs: int = 0,
+        interrupted_jobs: int = 0,
+    ) -> StatusResponse:
         def load(session: Session) -> StatusResponse:
             revision = self._database_revision()
             return StatusResponse(
@@ -242,6 +254,9 @@ class KatalogQueryService:
                 or 0,
                 active_job_count=active_jobs,
                 failed_job_count=failed_jobs,
+                queued_job_count=queued_jobs,
+                running_job_count=running_jobs,
+                interrupted_job_count=interrupted_jobs,
             )
 
         return self._database.run_transaction(load)
@@ -257,6 +272,78 @@ class KatalogQueryService:
                 for user in session.scalars(select(User).order_by(User.id))
             )
         )
+
+    def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
+        return self._database.run_transaction(
+            lambda session: tuple(
+                _library_root_summary(session, root)
+                for root in session.scalars(select(Kura).order_by(Kura.id))
+            )
+        )
+
+    def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
+        path = _validated_library_root_path(request.path)
+
+        def create(session: Session) -> LibraryRootSummary:
+            if session.scalar(select(Kura.id).where(Kura.path == str(path))) is not None:
+                raise CatalogConflictError("A library root already uses this path.")
+            root = Kura(
+                path=str(path),
+                expected_media_kind=ZaisanKind(request.expected_kind.value),
+                default_tags=list(request.default_tags),
+                enabled=request.enabled,
+                display_name=request.display_name.strip() if request.display_name else None,
+            )
+            session.add(root)
+            session.flush()
+            return _library_root_summary(session, root)
+
+        return self._database.run_transaction(create)
+
+    def update_library_root(self, root_id: int, request: LibraryRootUpdate) -> LibraryRootSummary:
+        path = _validated_library_root_path(request.path) if request.path is not None else None
+
+        def change(session: Session) -> LibraryRootSummary:
+            root = _require(session, Kura, root_id, "Library root")
+            if path is not None:
+                duplicate = session.scalar(
+                    select(Kura.id).where(Kura.path == str(path), Kura.id != root_id)
+                )
+                if duplicate is not None:
+                    raise CatalogConflictError("A library root already uses this path.")
+                root.path = str(path)
+            if request.expected_kind is not None:
+                root.expected_media_kind = ZaisanKind(request.expected_kind.value)
+            if request.default_tags is not None:
+                root.default_tags = list(request.default_tags)
+            if request.enabled is not None:
+                root.enabled = request.enabled
+            if request.display_name is not None:
+                root.display_name = request.display_name.strip() or None
+            session.flush()
+            return _library_root_summary(session, root)
+
+        return self._database.run_transaction(change)
+
+    def delete_library_root(self, root_id: int, *, confirm: bool) -> None:
+        def remove(session: Session) -> None:
+            root = _require(session, Kura, root_id, "Library root")
+            count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Zaisan)
+                    .where(Zaisan.library_root_id == root_id)
+                )
+                or 0
+            )
+            if count and not confirm:
+                raise CatalogValidationError(
+                    "Deleting a root with catalogued items requires confirm=true."
+                )
+            session.delete(root)
+            session.flush()
+
+        self._database.run_transaction(remove)
 
     def list_items(
         self, *, filters: LibraryItemFilters, cursor: str | None, limit: int
@@ -2472,6 +2559,43 @@ def _require[Model](
 
 def _count(session: Session, model: type[object]) -> int:
     return session.scalar(select(func.count()).select_from(model)) or 0
+
+
+def _validated_library_root_path(value: str) -> Path:
+    path = Path(value).expanduser().resolve(strict=False)
+    if path.is_file():
+        raise CatalogValidationError("A library root path must not be a file.")
+    return path
+
+
+def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
+    item_count = (
+        session.scalar(
+            select(func.count()).select_from(Zaisan).where(Zaisan.library_root_id == root.id)
+        )
+        or 0
+    )
+    media_file_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(MediaFile)
+            .join(Zaisan)
+            .where(Zaisan.library_root_id == root.id)
+        )
+        or 0
+    )
+    return LibraryRootSummary(
+        id=root.id,
+        display_name=root.display_name,
+        path=root.path,
+        expected_kind=LibraryRootKind(root.expected_media_kind.value),
+        default_tags=tuple(root.default_tags),
+        enabled=root.enabled,
+        available=Path(root.path).is_dir(),
+        item_count=item_count,
+        media_file_count=media_file_count,
+        last_scan_completed_at=root.last_scan_completed_at,
+    )
 
 
 def _page_limit(limit: int) -> int:
