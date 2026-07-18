@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from nicegui import ui
 
-from kasana.kanvas.components.controls import icon_svg
+from kasana.kanvas.components.controls import IconName, icon_svg
 
 
 @dataclass(frozen=True)
@@ -15,15 +15,15 @@ class NavigationItem:
 
     route: str
     label: str
-    icon: str
+    icon: IconName
 
 
 _NAVIGATION = (
-    NavigationItem("/", "Home", "home"),
-    NavigationItem("/library", "Library", "library"),
-    NavigationItem("/collections", "Collections", "collections"),
-    NavigationItem("/search", "Search", "search"),
-    NavigationItem("/administration", "Administration", "admin"),
+    NavigationItem("/", "Home", IconName.HOME),
+    NavigationItem("/library", "Library", IconName.LIBRARY),
+    NavigationItem("/collections", "Collections", IconName.COLLECTIONS),
+    NavigationItem("/search", "Search", IconName.SEARCH),
+    NavigationItem("/administration", "Administration", IconName.ADMINISTRATION),
 )
 
 

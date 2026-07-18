@@ -20,8 +20,15 @@ def test_component_settings_use_distinct_environment_prefixes(monkeypatch: Monke
     assert KatalogSettings().api_port == 9123
     assert KestrelSettings().player_backend is PlayerBackend.VLC
     assert Kanvas_Settings().port == 5370
+    assert Kanvas_Settings().auto_browser_open is False
     assert KestrelSettings().katalog_url == "http://127.0.0.1:5373"
     assert str(KourierSettings().katalog_url) == "http://127.0.0.1:5373/"
+
+
+def test_kanvas_auto_browser_open_reads_typed_environment(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("KASANA_KANVAS_AUTO_BROWSER_OPEN", "true")
+
+    assert Kanvas_Settings().auto_browser_open is True
 
 
 def test_tmdb_settings_read_typed_provider_environment(monkeypatch: MonkeyPatch) -> None:

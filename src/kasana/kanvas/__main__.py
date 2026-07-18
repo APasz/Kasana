@@ -33,6 +33,7 @@ def console_main() -> None:
         dark=True,
         reload=False,
         tailwind=False,
+        show=settings.auto_browser_open,
         show_welcome_message=False,
     )
 

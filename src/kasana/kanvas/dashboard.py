@@ -11,11 +11,13 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from kasana.kanvas.components.controls import action_button, icon_action
+from kasana.kanvas.components.controls import ButtonType, IconName, action_button, icon_action
 from kasana.kanvas.components.feedback import feedback_state, skeleton_posters
+from kasana.kanvas.components.inputs import text_input
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
-from kasana.kanvas.components.shell import add_kanvas_head, page_shell
+from kasana.kanvas.components.shell import add_kanvas_head, kanvas_asset_versions, page_shell
+from kasana.kanvas.components.typography import page_title, section_title
 from kasana.kanvas.routes.home import render_home
 from kasana.kanvas.routes.item import render_item
 from kasana.kanvas.routes.library import render_library
@@ -90,10 +92,12 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     global _assets_registered, _head_registered, _pages_registered, _settings
     _settings = settings or Kanvas_Settings()
     if not _assets_registered:
-        app.add_static_files("/_kanvas", _STATIC_DIRECTORY, max_cache_age=3600)
+        app.add_static_files(
+            "/_kanvas", _STATIC_DIRECTORY, max_cache_age=_settings.static_max_cache_age
+        )
         _assets_registered = True
     if not _head_registered:
-        add_kanvas_head(_settings)
+        add_kanvas_head(_settings, kanvas_asset_versions(_STATIC_DIRECTORY))
         _head_registered = True
     if _pages_registered:
         return
@@ -142,7 +146,7 @@ async def collections_page() -> None:
     """Provide the initial destination without pre-empting the later collections editor."""
 
     with page_shell(_settings, "/collections", "Collections"):
-        ui.label("Collections").classes("k-page-title")
+        page_title("Collections")
         feedback_state(
             "Collections are next", "The first Kanvas pass keeps collection editing out of scope."
         )
@@ -152,21 +156,24 @@ async def search_page() -> None:
     """Provide a focused route into the real library search filter."""
 
     with page_shell(_settings, "/search", "Search"):
-        ui.label("Search").classes("k-page-title")
+        page_title("Search")
         with ui.element("form").classes("k-search-start").props('method="get" action="/library"'):
-            ui.element("input").classes("k-input").props(
-                'name="search" type="search" placeholder="Search library" '
-                'aria-label="Search library" data-kanvas-search="true" autofocus'
+            search = text_input(
+                name="search",
+                input_type="search",
+                placeholder="Search library",
+                aria_label="Search library",
+                autofocus=True,
             )
-            with ui.element("button").classes("k-button k-button--primary").props('type="submit"'):
-                ui.label("Search").classes("k-button__label")
+            search.props('data-kanvas-search="true"')
+            action_button("Search", primary=True, button_type=ButtonType.SUBMIT)
 
 
 async def administration_page() -> None:
     """Keep future administration visible but deliberately unimplemented in this slice."""
 
     with page_shell(_settings, "/administration", "Administration"):
-        ui.label("Administration").classes("k-page-title")
+        page_title("Administration")
         feedback_state(
             "Not in this pass",
             "Metadata review and library administration remain in Katalog for now.",
@@ -179,8 +186,8 @@ async def design_page() -> None:
     if not _settings.design_route_enabled:
         raise HTTPException(status_code=404, detail="Design review is disabled.")
     with page_shell(_settings, "", "Kanvas design review"):
-        ui.label("Kanvas design review").classes("k-page-title")
-        ui.label("Tokens").classes("k-section-title")
+        page_title("Kanvas design review")
+        section_title("Tokens")
         with ui.element("div").classes("k-token-grid"):
             for token in (
                 "--k-bg",
@@ -196,16 +203,13 @@ async def design_page() -> None:
                 with ui.element("div").classes("k-token"):
                     ui.element("span").classes("k-token__swatch").style(f"background: var({token})")
                     ui.label(token).classes("k-token__name")
-        ui.label("Controls and focus").classes("k-section-title")
+        section_title("Controls and focus")
         with ui.element("div").classes("k-action-row"):
             action_button("Primary", primary=True)
             action_button("Secondary")
-            icon_action("Play", "play")
-        with ui.element("span").classes("k-input-reveal"):
-            ui.element("input").classes("k-input k-input--review").props(
-                'placeholder="Input" aria-label="Review input"'
-            )
-        ui.label("Poster states").classes("k-section-title")
+            icon_action("Play", IconName.PLAY)
+        text_input(name="review", placeholder="Input", aria_label="Review input")
+        section_title("Poster states")
         with ui.element("div").classes("k-design-poster-grid"):
             for index, state in enumerate(PosterState):
                 poster_card(
@@ -219,7 +223,7 @@ async def design_page() -> None:
                         available=state is not PosterState.UNAVAILABLE,
                     )
                 )
-        ui.label("Progress and feedback").classes("k-section-title")
+        section_title("Progress and feedback")
         progress_indicator(62)
         skeleton_posters(4)
         feedback_state("Empty state", "A quiet, local state for no matching items.")

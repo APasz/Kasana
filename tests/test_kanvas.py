@@ -12,17 +12,23 @@ import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from nicegui import app
 from nicegui.client import Client
+from nicegui.element import Element
 from nicegui.page import page
 from starlette.requests import Request
 from starlette.routing import Route
 
+from kasana.kanvas import __main__ as kanvas_main
 from kasana.kanvas.components.controls import NavigationAction, keyboard_action
 from kasana.kanvas.components.feedback import feedback_state, skeleton_posters
 from kasana.kanvas.components.media_rail import media_rail
 from kasana.kanvas.components.navigation import primary_navigation
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
-from kasana.kanvas.components.shell import page_shell
+from kasana.kanvas.components.shell import (
+    kanvas_asset_versions,
+    kanvas_head_html,
+    page_shell,
+)
 from kasana.kanvas.dashboard import (
     administration_page,
     build_dashboard,
@@ -306,6 +312,168 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         await design_page()
 
 
+async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None:
+    with Client(page("")) as library_client:
+        render_library(
+            Kanvas_Settings(),
+            LibraryFilters(
+                search="poster",
+                kind=LibraryItemKind.MOVIE,
+                anime=True,
+                watched=WatchedFilter.IN_PROGRESS,
+                availability=Availability.AVAILABLE,
+            ),
+        )
+        library_search = _input_named(library_client, "search")
+
+        assert "k-input" in _element_classes(library_search)
+        assert _element_props(library_search)["type"] == "search"
+        assert _element_props(library_search)["value"] == "poster"
+        assert "k-control-shell" in _element_classes(_parent_element(library_search))
+        assert "k-input-shell" in _element_classes(_parent_element(library_search))
+        library_year = _input_named(library_client, "year")
+        assert "k-input" in _element_classes(library_year)
+        assert "k-input--year" in _element_classes(library_year)
+        assert "k-input-shell--year" in _element_classes(_parent_element(library_year))
+        for name in ("kind", "watched", "availability"):
+            select = _select_named(library_client, name)
+            assert "k-select" in _element_classes(select)
+            assert "k-control-shell" in _element_classes(_parent_element(select))
+            assert "k-select-wrap" in _element_classes(_parent_element(select))
+        anime = _input_named(library_client, "anime")
+        assert _element_props(anime)["checked"] is True
+        assert "k-control-shell" in _element_classes(_parent_element(anime))
+        assert "k-check" in _element_classes(_parent_element(anime))
+        apply_button = next(
+            element
+            for element in library_client.elements.values()
+            if element.tag == "button" and _element_props(element).get("aria-label") == "Apply"
+        )
+        assert _element_props(apply_button)["type"] == "submit"
+
+    with Client(page("")) as search_client:
+        await search_page()
+        search_page_input = _input_named(search_client, "search")
+
+        assert "k-input" in _element_classes(search_page_input)
+        assert _element_props(search_page_input)["autofocus"] is True
+        assert "k-control-shell" in _element_classes(_parent_element(search_page_input))
+        assert "k-input-shell" in _element_classes(_parent_element(search_page_input))
+        search_button = next(
+            element
+            for element in search_client.elements.values()
+            if element.tag == "button" and _element_props(element).get("aria-label") == "Search"
+        )
+        assert _element_props(search_button)["type"] == "submit"
+
+    with Client(page("")) as design_client:
+        await design_page()
+        review_input = _input_named(design_client, "review")
+
+        assert "k-input" in _element_classes(review_input)
+        assert "k-control-shell" in _element_classes(_parent_element(review_input))
+        assert "k-input-shell" in _element_classes(_parent_element(review_input))
+
+
+def test_poster_component_passes_one_safe_payload_to_the_browser_renderer() -> None:
+    poster = PosterView(
+        id=7,
+        title='Poster "title"',
+        href="/item/7",
+        progressPercent=25,
+        available=True,
+    )
+
+    with Client(page("")) as client:
+        poster_card(poster)
+        element = next(
+            element for element in client.elements.values() if element.tag == "kanvas-poster"
+        )
+
+    payload = json.loads(cast(str, _element_props(element)["poster"]))
+    assert payload == poster.model_dump(by_alias=True, mode="json")
+
+
+def _input_named(client: Client, name: str) -> Element:
+    return next(
+        element
+        for element in client.elements.values()
+        if element.tag == "input" and _element_props(element).get("name") == name
+    )
+
+
+def _select_named(client: Client, name: str) -> Element:
+    return next(
+        element
+        for element in client.elements.values()
+        if element.tag == "select" and _element_props(element).get("name") == name
+    )
+
+
+def _parent_element(element: Element) -> Element:
+    assert element.parent_slot is not None
+    return element.parent_slot.parent
+
+
+def _element_classes(element: Element) -> list[str]:
+    """Expose NiceGUI's internal test-only rendered class list."""
+
+    return element._classes  # pyright: ignore[reportPrivateUsage]
+
+
+def _element_props(element: Element) -> dict[str, object]:
+    """Expose NiceGUI's internal test-only rendered attributes."""
+
+    return cast(dict[str, object], element._props)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> None:
+    css_path = tmp_path / "kanvas.css"
+    javascript_path = tmp_path / "kanvas.js"
+    css_path.write_text(".k-app { color: white; }", encoding="utf-8")
+    javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
+
+    initial_versions = kanvas_asset_versions(tmp_path)
+    head = kanvas_head_html(initial_versions)
+    assert initial_versions == kanvas_asset_versions(tmp_path)
+    assert f"/_kanvas/kanvas.css?v={initial_versions.css}" in head
+    assert f"/_kanvas/kanvas.js?v={initial_versions.javascript}" in head
+
+    css_path.write_text(".k-app { color: black; }", encoding="utf-8")
+
+    assert kanvas_asset_versions(tmp_path).css != initial_versions.css
+    assert kanvas_asset_versions(tmp_path).javascript == initial_versions.javascript
+
+
+def test_development_mode_disables_static_asset_caching() -> None:
+    assert Kanvas_Settings().static_max_cache_age == 3600
+    assert Kanvas_Settings(development_mode=True).static_max_cache_age == 0
+
+
+def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -> None:
+    run_options: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> None:
+        run_options.append(kwargs)
+
+    def fake_main() -> None:
+        pass
+
+    def fake_build_dashboard(_settings: Kanvas_Settings) -> None:
+        pass
+
+    monkeypatch.setattr(kanvas_main, "main", fake_main)
+    monkeypatch.setattr(kanvas_main, "build_dashboard", fake_build_dashboard)
+    monkeypatch.setattr(kanvas_main.ui, "run", fake_run)
+
+    kanvas_main.console_main()
+
+    monkeypatch.setenv("KASANA_KANVAS_AUTO_BROWSER_OPEN", "true")
+    kanvas_main.console_main()
+
+    assert [options["show"] for options in run_options] == [False, True]
+
+
 async def test_service_transforms_real_public_contracts_through_one_fake_client(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -375,6 +543,17 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     css = (static_root / "kanvas.css").read_text()
     javascript = (static_root / "kanvas.js").read_text()
     assert "prefers-reduced-motion: reduce" in css
+    assert ".k-control-shell" in css
+    assert ".k-input-shell" in css
+    assert ".k-input--review" not in css
+    assert ".k-input-reveal" not in css
+    assert ".k-input:focus-visible { outline: none; }" in css
+    assert ".k-select:focus-visible { outline: none; }" in css
+    assert ".k-check input:focus-visible { outline: none; }" in css
+    assert ".k-control-shell:focus-within::after" in css
+    assert "background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%" in css
     assert "IntersectionObserver" in javascript
     assert "MAX_MOUNTED_POSTERS" in javascript
+    assert "kanvas-poster" in javascript
+    assert "posterMarkup" in javascript
     assert "sessionStorage" in javascript

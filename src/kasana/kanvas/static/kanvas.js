@@ -6,6 +6,32 @@
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
 
+  const POSTER_STATES = new Set([
+    'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
+  ]);
+
+  const normalisePoster = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const poster = value;
+    if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id)) return null;
+    if (typeof poster.title !== 'string' || !poster.title) return null;
+    if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
+    if (typeof poster.available !== 'boolean') return null;
+    if (poster.posterUrl != null && typeof poster.posterUrl !== 'string') return null;
+    if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
+    if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
+    if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
+    return {
+      id: poster.id,
+      title: poster.title,
+      href: poster.href,
+      posterUrl: poster.posterUrl ?? null,
+      subtitle: poster.subtitle ?? null,
+      progressPercent: poster.progressPercent ?? null,
+      state: poster.state
+    };
+  };
+
   const posterMarkup = (poster) => {
     const progress = poster.progressPercent == null ? '' :
       `<span class="k-progress" aria-label="Playback progress"><span class="k-progress__value" style="--k-progress:${poster.progressPercent}%"></span></span>`;
@@ -18,6 +44,47 @@
       <span class="k-poster__art">${artwork}${progress}${watched}</span>
       <span class="k-poster__meta"><span class="k-poster__title">${escapeHtml(poster.title)}</span>${subtitle}</span>
     </a>`;
+  };
+
+  class KanvasPoster extends HTMLElement {
+    static get observedAttributes() {
+      return ['poster'];
+    }
+
+    connectedCallback() {
+      this.render();
+    }
+
+    attributeChangedCallback() {
+      if (this.isConnected) this.render();
+    }
+
+    set poster(value) {
+      this.setAttribute('poster', typeof value === 'string' ? value : JSON.stringify(value));
+    }
+
+    render() {
+      const rawPoster = this.getAttribute('poster');
+      if (!rawPoster) {
+        this.replaceChildren();
+        return;
+      }
+      try {
+        const poster = normalisePoster(JSON.parse(rawPoster));
+        if (!poster) throw new TypeError('Invalid poster payload');
+        this.innerHTML = posterMarkup(poster);
+      } catch (_) {
+        this.replaceChildren();
+      }
+    }
+  }
+
+  const posterElement = (value) => {
+    const poster = normalisePoster(value);
+    if (!poster) throw new TypeError('Invalid poster payload');
+    const element = document.createElement('kanvas-poster');
+    element.setAttribute('poster', JSON.stringify(poster));
+    return element;
   };
 
   class KanvasPosterGrid extends HTMLElement {
@@ -74,9 +141,7 @@
         } else {
           const fragment = document.createDocumentFragment();
           for (const item of items) {
-            const template = document.createElement('template');
-            template.innerHTML = posterMarkup(item).trim();
-            fragment.append(template.content.firstChild);
+            fragment.append(posterElement(item));
           }
           this.grid.append(fragment);
           this.trimMountedPosters();
@@ -140,6 +205,7 @@
     }
   }
 
+  if (!customElements.get('kanvas-poster')) customElements.define('kanvas-poster', KanvasPoster);
   if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);
 
   const movePosterFocus = (current, key) => {

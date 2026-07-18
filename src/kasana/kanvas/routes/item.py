@@ -10,6 +10,7 @@ from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import page_shell
+from kasana.kanvas.components.typography import section_title
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
@@ -66,7 +67,7 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
 
         if detail.children:
             with ui.element("section").classes("k-item-children").props('aria-label="Children"'):
-                ui.label("Episodes").classes("k-section-title")
+                section_title("Episodes")
                 with ui.element("div").classes("k-child-grid"):
                     for child in detail.children:
                         poster_card(child)

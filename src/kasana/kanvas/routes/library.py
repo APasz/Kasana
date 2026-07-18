@@ -7,7 +7,10 @@ from urllib.parse import urlencode
 
 from nicegui import ui
 
+from kasana.kanvas.components.controls import ButtonType, action_button
+from kasana.kanvas.components.inputs import SelectOption, checkbox_input, select_input, text_input
 from kasana.kanvas.components.shell import page_shell
+from kasana.kanvas.components.typography import page_title
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.library import LibraryFilters
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
@@ -17,7 +20,7 @@ def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
     """Render the native filter strip and a lazy client-side bounded grid."""
 
     with page_shell(settings, "/library", "Library"):
-        ui.label("Library").classes("k-page-title")
+        page_title("Library")
         _filter_strip(filters)
         source = "/kanvas/data/library?" + urlencode(_filter_query(filters))
         ui.html(f'<kanvas-poster-grid source="{escape(source, quote=True)}"></kanvas-poster-grid>')
@@ -25,73 +28,75 @@ def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
 
 def _filter_strip(filters: LibraryFilters) -> None:
     with ui.element("form").classes("k-filter-strip").props('method="get" action="/library"'):
-        search = (
-            ui.element("input")
-            .classes("k-input")
-            .props(
-                'name="search" type="search" placeholder="Search" aria-label="Search library" '
-                'data-kanvas-search="true"'
-            )
+        search = text_input(
+            name="search",
+            input_type="search",
+            value=filters.search,
+            placeholder="Search",
+            aria_label="Search library",
         )
-        if filters.search is not None:
-            search.props(f'value="{escape(filters.search, quote=True)}"')
-        _select("kind", "Kind", _kind_options(), filters.kind.value if filters.kind else "")
-        _select(
-            "watched",
-            "Watched",
-            _watched_options(),
-            filters.watched.value if filters.watched else "",
+        search.props('data-kanvas-search="true"')
+        select_input(
+            name="kind",
+            aria_label="Kind",
+            options=_kind_options(),
+            value=filters.kind.value if filters.kind else "",
         )
-        _select(
-            "availability",
-            "Availability",
-            _availability_options(),
-            filters.availability.value if filters.availability else "",
+        select_input(
+            name="watched",
+            aria_label="Watched",
+            options=_watched_options(),
+            value=filters.watched.value if filters.watched else "",
         )
-        year = (
-            ui.element("input")
-            .classes("k-input k-input--year")
-            .props(
-                'name="year" type="number" min="1" max="9999" placeholder="Year" '
-                'aria-label="Release year"'
-            )
+        select_input(
+            name="availability",
+            aria_label="Availability",
+            options=_availability_options(),
+            value=filters.availability.value if filters.availability else "",
         )
-        if filters.year is not None:
-            year.props(f'value="{filters.year}"')
-        with ui.element("label").classes("k-check"):
-            anime = ui.element("input").props('name="anime" type="checkbox" value="1"')
-            if filters.anime:
-                anime.props("checked")
-            ui.label("Anime")
-        with ui.element("button").classes("k-button").props('type="submit"'):
-            ui.label("Apply").classes("k-button__label")
+        year = text_input(
+            name="year",
+            input_type="number",
+            value=str(filters.year) if filters.year is not None else None,
+            placeholder="Year",
+            aria_label="Release year",
+            classes="k-input--year",
+            shell_classes="k-input-shell--year",
+        )
+        year.props('min="1" max="9999"')
+        checkbox_input(
+            name="anime",
+            label="Anime",
+            value="1",
+            checked=filters.anime,
+        )
+        action_button("Apply", button_type=ButtonType.SUBMIT)
 
 
-def _select(name: str, label: str, options: tuple[tuple[str, str], ...], selected: str) -> None:
-    with ui.element("label").classes("k-select-wrap"):
-        ui.label(label).classes("k-sr-only")
-        with ui.element("select").classes("k-select").props(f'name="{name}" aria-label="{label}"'):
-            for value, option_label in options:
-                selected_attribute = " selected" if value == selected else ""
-                with ui.element("option").props(f'value="{value}"{selected_attribute}'):
-                    ui.label(option_label)
-
-
-def _kind_options() -> tuple[tuple[str, str], ...]:
-    return (("", "All kinds"), *((kind.value, kind.value.title()) for kind in LibraryItemKind))
-
-
-def _watched_options() -> tuple[tuple[str, str], ...]:
+def _kind_options() -> tuple[SelectOption, ...]:
     return (
-        ("", "Any progress"),
-        *((watched.value, watched.value.replace("_", " ").title()) for watched in WatchedFilter),
+        SelectOption("", "All kinds"),
+        *(SelectOption(kind.value, kind.value.title()) for kind in LibraryItemKind),
     )
 
 
-def _availability_options() -> tuple[tuple[str, str], ...]:
+def _watched_options() -> tuple[SelectOption, ...]:
     return (
-        ("", "Any availability"),
-        *((availability.value, availability.value.title()) for availability in Availability),
+        SelectOption("", "Any progress"),
+        *(
+            SelectOption(watched.value, watched.value.replace("_", " ").title())
+            for watched in WatchedFilter
+        ),
+    )
+
+
+def _availability_options() -> tuple[SelectOption, ...]:
+    return (
+        SelectOption("", "Any availability"),
+        *(
+            SelectOption(availability.value, availability.value.title())
+            for availability in Availability
+        ),
     )
 
 
