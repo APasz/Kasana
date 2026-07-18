@@ -1,4 +1,9 @@
 {
     "basedpyright.analysis.diagnosticMode": "workspace",
-    "python.languageServer": "None"
+    "python.languageServer": "None",
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
 }
