@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kasana"
+version = "0.1.0"
+description = "Personal media catalogue, playback tracking, and launcher system."
+readme = "README.md"
+requires-python = "==3.14.*"
+license = { text = "MIT" }
+authors = [{ name = "APasz" }]
+dependencies = [
+    "aiohttp>=3.13.3",
+    "alembic>=1.18.1",
+    "fastapi>=0.139.1",
+    "nicegui>=3.4.1",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "sqlalchemy>=2.0.45",
+    "typer>=0.21.0",
+    "uvicorn>=0.51.0",
+]
+
+[project.scripts]
+kasana-katalog = "kasana.katalog.cli.app:console_main"
+kasana-katalog-api = "kasana.katalog.api.server:main"
+kasana-kanvas = "kasana.kanvas.__main__:main"
+kasana-kestrel = "kasana.kestrel.__main__:main"
+kasana-kourier = "kasana.kourier.__main__:main"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.37.1",
+    "coverage>=7.13.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kasana"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=kasana --cov-report=term-missing"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["kasana"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kasana"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/versions/*.py" = ["E501"]
+"src/kasana/katalog/api/app.py" = ["B008"]
+"src/kasana/katalog/api/*.py" = ["E501"]
+"src/kasana/katalog/client.py" = ["E501"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+venvPath = "."
+venv = ".venv"

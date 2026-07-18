@@ -1,0 +1,295 @@
+"""Versioned, provider-independent HTTP contracts for Katalog."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class LibraryItemKind(StrEnum):
+    MOVIE = "movie"
+    SERIES = "series"
+    SEASON = "season"
+    EPISODE = "episode"
+    SPECIAL = "special"
+    EXTRA = "extra"
+
+
+class Availability(StrEnum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    UNAVAILABLE = "unavailable"
+
+
+class WatchedFilter(StrEnum):
+    WATCHED = "watched"
+    UNWATCHED = "unwatched"
+    IN_PROGRESS = "in_progress"
+
+
+class ArtworkKind(StrEnum):
+    POSTER = "poster"
+    BACKDROP = "backdrop"
+    STILL = "still"
+
+
+class WatchOrderKind(StrEnum):
+    AIR = "air"
+    CHRONOLOGICAL = "chronological"
+    RECOMMENDED = "recommended"
+    CUSTOM = "custom"
+
+
+class JobStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class APIModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class HealthResponse(APIModel):
+    status: Literal["ok"] = "ok"
+    api_version: Literal["v1"] = "v1"
+
+
+class StatusResponse(APIModel):
+    database_revision: str | None
+    item_count: int = Field(ge=0)
+    media_file_count: int = Field(ge=0)
+    available_file_count: int = Field(ge=0)
+    unresolved_audit_issue_count: int = Field(ge=0)
+    active_job_count: int = Field(ge=0)
+    failed_job_count: int = Field(ge=0)
+
+
+class ArtworkSelection(APIModel):
+    id: int = Field(gt=0)
+    kind: ArtworkKind
+    url: str = Field(pattern=r"^/api/v1/library/items/\d+/artwork/\d+$")
+    content_type: str = Field(min_length=1, max_length=100)
+    size_bytes: int = Field(ge=0)
+
+
+class LibraryItemSummary(APIModel):
+    id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=1_000)
+    kind: LibraryItemKind
+    year: int | None = Field(default=None, ge=1, le=9999)
+    parent_id: int | None = Field(default=None, gt=0)
+    availability: Availability
+    tags: tuple[str, ...] = Field(default=(), max_length=50)
+    artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=10)
+
+
+class LibraryItemDetailBase(LibraryItemSummary):
+    overview: str | None = Field(default=None, max_length=20_000)
+    release_date: str | None = None
+    season_number: int | None = Field(default=None, ge=0)
+    episode_number: int | None = Field(default=None, ge=0)
+    playback_url: str = Field(pattern=r"^/api/v1/playback/items/\d+$")
+
+
+class MovieItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_movie_kind(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.MOVIE)
+        return self
+
+
+class SeriesItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_series_kind(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.SERIES)
+        return self
+
+
+class SeasonItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_season_fields(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.SEASON)
+        if self.season_number is None:
+            msg = "Season items require a season_number."
+            raise ValueError(msg)
+        return self
+
+
+class EpisodeItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_episode_fields(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.EPISODE)
+        if self.season_number is None or self.episode_number is None:
+            msg = "Episode items require season_number and episode_number."
+            raise ValueError(msg)
+        return self
+
+
+class SpecialItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_special_kind(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.SPECIAL)
+        return self
+
+
+class ExtraItemDetail(LibraryItemDetailBase):
+    @model_validator(mode="after")
+    def require_extra_kind(self) -> Self:
+        _require_kind(self.kind, LibraryItemKind.EXTRA)
+        return self
+
+
+type LibraryItemDetail = (
+    MovieItemDetail
+    | SeriesItemDetail
+    | SeasonItemDetail
+    | EpisodeItemDetail
+    | SpecialItemDetail
+    | ExtraItemDetail
+)
+
+
+class MediaStreamSummary(APIModel):
+    codec: str | None = Field(default=None, max_length=100)
+    language: str | None = Field(default=None, max_length=32)
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
+    channels: int | None = Field(default=None, ge=0)
+
+
+class MediaTechnicalSummary(APIModel):
+    id: int = Field(gt=0)
+    container: str = Field(min_length=1, max_length=100)
+    size_bytes: int = Field(ge=0)
+    duration_seconds: float | None = Field(default=None, ge=0)
+    availability: Availability
+    video_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=32)
+    audio_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=64)
+    subtitle_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=128)
+
+
+class CollectionSummary(APIModel):
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    overview: str | None = Field(default=None, max_length=20_000)
+    item_count: int = Field(ge=0)
+    watch_order_count: int = Field(ge=0)
+
+
+class WatchOrderSummary(APIModel):
+    id: int = Field(gt=0)
+    collection_id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    kind: WatchOrderKind
+    entry_count: int = Field(ge=0)
+
+
+class OrderedPlayableEntry(APIModel):
+    position: int = Field(ge=0)
+    item: LibraryItemSummary
+
+
+class PlaybackStateResponse(APIModel):
+    user_id: int = Field(gt=0)
+    item_id: int = Field(gt=0)
+    position_seconds: float = Field(ge=0)
+    duration_seconds: float = Field(ge=0)
+    completed: bool
+    play_count: int = Field(ge=0)
+    last_played_at: datetime | None
+
+
+class ContinueWatchingEntry(APIModel):
+    item: LibraryItemSummary
+    playback: PlaybackStateResponse
+
+
+class OnDeckEntry(APIModel):
+    item: LibraryItemSummary
+    source_watch_order_id: int | None = Field(default=None, gt=0)
+
+
+class MetadataReviewCandidate(APIModel):
+    item_id: int = Field(gt=0)
+    candidate_id: int = Field(gt=0)
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=1_000)
+    year: int | None = Field(default=None, ge=1, le=9999)
+    kind: LibraryItemKind
+    confidence: float = Field(ge=0, le=1)
+    status: str = Field(min_length=1, max_length=50)
+
+
+class BackgroundJob(APIModel):
+    id: str = Field(min_length=1, max_length=100)
+    kind: str = Field(min_length=1, max_length=100)
+    status: JobStatus
+    submitted_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    message: str | None = Field(default=None, max_length=2_000)
+
+
+class PaginatedResponse[ItemT](APIModel):
+    items: tuple[ItemT, ...]
+    next_cursor: str | None = Field(default=None, max_length=500)
+    limit: int = Field(ge=1, le=100)
+
+
+class WatchOrderDetail(APIModel):
+    watch_order: WatchOrderSummary
+    entries: PaginatedResponse[OrderedPlayableEntry]
+
+
+class ProgressUpdate(APIModel):
+    position_seconds: float = Field(ge=0)
+    duration_seconds: float = Field(ge=0)
+    completed: bool = False
+
+
+class MetadataMatchRequest(APIModel):
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500)
+
+
+class MetadataRejectRequest(MetadataMatchRequest):
+    pass
+
+
+class ScanRequest(APIModel):
+    library_root_id: int | None = Field(default=None, gt=0)
+    include_unavailable: bool = False
+    dry_run: bool = False
+
+
+class ArtworkFetchRequest(APIModel):
+    library_root_id: int | None = Field(default=None, gt=0)
+
+
+class MutationResult(APIModel):
+    item_id: int = Field(gt=0)
+    action: str = Field(min_length=1, max_length=100)
+
+
+class JobSubmission(APIModel):
+    job: BackgroundJob
+
+
+class APIError(APIModel):
+    code: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=2_000)
+    request_id: str = Field(min_length=1, max_length=100)
+    details: tuple[str, ...] = Field(default=(), max_length=20)
+
+
+def _require_kind(actual: LibraryItemKind, expected: LibraryItemKind) -> None:
+    if actual is not expected:
+        msg = f"This detail model requires kind={expected.value!r}."
+        raise ValueError(msg)

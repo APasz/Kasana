@@ -1,0 +1,1 @@
+"""Kourier metadata-provider integrations."""

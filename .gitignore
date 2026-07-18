@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.basedpyright/
+.venv/
+dist/
+build/
+*.egg-info/
+.env# Kasana runtime data
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+kasana-artwork-cache/
+.env

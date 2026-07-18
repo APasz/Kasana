@@ -1,0 +1,512 @@
+"""Typed aiohttp client for Katalog's versioned HTTP API."""
+
+from __future__ import annotations
+
+import asyncio
+import json as json_module
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TypedDict, Unpack, cast
+
+import aiohttp
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+from kasana.katalog.api.contracts import (
+    APIError,
+    ArtworkFetchRequest,
+    ArtworkSelection,
+    Availability,
+    BackgroundJob,
+    CollectionSummary,
+    ContinueWatchingEntry,
+    HealthResponse,
+    JobSubmission,
+    LibraryItemDetail,
+    LibraryItemKind,
+    LibraryItemSummary,
+    MediaTechnicalSummary,
+    MetadataMatchRequest,
+    MetadataRejectRequest,
+    MetadataReviewCandidate,
+    MutationResult,
+    OnDeckEntry,
+    PaginatedResponse,
+    PlaybackStateResponse,
+    ProgressUpdate,
+    ScanRequest,
+    StatusResponse,
+    WatchedFilter,
+    WatchOrderDetail,
+    WatchOrderSummary,
+)
+
+_TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+_ITEM_DETAIL_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDetail)
+
+
+class _LibraryItemFilters(TypedDict, total=False):
+    limit: int
+    kind: LibraryItemKind | None
+    tags: tuple[str, ...]
+    year: int | None
+    watched: WatchedFilter | None
+    user_id: int | None
+    availability: Availability | None
+    collection_id: int | None
+    search: str | None
+
+
+class KatalogClientErrorKind(StrEnum):
+    NOT_FOUND = "not_found"
+    VALIDATION = "validation"
+    UNAVAILABLE = "unavailable"
+    TRANSPORT = "transport"
+    RESPONSE = "response"
+
+
+class KatalogClientError(RuntimeError):
+    """A typed Katalog API error, including its server request identifier."""
+
+    def __init__(
+        self,
+        kind: KatalogClientErrorKind,
+        message: str,
+        *,
+        status_code: int | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status_code = status_code
+        self.request_id = request_id
+
+
+@dataclass(frozen=True)
+class ConditionalItem:
+    item: LibraryItemDetail | None
+    etag: str | None
+    not_modified: bool
+
+
+@dataclass(frozen=True)
+class ArtworkContent:
+    content: bytes
+    content_type: str
+    etag: str | None
+
+
+class KatalogClient:
+    """One-session, cancellation-safe client for the Katalog v1 API.
+
+    Authentication is configured once on the client so a future bearer-token
+    dependency does not change the public method signatures.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str | None = None,
+        timeout_seconds: float = 15.0,
+        max_idempotent_retries: int = 2,
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        if not base_url.startswith(("http://", "https://")):
+            msg = "Katalog base_url must be an HTTP(S) URL."
+            raise ValueError(msg)
+        if timeout_seconds <= 0:
+            msg = "Katalog timeout_seconds must be positive."
+            raise ValueError(msg)
+        if not 0 <= max_idempotent_retries <= 5:
+            msg = "Katalog max_idempotent_retries must be between 0 and 5."
+            raise ValueError(msg)
+        self._base_url = base_url.rstrip("/")
+        self._bearer_token = bearer_token
+        self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        self._max_idempotent_retries = max_idempotent_retries
+        self._session = session
+        self._owns_session = session is None
+        self._session_lock = asyncio.Lock()
+
+    async def __aenter__(self) -> KatalogClient:
+        await self._get_session()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        session = self._session
+        if not self._owns_session or session is None or session.closed:
+            return
+        close_task = asyncio.create_task(session.close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(close_task)
+            raise
+
+    async def health(self) -> HealthResponse:
+        return await self._get_model("/api/v1/health", HealthResponse)
+
+    async def status(self) -> StatusResponse:
+        return await self._get_model("/api/v1/status", StatusResponse)
+
+    async def list_library_items(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        kind: LibraryItemKind | None = None,
+        tags: tuple[str, ...] = (),
+        year: int | None = None,
+        watched: WatchedFilter | None = None,
+        user_id: int | None = None,
+        availability: Availability | None = None,
+        collection_id: int | None = None,
+        search: str | None = None,
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        params = _params(
+            cursor=cursor,
+            limit=limit,
+            kind=kind.value if kind is not None else None,
+            year=year,
+            watched=watched.value if watched is not None else None,
+            user_id=user_id,
+            availability=availability.value if availability is not None else None,
+            collection_id=collection_id,
+            search=search,
+        )
+        params.extend(("tag", tag) for tag in tags)
+        return await self._get_model(
+            "/api/v1/library/items", PaginatedResponse[LibraryItemSummary], params=params
+        )
+
+    async def iter_library_items(
+        self, **filters: Unpack[_LibraryItemFilters]
+    ) -> AsyncIterator[LibraryItemSummary]:
+        cursor: str | None = None
+        while True:
+            page = await self.list_library_items(cursor=cursor, **filters)
+            for item in page.items:
+                yield item
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    async def get_library_item(self, item_id: int, *, etag: str | None = None) -> ConditionalItem:
+        headers = {"If-None-Match": etag} if etag is not None else None
+        response = await self._request("GET", f"/api/v1/library/items/{item_id}", headers=headers)
+        if response.status == 304:
+            return ConditionalItem(item=None, etag=response.headers.get("ETag"), not_modified=True)
+        try:
+            item = _ITEM_DETAIL_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned an invalid library item.", response.request_id
+            ) from error
+        return ConditionalItem(item=item, etag=response.headers.get("ETag"), not_modified=False)
+
+    async def list_library_item_children(
+        self, item_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        return await self._get_model(
+            f"/api/v1/library/items/{item_id}/children",
+            PaginatedResponse[LibraryItemSummary],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def list_library_item_media(
+        self, item_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[MediaTechnicalSummary]:
+        return await self._get_model(
+            f"/api/v1/library/items/{item_id}/media",
+            PaginatedResponse[MediaTechnicalSummary],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def list_library_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+        response = await self._request("GET", f"/api/v1/library/items/{item_id}/artwork")
+        if not isinstance(response.payload, list):
+            raise _response_error("Artwork response must be a JSON array.", response.request_id)
+        artwork_payload = cast(list[object], response.payload)
+        try:
+            return tuple(ArtworkSelection.model_validate(value) for value in artwork_payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid artwork data.", response.request_id
+            ) from error
+
+    async def get_artwork_content(
+        self, artwork_url: str, *, etag: str | None = None
+    ) -> ArtworkContent | None:
+        if not artwork_url.startswith("/api/v1/library/items/"):
+            msg = "Artwork URLs must be Katalog API-relative URLs."
+            raise ValueError(msg)
+        headers = {"If-None-Match": etag} if etag is not None else None
+        response = await self._request("GET", artwork_url, headers=headers, expect_json=False)
+        if response.status == 304:
+            return None
+        return ArtworkContent(
+            content=response.content,
+            content_type=response.headers.get("Content-Type", "application/octet-stream"),
+            etag=response.headers.get("ETag"),
+        )
+
+    async def list_collections(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[CollectionSummary]:
+        return await self._get_model(
+            "/api/v1/collections",
+            PaginatedResponse[CollectionSummary],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def get_collection(self, collection_id: int) -> CollectionSummary:
+        return await self._get_model(f"/api/v1/collections/{collection_id}", CollectionSummary)
+
+    async def list_collection_watch_orders(
+        self, collection_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[WatchOrderSummary]:
+        return await self._get_model(
+            f"/api/v1/collections/{collection_id}/watch-orders",
+            PaginatedResponse[WatchOrderSummary],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def get_watch_order(
+        self, watch_order_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> WatchOrderDetail:
+        return await self._get_model(
+            f"/api/v1/watch-orders/{watch_order_id}",
+            WatchOrderDetail,
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def continue_watching(
+        self, user_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[ContinueWatchingEntry]:
+        return await self._get_model(
+            f"/api/v1/users/{user_id}/continue-watching",
+            PaginatedResponse[ContinueWatchingEntry],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def on_deck(
+        self, user_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[OnDeckEntry]:
+        return await self._get_model(
+            f"/api/v1/users/{user_id}/on-deck",
+            PaginatedResponse[OnDeckEntry],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def metadata_review(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[MetadataReviewCandidate]:
+        return await self._get_model(
+            "/api/v1/metadata/review",
+            PaginatedResponse[MetadataReviewCandidate],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def list_jobs(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[BackgroundJob]:
+        return await self._get_model(
+            "/api/v1/jobs",
+            PaginatedResponse[BackgroundJob],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def get_job(self, job_id: str) -> BackgroundJob:
+        return await self._get_model(f"/api/v1/jobs/{job_id}", BackgroundJob)
+
+    async def update_progress(
+        self, user_id: int, item_id: int, update: ProgressUpdate
+    ) -> PlaybackStateResponse:
+        return await self._send_model(
+            "PUT",
+            f"/api/v1/users/{user_id}/items/{item_id}/progress",
+            update,
+            PlaybackStateResponse,
+        )
+
+    async def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/users/{user_id}/items/{item_id}/watched",
+            None,
+            PlaybackStateResponse,
+        )
+
+    async def clear_watched(self, user_id: int, item_id: int) -> None:
+        await self._request("DELETE", f"/api/v1/users/{user_id}/items/{item_id}/watched")
+
+    async def match_metadata(self, item_id: int, request: MetadataMatchRequest) -> MutationResult:
+        return await self._send_model(
+            "POST", f"/api/v1/metadata/items/{item_id}/match", request, MutationResult
+        )
+
+    async def reject_metadata(self, item_id: int, request: MetadataRejectRequest) -> MutationResult:
+        return await self._send_model(
+            "POST", f"/api/v1/metadata/items/{item_id}/reject", request, MutationResult
+        )
+
+    async def ignore_metadata(self, item_id: int) -> MutationResult:
+        return await self._send_model(
+            "POST", f"/api/v1/metadata/items/{item_id}/ignore", None, MutationResult
+        )
+
+    async def refresh_metadata(self, item_id: int) -> MutationResult:
+        return await self._send_model(
+            "POST", f"/api/v1/metadata/items/{item_id}/refresh", None, MutationResult
+        )
+
+    async def submit_scan(self, request: ScanRequest) -> JobSubmission:
+        return await self._send_model("POST", "/api/v1/scans", request, JobSubmission)
+
+    async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobSubmission:
+        return await self._send_model("POST", "/api/v1/artwork/fetch", request, JobSubmission)
+
+    async def _get_model[ModelT: BaseModel](
+        self,
+        path: str,
+        model: type[ModelT],
+        *,
+        params: list[tuple[str, str | int]] | None = None,
+    ) -> ModelT:
+        response = await self._request("GET", path, params=params)
+        return _validate_response(model, response.payload, response.request_id)
+
+    async def _send_model[ModelT: BaseModel](
+        self, method: str, path: str, body: BaseModel | None, model: type[ModelT]
+    ) -> ModelT:
+        response = await self._request(
+            method,
+            path,
+            json=body.model_dump(mode="json") if body is not None else None,
+        )
+        return _validate_response(model, response.payload, response.request_id)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: list[tuple[str, str | int]] | None = None,
+        headers: Mapping[str, str] | None = None,
+        json: object | None = None,
+        expect_json: bool = True,
+    ) -> _ClientResponse:
+        session = await self._get_session()
+        request_headers = dict(headers or {})
+        if self._bearer_token is not None:
+            request_headers["Authorization"] = f"Bearer {self._bearer_token}"
+        attempts = self._max_idempotent_retries if method == "GET" else 0
+        for attempt in range(attempts + 1):
+            try:
+                async with session.request(
+                    method,
+                    self._base_url + path,
+                    params=params,
+                    headers=request_headers,
+                    json=json,
+                ) as response:
+                    content = await response.read()
+                    request_id = response.headers.get("X-Request-ID")
+                    if response.status in _TRANSIENT_STATUS_CODES and attempt < attempts:
+                        await asyncio.sleep(0.05 * (attempt + 1))
+                        continue
+                    payload = _decode_json(content, request_id) if expect_json and content else None
+                    if response.status >= 400:
+                        raise _api_error(response.status, payload, request_id)
+                    return _ClientResponse(
+                        status=response.status,
+                        headers=response.headers.copy(),
+                        payload=payload,
+                        content=content,
+                        request_id=request_id,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, aiohttp.ClientError) as error:
+                if attempt < attempts:
+                    await asyncio.sleep(0.05 * (attempt + 1))
+                    continue
+                raise KatalogClientError(
+                    KatalogClientErrorKind.TRANSPORT, "Unable to reach Katalog."
+                ) from error
+        msg = "Katalog request retry handling exhausted unexpectedly."
+        raise RuntimeError(msg)
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is not None and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(timeout=self._timeout)
+                self._owns_session = True
+            return self._session
+
+
+@dataclass(frozen=True)
+class _ClientResponse:
+    status: int
+    headers: Mapping[str, str]
+    payload: object | None
+    content: bytes
+    request_id: str | None
+
+
+def _params(**values: str | int | None) -> list[tuple[str, str | int]]:
+    return [(name, value) for name, value in values.items() if value is not None]
+
+
+def _decode_json(content: bytes, request_id: str | None) -> object:
+    try:
+        return json_module.loads(content.decode())
+    except (UnicodeDecodeError, ValueError) as error:
+        raise _response_error("Katalog returned invalid JSON.", request_id) from error
+
+
+def _validate_response[ModelT: BaseModel](
+    model: type[ModelT], payload: object | None, request_id: str | None = None
+) -> ModelT:
+    try:
+        return model.model_validate(payload)
+    except ValidationError as error:
+        raise _response_error("Katalog returned an invalid response.", request_id) from error
+
+
+def _api_error(
+    status_code: int, payload: object | None, request_id: str | None
+) -> KatalogClientError:
+    error = _validate_api_error(payload)
+    kind = (
+        KatalogClientErrorKind.NOT_FOUND
+        if status_code == 404
+        else KatalogClientErrorKind.VALIDATION
+        if status_code == 422
+        else KatalogClientErrorKind.UNAVAILABLE
+        if status_code in _TRANSIENT_STATUS_CODES
+        else KatalogClientErrorKind.RESPONSE
+    )
+    return KatalogClientError(
+        kind,
+        error.message if error is not None else f"Katalog returned HTTP {status_code}.",
+        status_code=status_code,
+        request_id=error.request_id if error is not None else request_id,
+    )
+
+
+def _validate_api_error(payload: object | None) -> APIError | None:
+    try:
+        return APIError.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def _response_error(message: str, request_id: str | None) -> KatalogClientError:
+    return KatalogClientError(KatalogClientErrorKind.RESPONSE, message, request_id=request_id)

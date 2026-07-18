@@ -1,0 +1,1 @@
+"""Kestrel local player agent."""

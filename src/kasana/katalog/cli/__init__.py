@@ -1,0 +1,1 @@
+"""Katalog command-line application."""
