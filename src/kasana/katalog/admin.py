@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,10 +22,11 @@ from kasana.katalog.models import (
     AvailabilityState,
     Kura,
     MediaFile,
+    User,
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.services import create_library_root
+from kasana.katalog.services import create_library_root, create_user
 
 type RootKind = Literal["movie", "series"]
 
@@ -95,6 +97,44 @@ class KuraView(BaseModel):
     enabled: bool
     display_name: str | None
     last_scan_completed_at: str | None
+
+
+class UserInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, max_length=200)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Username must not be blank.")
+        return normalized
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
+class UserView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    username: str
+    display_name: str | None
+
+
+class ItemView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    title: str
+    kind: ZaisanKind
+    availability: AvailabilityState
+    year: int | None
 
 
 class Anomaly(BaseModel):
@@ -184,6 +224,66 @@ class KatalogAdmin:
                 _root_view(root) for root in session.scalars(select(Kura).order_by(Kura.id)).all()
             )
         )
+
+    def list_users(self) -> tuple[UserView, ...]:
+        return self.database.run_transaction(
+            lambda session: tuple(
+                _user_view(user) for user in session.scalars(select(User).order_by(User.id)).all()
+            )
+        )
+
+    def create_user(self, user_input: UserInput) -> UserView:
+        try:
+            return self.database.run_transaction(
+                lambda session: _user_view(
+                    create_user(
+                        session,
+                        username=user_input.username,
+                        display_name=user_input.display_name,
+                    )
+                )
+            )
+        except IntegrityError as error:
+            msg = f"A user already uses username {user_input.username}."
+            raise AdminError(msg) from error
+
+    def search_items(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        year: int | None = None,
+        kind: ZaisanKind | None = None,
+    ) -> tuple[ItemView, ...]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise AdminError("Item search text must not be blank.")
+        if not 1 <= limit <= 100:
+            raise AdminError("Item search limit must be between 1 and 100.")
+        if year is not None and not 1 <= year <= 9999:
+            raise AdminError("Item search year must be between 1 and 9999.")
+        needle = normalized_query.casefold()
+
+        def load(session: Session) -> tuple[ItemView, ...]:
+            statement = select(Zaisan).where(func.lower(Zaisan.title).contains(needle))
+            if year is not None:
+                statement = statement.where(Zaisan.release_year == year)
+            if kind is not None:
+                statement = statement.where(Zaisan.item_kind == kind)
+            candidates = tuple(session.scalars(statement))
+            ranked = sorted(candidates, key=lambda item: _item_search_key(item, needle))
+            return tuple(_item_view(item) for item in ranked[:limit])
+
+        return self.database.run_transaction(load)
+
+    def get_item(self, item_id: int) -> ItemView:
+        def load(session: Session) -> ItemView:
+            item = session.get(Zaisan, item_id)
+            if item is None:
+                raise AdminError(f"Library item {item_id} does not exist.")
+            return _item_view(item)
+
+        return self.database.run_transaction(load)
 
     def add_root(self, root_input: KuraInput) -> KuraView:
         try:
@@ -315,6 +415,35 @@ def _root_view(root: Kura) -> KuraView:
         if root.last_scan_completed_at is not None
         else None,
     )
+
+
+def _user_view(user: User) -> UserView:
+    return UserView(id=user.id, username=user.username, display_name=user.display_name)
+
+
+def _item_view(item: Zaisan) -> ItemView:
+    return ItemView(
+        id=item.id,
+        title=item.title,
+        kind=item.item_kind,
+        availability=item.availability,
+        year=item.release_year,
+    )
+
+
+def _item_search_key(item: Zaisan, needle: str) -> tuple[int, str, int]:
+    title = item.title.casefold()
+    if title == needle:
+        rank = 0
+    elif re.match(rf"^{re.escape(needle)}(?!\w)", title) is not None:
+        rank = 1
+    elif re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", title) is not None:
+        rank = 2
+    elif title.startswith(needle):
+        rank = 3
+    else:
+        rank = 4
+    return rank, item.sort_title.casefold(), item.id
 
 
 def _issue_view(issue: AuditIssue) -> Anomaly:

@@ -9,15 +9,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Select, and_, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import update as sql_update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm import Session, aliased
 
 from kasana.katalog.api.contracts import (
     ArtworkKind,
@@ -30,6 +34,7 @@ from kasana.katalog.api.contracts import (
     LibraryItemDetail,
     LibraryItemKind,
     LibraryItemSummary,
+    ManualQueuePlaybackContext,
     MediaStreamSummary,
     MediaTechnicalSummary,
     MetadataReviewCandidate,
@@ -37,16 +42,33 @@ from kasana.katalog.api.contracts import (
     OnDeckEntry,
     OrderedPlayableEntry,
     PaginatedResponse,
+    PlaybackCompletionResult,
+    PlaybackContext,
+    PlaybackContextKind,
+    PlaybackNextEntry,
+    PlaybackPlanEntry,
+    PlaybackPlanLaunch,
+    PlaybackPlanRequest,
+    PlaybackProgressResult,
+    PlaybackSessionEvent,
+    PlaybackSessionEventKind,
+    PlaybackSessionResponse,
     PlaybackStateResponse,
     SeasonItemDetail,
     SeriesItemDetail,
+    SeriesPlaybackContext,
+    SessionProgressUpdate,
     SpecialItemDetail,
+    StandalonePlaybackContext,
     StatusResponse,
+    UserSummary,
     WatchedFilter,
     WatchOrderDetail,
     WatchOrderKind,
+    WatchOrderPlaybackContext,
     WatchOrderSummary,
 )
+from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import (
     AuditIssue,
@@ -57,14 +79,30 @@ from kasana.katalog.models import (
     Keiro,
     KeiroEntry,
     Kura,
+    MediaAccessOperation,
+    MediaAccessToken,
     MediaFile,
     MetadataCandidate,
+    PlaybackLaunchToken,
+    PlaybackSessionEntry,
     PlaybackState,
     User,
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.services import record_playback_progress
+from kasana.katalog.models import (
+    PlaybackContextKind as ModelPlaybackContextKind,
+)
+from kasana.katalog.models import (
+    PlaybackSession as ModelPlaybackSession,
+)
+from kasana.katalog.models import (
+    PlaybackSessionEvent as ModelPlaybackSessionEvent,
+)
+from kasana.katalog.models import (
+    PlaybackSessionEventKind as ModelPlaybackSessionEventKind,
+)
+from kasana.katalog.services import PLAYABLE_ITEM_KINDS, record_playback_progress
 
 _MAX_PAGE_SIZE = 100
 
@@ -96,12 +134,57 @@ class ArtworkFile:
     etag: str
 
 
+@dataclass(frozen=True)
+class MediaTransferFile:
+    """A token-authorized file descriptor for the HTTP transfer policy only."""
+
+    path: Path
+    size_bytes: int
+    content_type: str
+    etag: str
+    download_name: str
+    last_modified: datetime
+
+
+@dataclass(frozen=True)
+class _PlannedPlaybackEntry:
+    item: Zaisan
+    media_file: MediaFile
+    source_watch_order_position: int | None
+
+
 class KatalogQueryService:
     """Maps persistence rows into API contracts without exposing ORM objects."""
 
-    def __init__(self, database: KatalogDatabase, *, artwork_cache_path: Path) -> None:
+    def __init__(
+        self,
+        database: KatalogDatabase,
+        *,
+        artwork_cache_path: Path,
+        playback_session_ttl: timedelta = timedelta(hours=8),
+        playback_launch_token_ttl: timedelta = timedelta(minutes=5),
+        media_access_token_ttl: timedelta = timedelta(minutes=10),
+        max_playback_queue_size: int = 100,
+    ) -> None:
+        if (
+            min(
+                playback_session_ttl.total_seconds(),
+                playback_launch_token_ttl.total_seconds(),
+                media_access_token_ttl.total_seconds(),
+            )
+            <= 0
+        ):
+            msg = "Playback token and session lifetimes must be positive."
+            raise ValueError(msg)
+        if max_playback_queue_size <= 0:
+            msg = "The maximum playback queue size must be positive."
+            raise ValueError(msg)
         self._database = database
         self._artwork_cache_path = artwork_cache_path.expanduser().resolve(strict=False)
+        self._playback_session_ttl = playback_session_ttl
+        self._playback_launch_token_ttl = playback_launch_token_ttl
+        self._media_access_token_ttl = media_access_token_ttl
+        self._max_playback_queue_size = max_playback_queue_size
 
     def health(self) -> None:
         with self._database.engine.connect() as connection:
@@ -131,6 +214,18 @@ class KatalogQueryService:
             )
 
         return self._database.run_transaction(load)
+
+    def list_users(self) -> tuple[UserSummary, ...]:
+        return self._database.run_transaction(
+            lambda session: tuple(
+                UserSummary(
+                    id=user.id,
+                    username=user.username,
+                    display_name=user.display_name,
+                )
+                for user in session.scalars(select(User).order_by(User.id))
+            )
+        )
 
     def list_items(
         self, *, filters: LibraryItemFilters, cursor: str | None, limit: int
@@ -653,9 +748,719 @@ class KatalogQueryService:
 
         self._database.run_transaction(clear)
 
+    def create_playback_plan(self, request: PlaybackPlanRequest) -> PlaybackPlanLaunch:
+        """Persist a bounded queue, returning a one-use launch capability."""
+
+        def create(session: Session) -> PlaybackPlanLaunch:
+            _require(session, User, request.user_id, "User")
+            planned_entries, context = self._plan_entries(session, request)
+            now = datetime.now(UTC)
+            session_id = secrets.token_urlsafe(32)
+            playback_session = ModelPlaybackSession(
+                id=session_id,
+                user_id=request.user_id,
+                context_kind=ModelPlaybackContextKind(context.kind.value),
+                context_item_id=context.item_id,
+                watch_order_id=context.watch_order_id,
+                current_entry_position=0,
+                created_at=now,
+                expires_at=now + self._playback_session_ttl,
+                closed_at=None,
+            )
+            session.add(playback_session)
+            session.flush()
+            for position, planned in enumerate(planned_entries):
+                session.add(
+                    PlaybackSessionEntry(
+                        playback_session_id=playback_session.id,
+                        position=position,
+                        library_item_id=planned.item.id,
+                        media_file_id=planned.media_file.id,
+                        source_watch_order_position=planned.source_watch_order_position,
+                    )
+                )
+            launch_token = secrets.token_urlsafe(32)
+            launch_expires_at = now + self._playback_launch_token_ttl
+            session.add(
+                PlaybackLaunchToken(
+                    token_hash=_token_hash(launch_token),
+                    playback_session_id=playback_session.id,
+                    expires_at=launch_expires_at,
+                    consumed_at=None,
+                )
+            )
+            return PlaybackPlanLaunch(launch_token=launch_token, expires_at=launch_expires_at)
+
+        return self._database.run_transaction(create)
+
+    def launch_playback_plan(self, launch_token: str) -> PlaybackSessionResponse:
+        """Consume a plan launch capability and materialize its media capabilities."""
+
+        def launch(session: Session) -> PlaybackSessionResponse:
+            now = datetime.now(UTC)
+            token_hash = _token_hash(launch_token)
+            claimed = session.execute(
+                sql_update(PlaybackLaunchToken)
+                .where(
+                    PlaybackLaunchToken.token_hash == token_hash,
+                    PlaybackLaunchToken.consumed_at.is_(None),
+                    PlaybackLaunchToken.expires_at > now,
+                )
+                .values(consumed_at=now)
+            )
+            if not isinstance(claimed, CursorResult):
+                raise RuntimeError("Playback launch token update did not produce a cursor result.")
+            if claimed.rowcount != 1:
+                raise CatalogNotFoundError("Playback launch token is unavailable.")
+            token = session.scalar(
+                select(PlaybackLaunchToken).where(PlaybackLaunchToken.token_hash == token_hash)
+            )
+            if token is None:
+                raise CatalogNotFoundError("Playback launch token is unavailable.")
+            playback_session = _require(
+                session, ModelPlaybackSession, token.playback_session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            return self._playback_session_response(session, playback_session, now)
+
+        return self._database.run_transaction(launch)
+
+    def get_playback_session(self, session_id: str) -> PlaybackSessionResponse:
+        def load(session: Session) -> PlaybackSessionResponse:
+            now = datetime.now(UTC)
+            playback_session = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            return self._playback_session_response(session, playback_session, now)
+
+        return self._database.run_transaction(load)
+
+    def update_session_progress(
+        self, session_id: str, update: SessionProgressUpdate
+    ) -> PlaybackProgressResult:
+        def record(session: Session) -> PlaybackProgressResult:
+            now = datetime.now(UTC)
+            playback_session = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            entry = _current_session_entry(session, playback_session)
+            media_file = _require(session, MediaFile, entry.media_file_id, "Media file")
+            existing_state = _playback_state(
+                session, playback_session.user_id, entry.library_item_id
+            )
+            if (
+                not update.seek
+                and existing_state is not None
+                and update.position_seconds < existing_state.position_seconds
+            ):
+                raise CatalogValidationError(
+                    "Playback progress must be monotonic unless seek is true."
+                )
+            duration = _progress_duration(media_file, existing_state, update.position_seconds)
+            if update.position_seconds > duration:
+                raise CatalogValidationError("Playback position exceeds the media duration.")
+            try:
+                record_playback_progress(
+                    session,
+                    user_id=playback_session.user_id,
+                    library_item_id=entry.library_item_id,
+                    position_seconds=update.position_seconds,
+                    duration_seconds=duration,
+                    completed=False,
+                    played_at=now,
+                )
+            except ValueError as error:
+                raise CatalogValidationError(str(error)) from error
+            event = _record_session_event(
+                session,
+                playback_session,
+                entry_position=entry.position,
+                event_kind=ModelPlaybackSessionEventKind.PROGRESS,
+                position_seconds=update.position_seconds,
+                occurred_at=now,
+            )
+            return PlaybackProgressResult(
+                session=self._playback_session_response(session, playback_session, now),
+                event=_playback_session_event(event),
+            )
+
+        return self._database.run_transaction(record)
+
+    def advance_playback_session(self, session_id: str) -> PlaybackSessionResponse:
+        def advance(session: Session) -> PlaybackSessionResponse:
+            now = datetime.now(UTC)
+            playback_session = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            current_entry = _current_session_entry(session, playback_session)
+            next_entry = session.scalar(
+                select(PlaybackSessionEntry).where(
+                    PlaybackSessionEntry.playback_session_id == playback_session.id,
+                    PlaybackSessionEntry.position == current_entry.position + 1,
+                )
+            )
+            if next_entry is None:
+                raise CatalogValidationError("Playback session has no subsequent queue entry.")
+            playback_session.current_entry_position = next_entry.position
+            saved_state = _playback_state(
+                session, playback_session.user_id, next_entry.library_item_id
+            )
+            _record_session_event(
+                session,
+                playback_session,
+                entry_position=next_entry.position,
+                event_kind=ModelPlaybackSessionEventKind.ADVANCED,
+                position_seconds=saved_state.position_seconds if saved_state is not None else 0.0,
+                occurred_at=now,
+            )
+            return self._playback_session_response(session, playback_session, now)
+
+        return self._database.run_transaction(advance)
+
+    def complete_playback_session(self, session_id: str) -> PlaybackCompletionResult:
+        def complete(session: Session) -> PlaybackCompletionResult:
+            now = datetime.now(UTC)
+            playback_session = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            entry = _current_session_entry(session, playback_session)
+            media_file = _require(session, MediaFile, entry.media_file_id, "Media file")
+            existing_state = _playback_state(
+                session, playback_session.user_id, entry.library_item_id
+            )
+            duration = _completion_duration(media_file, existing_state)
+            try:
+                record_playback_progress(
+                    session,
+                    user_id=playback_session.user_id,
+                    library_item_id=entry.library_item_id,
+                    position_seconds=duration,
+                    duration_seconds=duration,
+                    completed=True,
+                    increment_play_count=existing_state is None or not existing_state.completed,
+                    played_at=now,
+                )
+            except ValueError as error:
+                raise CatalogValidationError(str(error)) from error
+            event = _record_session_event(
+                session,
+                playback_session,
+                entry_position=entry.position,
+                event_kind=ModelPlaybackSessionEventKind.COMPLETED,
+                position_seconds=duration,
+                occurred_at=now,
+            )
+            return PlaybackCompletionResult(
+                session=self._playback_session_response(session, playback_session, now),
+                event=_playback_session_event(event),
+            )
+
+        return self._database.run_transaction(complete)
+
+    def close_playback_session(self, session_id: str) -> None:
+        def close(session: Session) -> None:
+            now = datetime.now(UTC)
+            playback_session = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            playback_session.closed_at = now
+
+        self._database.run_transaction(close)
+
+    def resolve_media_access_token(
+        self, access_token: str, operation: MediaAccessOperation
+    ) -> MediaTransferFile:
+        """Resolve a scoped opaque token without ever returning its filesystem path."""
+
+        def resolve(session: Session) -> MediaTransferFile:
+            now = datetime.now(UTC)
+            token = session.scalar(
+                select(MediaAccessToken).where(
+                    MediaAccessToken.token_hash == _token_hash(access_token)
+                )
+            )
+            if (
+                token is None
+                or token.operation is not operation
+                or _is_expired(token.expires_at, now)
+            ):
+                raise CatalogNotFoundError("Media access token is unavailable.")
+            playback_session = _require(
+                session, ModelPlaybackSession, token.playback_session_id, "Playback session"
+            )
+            try:
+                _require_active_session(playback_session, now)
+            except CatalogNotFoundError as error:
+                raise CatalogNotFoundError("Media access token is unavailable.") from error
+            media_file = _require(session, MediaFile, token.media_file_id, "Media file")
+            item = _require(session, Zaisan, media_file.library_item_id, "Library item")
+            _require_available_media(item, media_file)
+            path = Path(media_file.absolute_path)
+            try:
+                stat = path.stat()
+            except OSError as error:
+                raise CatalogNotFoundError("Media access token is unavailable.") from error
+            if not path.is_file():
+                raise CatalogNotFoundError("Media access token is unavailable.")
+            return MediaTransferFile(
+                path=path,
+                size_bytes=stat.st_size,
+                content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                etag=_etag(f"media:{media_file.id}:{stat.st_size}:{stat.st_mtime_ns}"),
+                download_name=_download_name(item.title, path.suffix),
+                last_modified=datetime.fromtimestamp(stat.st_mtime, UTC),
+            )
+
+        return self._database.run_transaction(resolve)
+
+    def _plan_entries(
+        self, session: Session, request: PlaybackPlanRequest
+    ) -> tuple[tuple[_PlannedPlaybackEntry, ...], PlaybackContext]:
+        context = request.context
+        if isinstance(context, StandalonePlaybackContext):
+            item = _require(session, Zaisan, context.item_id, "Library item")
+            planned = (self._planned_entry(session, item),)
+            response_context = PlaybackContext(kind=PlaybackContextKind.STANDALONE, item_id=item.id)
+        elif isinstance(context, SeriesPlaybackContext):
+            planned, series_id = self._series_entries(session, request.user_id, context)
+            response_context = PlaybackContext(kind=PlaybackContextKind.SERIES, item_id=series_id)
+        elif isinstance(context, WatchOrderPlaybackContext):
+            planned = self._watch_order_entries(session, context)
+            response_context = PlaybackContext(
+                kind=PlaybackContextKind.WATCH_ORDER,
+                watch_order_id=context.watch_order_id,
+            )
+        else:
+            manual_context: ManualQueuePlaybackContext = context
+            planned = tuple(
+                self._planned_entry(session, _require(session, Zaisan, item_id, "Library item"))
+                for item_id in manual_context.item_ids
+            )
+            response_context = PlaybackContext(kind=PlaybackContextKind.MANUAL_QUEUE)
+        if not planned:
+            raise CatalogValidationError("A playback plan requires at least one available item.")
+        if len(planned) > self._max_playback_queue_size:
+            raise CatalogValidationError(
+                f"Playback queues cannot contain more than {self._max_playback_queue_size} entries."
+            )
+        return planned, response_context
+
+    def _planned_entry(self, session: Session, item: Zaisan) -> _PlannedPlaybackEntry:
+        if item.item_kind not in PLAYABLE_ITEM_KINDS:
+            raise CatalogValidationError(f"{item.item_kind.value} items are not playable.")
+        if item.availability is not AvailabilityState.AVAILABLE:
+            raise CatalogValidationError(f"Library item {item.id} is unavailable.")
+        media_files = tuple(
+            session.scalars(
+                select(MediaFile)
+                .where(
+                    MediaFile.library_item_id == item.id,
+                    MediaFile.availability == AvailabilityState.AVAILABLE,
+                )
+                .order_by(MediaFile.id)
+            )
+        )
+        for media_file in media_files:
+            if Path(media_file.absolute_path).is_file():
+                return _PlannedPlaybackEntry(
+                    item=item, media_file=media_file, source_watch_order_position=None
+                )
+        raise CatalogValidationError(f"Library item {item.id} has no available media file.")
+
+    def _series_entries(
+        self, session: Session, user_id: int, context: SeriesPlaybackContext
+    ) -> tuple[tuple[_PlannedPlaybackEntry, ...], int]:
+        series, episodes = _series_and_episodes(session, context)
+        start_index = _series_start_index(session, user_id, episodes, context)
+        return (
+            tuple(self._planned_entry(session, item) for item in episodes[start_index:]),
+            series.id,
+        )
+
+    def _watch_order_entries(
+        self, session: Session, context: WatchOrderPlaybackContext
+    ) -> tuple[_PlannedPlaybackEntry, ...]:
+        _require(session, Keiro, context.watch_order_id, "Watch order")
+        rows = tuple(
+            session.execute(
+                select(KeiroEntry, Zaisan)
+                .join(Zaisan, KeiroEntry.library_item_id == Zaisan.id)
+                .where(KeiroEntry.watch_order_id == context.watch_order_id)
+                .order_by(KeiroEntry.position, KeiroEntry.id)
+            )
+        )
+        start_index = 0
+        if context.start_item_id is not None:
+            start_index = next(
+                (index for index, (_, item) in enumerate(rows) if item.id == context.start_item_id),
+                -1,
+            )
+            if start_index < 0:
+                raise CatalogValidationError("The requested item is not in the watch order.")
+        planned: list[_PlannedPlaybackEntry] = []
+        for entry, item in rows[start_index:]:
+            planned_entry = self._planned_entry(session, item)
+            planned.append(
+                _PlannedPlaybackEntry(
+                    item=planned_entry.item,
+                    media_file=planned_entry.media_file,
+                    source_watch_order_position=entry.position,
+                )
+            )
+        return tuple(planned)
+
+    def _playback_session_response(
+        self, session: Session, playback_session: ModelPlaybackSession, now: datetime
+    ) -> PlaybackSessionResponse:
+        entries = tuple(
+            session.scalars(
+                select(PlaybackSessionEntry)
+                .where(PlaybackSessionEntry.playback_session_id == playback_session.id)
+                .order_by(PlaybackSessionEntry.position)
+            )
+        )
+        if not entries:
+            raise CatalogNotFoundError("Playback session is unavailable.")
+        items = {
+            item.id: item
+            for item in session.scalars(
+                select(Zaisan).where(
+                    Zaisan.id.in_(tuple(entry.library_item_id for entry in entries))
+                )
+            )
+        }
+        media_files = {
+            media_file.id: media_file
+            for media_file in session.scalars(
+                select(MediaFile).where(
+                    MediaFile.id.in_(tuple(entry.media_file_id for entry in entries))
+                )
+            )
+        }
+        states = {
+            state.library_item_id: state
+            for state in session.scalars(
+                select(PlaybackState).where(
+                    PlaybackState.user_id == playback_session.user_id,
+                    PlaybackState.library_item_id.in_(
+                        tuple(entry.library_item_id for entry in entries)
+                    ),
+                )
+            )
+        }
+        response_entries: list[PlaybackPlanEntry] = []
+        for index, entry in enumerate(entries):
+            item = items.get(entry.library_item_id)
+            media_file = media_files.get(entry.media_file_id)
+            if item is None or media_file is None:
+                raise CatalogNotFoundError("Playback session is unavailable.")
+            stream_token = self._issue_media_token(
+                session, playback_session, media_file, MediaAccessOperation.STREAM, now
+            )
+            download_token = self._issue_media_token(
+                session, playback_session, media_file, MediaAccessOperation.DOWNLOAD, now
+            )
+            next_entry = entries[index + 1] if index + 1 < len(entries) else None
+            next_item = items.get(next_entry.library_item_id) if next_entry is not None else None
+            saved_state = states.get(item.id)
+            response_entries.append(
+                _playback_plan_entry(
+                    item=item,
+                    media_file=media_file,
+                    position=entry.position,
+                    saved_position=saved_state.position_seconds if saved_state is not None else 0.0,
+                    stream_token=stream_token,
+                    download_token=download_token,
+                    next_entry=(
+                        PlaybackNextEntry(
+                            position=next_entry.position,
+                            item_id=next_entry.library_item_id,
+                            display_title=next_item.title,
+                        )
+                        if next_entry is not None and next_item is not None
+                        else None
+                    ),
+                    series_title=_series_title(session, item),
+                )
+            )
+        current_item = next(
+            (
+                entry
+                for entry in response_entries
+                if entry.position == playback_session.current_entry_position
+            ),
+            None,
+        )
+        if current_item is None:
+            raise CatalogNotFoundError("Playback session is unavailable.")
+        last_event = session.scalar(
+            select(ModelPlaybackSessionEvent)
+            .where(ModelPlaybackSessionEvent.playback_session_id == playback_session.id)
+            .order_by(
+                ModelPlaybackSessionEvent.occurred_at.desc(), ModelPlaybackSessionEvent.id.desc()
+            )
+            .limit(1)
+        )
+        return PlaybackSessionResponse(
+            id=playback_session.id,
+            user_id=playback_session.user_id,
+            context=PlaybackContext(
+                kind=PlaybackContextKind(playback_session.context_kind.value),
+                item_id=playback_session.context_item_id,
+                watch_order_id=playback_session.watch_order_id,
+            ),
+            current_entry_position=playback_session.current_entry_position,
+            current_item=current_item,
+            entries=tuple(response_entries),
+            created_at=playback_session.created_at,
+            expires_at=playback_session.expires_at,
+            closed_at=playback_session.closed_at,
+            last_event=_playback_session_event(last_event) if last_event is not None else None,
+        )
+
+    def _issue_media_token(
+        self,
+        session: Session,
+        playback_session: ModelPlaybackSession,
+        media_file: MediaFile,
+        operation: MediaAccessOperation,
+        now: datetime,
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        session.add(
+            MediaAccessToken(
+                token_hash=_token_hash(token),
+                playback_session_id=playback_session.id,
+                media_file_id=media_file.id,
+                operation=operation,
+                expires_at=now + self._media_access_token_ttl,
+            )
+        )
+        return token
+
     def _database_revision(self) -> str | None:
         with self._database.engine.connect() as connection:
             return MigrationContext.configure(connection).get_current_revision()
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _is_expired(expires_at: datetime, now: datetime) -> bool:
+    normalized_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+    return normalized_expiry <= now
+
+
+def _require_active_session(playback_session: ModelPlaybackSession, now: datetime) -> None:
+    if playback_session.closed_at is not None or _is_expired(playback_session.expires_at, now):
+        raise CatalogNotFoundError("Playback session is unavailable.")
+
+
+def _current_session_entry(
+    session: Session, playback_session: ModelPlaybackSession
+) -> PlaybackSessionEntry:
+    entry = session.scalar(
+        select(PlaybackSessionEntry).where(
+            PlaybackSessionEntry.playback_session_id == playback_session.id,
+            PlaybackSessionEntry.position == playback_session.current_entry_position,
+        )
+    )
+    if entry is None:
+        raise CatalogNotFoundError("Playback session is unavailable.")
+    return entry
+
+
+def _playback_state(session: Session, user_id: int, item_id: int) -> PlaybackState | None:
+    return session.scalar(
+        select(PlaybackState).where(
+            PlaybackState.user_id == user_id,
+            PlaybackState.library_item_id == item_id,
+        )
+    )
+
+
+def _progress_duration(
+    media_file: MediaFile, state: PlaybackState | None, position_seconds: float
+) -> float:
+    if media_file.duration_seconds is not None:
+        return media_file.duration_seconds
+    if state is not None:
+        return max(state.duration_seconds, position_seconds)
+    return position_seconds
+
+
+def _completion_duration(media_file: MediaFile, state: PlaybackState | None) -> float:
+    if media_file.duration_seconds is not None:
+        return media_file.duration_seconds
+    return state.duration_seconds if state is not None else 0.0
+
+
+def _record_session_event(
+    session: Session,
+    playback_session: ModelPlaybackSession,
+    *,
+    entry_position: int,
+    event_kind: ModelPlaybackSessionEventKind,
+    position_seconds: float,
+    occurred_at: datetime,
+) -> ModelPlaybackSessionEvent:
+    event = ModelPlaybackSessionEvent(
+        playback_session_id=playback_session.id,
+        entry_position=entry_position,
+        event_kind=event_kind,
+        position_seconds=position_seconds,
+        occurred_at=occurred_at,
+    )
+    session.add(event)
+    session.flush()
+    return event
+
+
+def _playback_session_event(event: ModelPlaybackSessionEvent) -> PlaybackSessionEvent:
+    return PlaybackSessionEvent(
+        id=event.id,
+        entry_position=event.entry_position,
+        kind=PlaybackSessionEventKind(event.event_kind.value),
+        position_seconds=event.position_seconds,
+        occurred_at=event.occurred_at,
+    )
+
+
+def _series_and_episodes(
+    session: Session, context: SeriesPlaybackContext
+) -> tuple[Zaisan, tuple[Zaisan, ...]]:
+    if context.episode_id is not None:
+        episode = _require(session, Zaisan, context.episode_id, "Library item")
+        if episode.item_kind is not ZaisanKind.EPISODE:
+            raise CatalogValidationError("A series episode_id must identify an episode.")
+        season = _require_parent(session, episode, ZaisanKind.SEASON)
+        series = _require_parent(session, season, ZaisanKind.SERIES)
+        if context.series_id is not None and context.series_id != series.id:
+            raise CatalogValidationError("The episode does not belong to the requested series.")
+    else:
+        if context.series_id is None:
+            raise CatalogValidationError("A series context requires series_id.")
+        series = _require(session, Zaisan, context.series_id, "Library item")
+        if series.item_kind is not ZaisanKind.SERIES:
+            raise CatalogValidationError("A series context must identify a series item.")
+    season = aliased(Zaisan)
+    episodes = tuple(
+        session.scalars(
+            select(Zaisan)
+            .join(season, Zaisan.parent_id == season.id)
+            .where(
+                season.parent_id == series.id,
+                Zaisan.item_kind == ZaisanKind.EPISODE,
+            )
+            .order_by(season.season_number, Zaisan.episode_number, Zaisan.id)
+        )
+    )
+    if not episodes:
+        raise CatalogValidationError("The requested series has no episodes.")
+    return series, episodes
+
+
+def _series_start_index(
+    session: Session,
+    user_id: int,
+    episodes: tuple[Zaisan, ...],
+    context: SeriesPlaybackContext,
+) -> int:
+    episode_ids = tuple(episode.id for episode in episodes)
+    if context.episode_id is not None:
+        try:
+            return episode_ids.index(context.episode_id)
+        except ValueError as error:
+            raise CatalogValidationError(
+                "The episode is not part of the requested series."
+            ) from error
+    if not context.resume:
+        return 0
+    states = tuple(
+        session.scalars(
+            select(PlaybackState)
+            .where(
+                PlaybackState.user_id == user_id,
+                PlaybackState.library_item_id.in_(episode_ids),
+                PlaybackState.completed.is_(False),
+            )
+            .order_by(PlaybackState.last_played_at.desc(), PlaybackState.id.desc())
+        )
+    )
+    if states:
+        return episode_ids.index(states[0].library_item_id)
+    return 0
+
+
+def _require_parent(session: Session, item: Zaisan, expected_kind: ZaisanKind) -> Zaisan:
+    if item.parent_id is None:
+        raise CatalogValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+    parent = _require(session, Zaisan, item.parent_id, "Library item")
+    if parent.item_kind is not expected_kind:
+        raise CatalogValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+    return parent
+
+
+def _require_available_media(item: Zaisan, media_file: MediaFile) -> None:
+    if (
+        item.item_kind not in PLAYABLE_ITEM_KINDS
+        or item.availability is not AvailabilityState.AVAILABLE
+        or media_file.availability is not AvailabilityState.AVAILABLE
+    ):
+        raise CatalogNotFoundError("Media access token is unavailable.")
+
+
+def _playback_plan_entry(
+    *,
+    item: Zaisan,
+    media_file: MediaFile,
+    position: int,
+    saved_position: float,
+    stream_token: str,
+    download_token: str,
+    next_entry: PlaybackNextEntry | None,
+    series_title: str | None,
+) -> PlaybackPlanEntry:
+    return PlaybackPlanEntry(
+        position=position,
+        item_id=item.id,
+        display_title=item.title,
+        series_title=series_title,
+        season_number=item.season_number,
+        episode_number=item.episode_number,
+        duration_seconds=media_file.duration_seconds,
+        saved_resume_position_seconds=saved_position,
+        stream_url=f"/api/v1/media/{stream_token}",
+        download_url=f"/api/v1/downloads/{download_token}",
+        audio_streams=tuple(_stream_summary(stream) for stream in media_file.audio_streams),
+        subtitle_streams=tuple(_stream_summary(stream) for stream in media_file.subtitle_streams),
+        next_entry=next_entry,
+    )
+
+
+def _series_title(session: Session, item: Zaisan) -> str | None:
+    current = item
+    while current.parent_id is not None:
+        parent = session.get(Zaisan, current.parent_id)
+        if parent is None:
+            return None
+        if parent.item_kind is ZaisanKind.SERIES:
+            return parent.title
+        current = parent
+    return None
+
+
+def _download_name(title: str, suffix: str) -> str:
+    stem = "".join(character for character in title if character not in {"/", "\\", "\x00"}).strip()
+    safe_stem = stem or "media"
+    normalized_suffix = suffix if suffix.startswith(".") and len(suffix) <= 16 else ""
+    return f"{safe_stem}{normalized_suffix}"
 
 
 def _apply_item_filters(
@@ -791,7 +1596,7 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
 def _media_summary(file: MediaFile) -> MediaTechnicalSummary:
     return MediaTechnicalSummary(
         id=file.id,
-        container=file.container,
+        container=canonical_container(file.container) or file.container,
         size_bytes=file.size_bytes,
         duration_seconds=file.duration_seconds,
         availability=Availability(file.availability.value),
@@ -893,7 +1698,9 @@ def _artwork_selection(item_id: int, artwork: CachedArtwork) -> ArtworkSelection
     )
 
 
-def _require[Model](session: Session, model: type[Model], identifier: int, label: str) -> Model:
+def _require[Model](
+    session: Session, model: type[Model], identifier: int | str, label: str
+) -> Model:
     value = session.get(model, identifier)
     if value is None:
         raise CatalogNotFoundError(f"{label} {identifier} does not exist.")

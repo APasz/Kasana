@@ -53,9 +53,21 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
     library_path = tmp_path / "offline-library"
 
     _initialise(runner, environment)
+    user = runner.invoke(
+        katalog_cli.app,
+        ["--json", "user", "create", "owner", "--display-name", "Owner"],
+        env=environment,
+    )
+    assert user.exit_code == 0, user.output
+    assert json.loads(user.output) == {"display_name": "Owner", "id": 1, "username": "owner"}
+
+    users = runner.invoke(katalog_cli.app, ["--json", "user", "list"], env=environment)
+    assert users.exit_code == 0, users.output
+    assert json.loads(users.output) == [{"display_name": "Owner", "id": 1, "username": "owner"}]
+
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260718_0005"}
+    assert json.loads(current.output) == {"revision": "20260718_0006"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -100,6 +112,105 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
     removed = runner.invoke(katalog_cli.app, ["--json", "library", "remove", "1"], env=environment)
     assert removed.exit_code == 0, removed.output
     assert json.loads(removed.output) == {"removed_root_id": 1}
+
+
+def test_item_discovery_commands_emit_playback_ids(tmp_path: Path) -> None:
+    runner = CliRunner()
+    environment = _environment(tmp_path / "catalogue.sqlite3")
+    _initialise(runner, environment)
+    movie_id = _create_movie(tmp_path / "catalogue.sqlite3", tmp_path / "item-library")
+
+    items = runner.invoke(katalog_cli.app, ["--json", "item", "search", "CLI"], env=environment)
+    assert items.exit_code == 0, items.output
+    assert json.loads(items.output) == [
+        {
+            "availability": "available",
+            "id": movie_id,
+            "kind": "movie",
+            "title": "CLI Film",
+            "year": 2020,
+        }
+    ]
+
+    human_items = runner.invoke(katalog_cli.app, ["item", "search", "CLI"], env=environment)
+    assert human_items.exit_code == 0, human_items.output
+    assert "Library search" in human_items.output
+    assert "CLI Film" in human_items.output
+    assert "Availability" in human_items.output
+
+    item = runner.invoke(
+        katalog_cli.app, ["--json", "item", "show", str(movie_id)], env=environment
+    )
+    assert item.exit_code == 0, item.output
+    assert json.loads(item.output)["title"] == "CLI Film"
+
+
+def test_item_search_prioritizes_titles_and_applies_filters(tmp_path: Path) -> None:
+    runner = CliRunner()
+    database_path = tmp_path / "catalogue.sqlite3"
+    environment = _environment(database_path)
+    _initialise(runner, environment)
+
+    database = KatalogDatabase(database_path.resolve())
+    try:
+
+        def create(session: Session) -> None:
+            movie_root = create_library_root(
+                session,
+                path=tmp_path / "movie-library",
+                expected_media_kind=ZaisanKind.MOVIE,
+            )
+            series_root = create_library_root(
+                session,
+                path=tmp_path / "series-library",
+                expected_media_kind=ZaisanKind.SERIES,
+            )
+            for title, year in (
+                ("Cars", 2006),
+                ("Cars 2", 2011),
+                ("Runaway Cars", 2006),
+                ("Carson", 2006),
+            ):
+                create_library_item(
+                    session,
+                    library_root_id=movie_root.id,
+                    item_kind=ZaisanKind.MOVIE,
+                    title=title,
+                    release_year=year,
+                )
+            create_library_item(
+                session,
+                library_root_id=series_root.id,
+                item_kind=ZaisanKind.SERIES,
+                title="Cars Documentary",
+                release_year=2006,
+            )
+
+        database.run_transaction(create)
+    finally:
+        database.close()
+
+    ranked = runner.invoke(katalog_cli.app, ["--json", "item", "search", "Cars"], env=environment)
+    assert ranked.exit_code == 0, ranked.output
+    assert [item["title"] for item in json.loads(ranked.output)] == [
+        "Cars",
+        "Cars 2",
+        "Cars Documentary",
+        "Runaway Cars",
+        "Carson",
+    ]
+
+    filtered = runner.invoke(
+        katalog_cli.app,
+        ["--json", "item", "search", "Cars", "--year", "2006", "--kind", "movie"],
+        env=environment,
+    )
+    assert filtered.exit_code == 0, filtered.output
+    assert [item["title"] for item in json.loads(filtered.output)] == [
+        "Cars",
+        "Runaway Cars",
+        "Carson",
+    ]
 
 
 def test_scan_audit_and_status_handle_offline_roots(tmp_path: Path) -> None:

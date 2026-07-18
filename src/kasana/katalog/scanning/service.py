@@ -204,6 +204,9 @@ class IncrementalScanner:
                 ExistingFile(
                     id=file.id,
                     library_item_id=file.library_item_id,
+                    item_kind=file.library_item.item_kind,
+                    item_title=file.library_item.title,
+                    item_release_year=file.library_item.release_year,
                     path=Path(file.absolute_path),
                     size_bytes=file.size_bytes,
                     mtime_ns=file.mtime_ns,

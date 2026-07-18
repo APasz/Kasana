@@ -14,28 +14,43 @@ from kasana.katalog.cli.app import (
     run_database_operation,
     with_administration,
 )
-from kasana.katalog.cli.rendering import emit, emit_model
+from kasana.katalog.cli.rendering import emit, emit_model, key_value_table, success_panel
 
 
 @database_app.command("initialise")
 def initialise(context: typer.Context) -> None:
     cli = context_from(context)
     revision = run_database_operation(cli, DatabaseAdmin(database_path(cli)).initialise)
-    emit(cli, {"revision": revision}, [f"Database initialised at revision {revision}."])
+    emit(
+        cli,
+        {"revision": revision},
+        [f"Database initialised at revision {revision}."],
+        success_panel(f"Database initialised at revision {revision}."),
+    )
 
 
 @database_app.command("upgrade")
 def upgrade(context: typer.Context) -> None:
     cli = context_from(context)
     revision = run_database_operation(cli, DatabaseAdmin(database_path(cli)).upgrade)
-    emit(cli, {"revision": revision}, [f"Database upgraded to revision {revision}."])
+    emit(
+        cli,
+        {"revision": revision},
+        [f"Database upgraded to revision {revision}."],
+        success_panel(f"Database upgraded to revision {revision}."),
+    )
 
 
 @database_app.command("current")
 def current(context: typer.Context) -> None:
     cli = context_from(context)
     revision = run_database_operation(cli, DatabaseAdmin(database_path(cli)).current)
-    emit(cli, {"revision": revision}, [f"Database revision: {revision}"])
+    emit(
+        cli,
+        {"revision": revision},
+        [f"Database revision: {revision}"],
+        key_value_table("Database", (("Revision", revision),)),
+    )
 
 
 @app.command("status")
@@ -56,4 +71,19 @@ def status(context: typer.Context) -> None:
             f"unavailable={report.unavailable_file_count}",
             f"unresolved_audit_issues={report.unresolved_audit_issue_count}",
         ],
+        key_value_table(
+            "Catalogue status",
+            (
+                ("Database revision", report.database_revision or "unknown"),
+                (
+                    "Library roots",
+                    f"{report.enabled_roots} enabled · {report.disabled_roots} disabled",
+                ),
+                ("Library items", str(report.item_count)),
+                ("Media files", str(report.media_file_count)),
+                ("Available files", str(report.available_file_count)),
+                ("Unavailable files", str(report.unavailable_file_count)),
+                ("Unresolved audit issues", str(report.unresolved_audit_issue_count)),
+            ),
+        ),
     )

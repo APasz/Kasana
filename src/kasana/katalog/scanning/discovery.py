@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from kasana.katalog.container import canonical_container
 from kasana.katalog.models import AuditCategory
 from kasana.katalog.parsing import ParseFailure
 from kasana.katalog.probe import ProbeResult
 
 _POSTER_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".webp"})
 _SUBTITLE_EXTENSIONS = frozenset({".ass", ".srt", ".ssa", ".sub", ".vtt"})
+_LANGUAGE_SIDECAR_STEM_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[a-z]{2})?$", re.IGNORECASE)
 _POSTER_STEMS = frozenset({"cover", "folder", "poster"})
-_SUPPORTED_CONTAINERS = frozenset({"avi", "matroska", "mov", "mp4", "webm"})
-_SUPPORTED_VIDEO_CODECS = frozenset({"av1", "h264", "hevc", "mpeg4", "vp8", "vp9"})
+_RECOGNISED_CONTAINERS = frozenset({"avi", "isobmff", "matroska"})
+_RECOGNISED_VIDEO_CODECS = frozenset(
+    {"av1", "h264", "hevc", "mpeg2video", "mpeg4", "vc1", "vp8", "vp9"}
+)
 _SUPPORTED_AUDIO_CODECS = frozenset(
     {"aac", "ac3", "dts", "eac3", "flac", "mp3", "opus", "pcm_s16le", "vorbis"}
 )
@@ -135,16 +140,16 @@ def sidecar_findings(discovery: Discovery) -> tuple[AuditFinding, ...]:
 def probe_audit_findings(probe_results: Mapping[Path, ProbeResult]) -> tuple[AuditFinding, ...]:
     findings: list[AuditFinding] = []
     for path, result in probe_results.items():
-        containers = {container.strip() for container in result.container.casefold().split(",")}
-        if not containers <= _SUPPORTED_CONTAINERS:
+        container = canonical_container(result.container)
+        if container not in _RECOGNISED_CONTAINERS:
             findings.append(
                 AuditFinding(
                     AuditCategory.UNSUPPORTED_CONTAINER,
                     path,
-                    f"Encountered container {result.container!r}.",
+                    f"Unrecognised container {result.container!r}.",
                 )
             )
-        findings.extend(codec_findings(path, result.video_streams, _SUPPORTED_VIDEO_CODECS))
+        findings.extend(codec_findings(path, result.video_streams, _RECOGNISED_VIDEO_CODECS))
         findings.extend(codec_findings(path, result.audio_streams, _SUPPORTED_AUDIO_CODECS))
         findings.extend(codec_findings(path, result.subtitle_streams, _SUPPORTED_SUBTITLE_CODECS))
     return tuple(findings)
@@ -173,10 +178,13 @@ def add_totals(target: ScanTotals, source: ScanTotals) -> None:
 
 def sidecar_matches_video(sidecar: Path, video_stems: set[str]) -> bool:
     stem = sidecar.stem.casefold()
-    if stem in video_stems:
+    normalized_video_stems = {video_stem.casefold() for video_stem in video_stems}
+    if stem in normalized_video_stems:
         return True
+    if _LANGUAGE_SIDECAR_STEM_PATTERN.fullmatch(stem) is not None:
+        return len(normalized_video_stems) == 1
     prefix, separator, suffix = stem.rpartition(".")
-    return bool(separator and len(suffix) in {2, 3} and prefix in video_stems)
+    return bool(separator and len(suffix) in {2, 3} and prefix in normalized_video_stems)
 
 
 def codec_findings(
@@ -190,7 +198,7 @@ def codec_findings(
                 AuditFinding(
                     AuditCategory.UNSUPPORTED_CODEC,
                     path,
-                    f"Encountered codec {codec!r}.",
+                    f"Unrecognised codec {codec!r}.",
                 )
             )
     return findings

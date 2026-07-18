@@ -10,8 +10,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.cli import app as katalog_cli
+from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
-from kasana.katalog.models import AuditCategory, AvailabilityState, MediaFile, Zaisan, ZaisanKind
+from kasana.katalog.models import (
+    AuditCategory,
+    AvailabilityState,
+    Kura,
+    MediaFile,
+    Zaisan,
+    ZaisanKind,
+)
 from kasana.katalog.parsing import (
     LibraryLayout,
     ParsedMediaKind,
@@ -22,7 +30,8 @@ from kasana.katalog.parsing import (
 )
 from kasana.katalog.probe import FFProbeClient, ProbeFailure, ProbeResult
 from kasana.katalog.scanning import IncrementalScanner
-from kasana.katalog.services import create_library_root
+from kasana.katalog.scanning.discovery import probe_audit_findings, sidecar_matches_video
+from kasana.katalog.services import attach_media_file, create_library_item, create_library_root
 from kasana.katalog.settings import KatalogSettings
 
 
@@ -149,7 +158,7 @@ def test_incremental_scan_detects_add_change_move_and_missing(
     media_file, item = database.run_transaction(read_file)
     assert item.item_kind is ZaisanKind.MOVIE
     assert item.title == "Stargate"
-    assert media_file.container == "matroska,webm"
+    assert media_file.container == "matroska"
     assert media_file.subtitle_streams[0]["default"] is True
 
     unchanged = scanner.scan()
@@ -179,12 +188,57 @@ def test_incremental_scan_detects_add_change_move_and_missing(
     assert database.run_transaction(read_availability) is AvailabilityState.UNAVAILABLE
 
 
+def test_abbreviated_decade_directories_index_files_and_repair_legacy_grouping(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    film = movies / "00's" / "Cars (2006).mp4"
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"video")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    stat_result = film.stat()
+
+    def create_legacy_record(session: Session) -> None:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        legacy_item = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="00's",
+        )
+        attach_media_file(
+            session,
+            library_item_id=legacy_item.id,
+            absolute_path=film,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+            filesystem_device=stat_result.st_dev,
+            filesystem_inode=stat_result.st_ino,
+            container="mp4",
+        )
+
+    database.run_transaction(create_legacy_record)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+    result = _run_scan(database, fake_client).scan()
+    assert result.totals.changed == 1
+
+    def item_details(session: Session) -> tuple[str, int | None]:
+        file = session.scalar(select(MediaFile))
+        assert file is not None
+        return file.library_item.title, file.library_item.release_year
+
+    assert database.run_transaction(item_details) == ("Cars", 2006)
+
+
 def test_episode_parsing_uses_season_directory_context() -> None:
     assert parse_season_number("Season 02", allow_volume=False) == 2
     assert parse_season_number("Volume 02", allow_volume=False) is None
     assert parse_season_number("Volume 02", allow_volume=True) == 2
     assert parse_episode_numbers("Show s1e2", season_from_directory=1) == (1, 2)
     assert parse_episode_numbers("Show E02", season_from_directory=1) == (1, 2)
+    assert parse_episode_numbers("Show [2x03]", season_from_directory=2) == (2, 3)
+    assert parse_episode_numbers("Show (2X03)", season_from_directory=2) == (2, 3)
     assert parse_episode_numbers("Show E02", season_from_directory=None) is None
 
     parsed = parse_media_path(
@@ -196,6 +250,109 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert parsed.kind is ParsedMediaKind.EPISODE
     assert parsed.season_number == 1
     assert parsed.episode_number == 2
+
+    alternate = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 2/[2x03] The Test.mkv"),
+    )
+    assert not isinstance(alternate, ParseFailure)
+    assert alternate.season_number == 2
+    assert alternate.episode_number == 3
+    assert alternate.title == "The Test"
+
+    special = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 0/[0x01] Pilot.mkv"),
+    )
+    assert not isinstance(special, ParseFailure)
+    assert special.kind is ParsedMediaKind.SPECIAL
+    assert special.title == "Pilot"
+
+    extra = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/Extras/Behind the Scenes.mkv"),
+    )
+    assert not isinstance(extra, ParseFailure)
+    assert extra.kind is ParsedMediaKind.EXTRA
+    assert extra.parent_series_title == "Show"
+
+
+def test_scanner_classifies_extras_and_season_zero_outside_series_episodes(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    shows = tmp_path / "TVShows" / "Example"
+    special = shows / "Season 0" / "[0x01] Pilot.mkv"
+    extra = shows / "Season 1" / "Extras" / "Behind the Scenes.mkv"
+    special.parent.mkdir(parents=True)
+    extra.parent.mkdir(parents=True)
+    special.write_bytes(b"special")
+    extra.write_bytes(b"extra")
+    _register_root(database, shows.parent, ZaisanKind.SERIES)
+
+    scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
+    result = scanner.scan()
+    assert result.totals.added == 2
+
+    def item_kinds(session: Session) -> set[ZaisanKind]:
+        return set(session.scalars(select(Zaisan.item_kind)))
+
+    assert database.run_transaction(item_kinds) == {
+        ZaisanKind.SERIES,
+        ZaisanKind.SPECIAL,
+        ZaisanKind.EXTRA,
+    }
+
+
+def test_language_only_ass_sidecar_requires_exactly_one_video() -> None:
+    assert sidecar_matches_video(Path("/library/en.ass"), {"episode"})
+    assert sidecar_matches_video(Path("/library/eng.ASS"), {"episode"})
+    assert not sidecar_matches_video(Path("/library/en.ass"), {"episode-one", "episode-two"})
+
+
+def test_sidecar_video_basename_matching_is_case_insensitive() -> None:
+    assert sidecar_matches_video(Path("/library/Episode.EN.ass"), {"episode"})
+    assert sidecar_matches_video(Path("/library/episode.ass"), {"EPISODE"})
+
+
+@pytest.mark.parametrize(
+    ("format_name", "expected"),
+    (
+        ("mov,mp4,m4a,3gp,3g2,mj2", "isobmff"),
+        ("  3g2, mov, m4a, mp4, mj2, 3gp  ", "isobmff"),
+        ("matroska,webm", "matroska"),
+        (" webm , matroska ", "matroska"),
+        ("avi", "avi"),
+    ),
+)
+def test_ffmpeg_container_aliases_normalize_to_one_family(format_name: str, expected: str) -> None:
+    assert canonical_container(format_name) == expected
+
+
+def test_probe_audits_recognized_legacy_and_unrecognized_formats() -> None:
+    recognized = {
+        Path("/library/movie.mp4"): _probe_result(container="mov,mp4,m4a,3gp,3g2,mj2", codec="vc1"),
+        Path("/library/movie.mov"): _probe_result(
+            container="mj2, 3g2, 3gp, m4a, mp4, mov", codec="mpeg2video"
+        ),
+        Path("/library/movie.mkv"): _probe_result(container="matroska,webm"),
+        Path("/library/movie.avi"): _probe_result(container="avi"),
+    }
+    assert probe_audit_findings(recognized) == ()
+
+    unknown_codec = probe_audit_findings(
+        {Path("/library/unknown-codec.mkv"): _probe_result(codec="made_up_video")}
+    )
+    assert unknown_codec[0].category is AuditCategory.UNSUPPORTED_CODEC
+    assert unknown_codec[0].message == "Unrecognised codec 'made_up_video'."
+
+    unknown_container = probe_audit_findings(
+        {Path("/library/unknown-container.bin"): _probe_result(container="mystery")}
+    )
+    assert unknown_container[0].category is AuditCategory.UNSUPPORTED_CONTAINER
+    assert unknown_container[0].message == "Unrecognised container 'mystery'."
 
 
 def test_ambiguous_and_orphaned_files_remain_audit_findings(
@@ -358,6 +515,7 @@ def test_ffprobe_normalises_attached_pictures_out_of_playable_video_streams(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     result = asyncio.run(FFProbeClient(str(fake_ffprobe)).probe(fake_ffprobe))
 
+    assert result.container == "matroska,webm"
     assert result.duration_seconds == 120.5
     assert result.video_streams == (
         {
@@ -432,6 +590,6 @@ def test_scan_and_audit_cli_commands(
     )
 
     katalog_cli.main(("scan",))
-    assert "discovered=0" in capsys.readouterr().out
+    assert "Scan summary" in capsys.readouterr().out
     katalog_cli.main(("audit",))
-    assert "ambiguous=0" in capsys.readouterr().out
+    assert "Needs review" in capsys.readouterr().out

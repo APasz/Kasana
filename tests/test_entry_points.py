@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from kasana.__main__ import main as kasana_main
 from kasana.kanvas.__main__ import main as kanvas_main
 from kasana.kanvas.dashboard import build_dashboard
 from kasana.katalog.backend import create_backend
@@ -14,6 +15,7 @@ def test_katalog_backend_can_be_constructed() -> None:
 
 
 def test_component_entry_points_configure_without_starting_services() -> None:
+    kasana_main()
     katalog_main()
     kanvas_main()
     kestrel_main()

@@ -99,7 +99,7 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
             absolute_path=library_path / "alpha.mkv",
             size_bytes=123,
             mtime_ns=456,
-            container="matroska",
+            container="matroska,webm",
             duration_seconds=120.0,
             video_streams=({"codec_name": "h264", "width": 1920, "height": 1080},),
             audio_streams=({"codec_name": "aac", "channels": 2},),
@@ -246,6 +246,7 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     expected_gets = (
         "/api/v1/health",
         "/api/v1/status",
+        "/api/v1/users",
         "/api/v1/library/items",
         "/api/v1/library/items/1/children",
         "/api/v1/library/items/1/media",
@@ -311,6 +312,7 @@ async def test_openapi_uses_versioned_stable_operation_ids(api_fixture: ApiFixtu
 
     assert schema["openapi"].startswith("3.1")
     assert schema["paths"]["/api/v1/library/items"]["get"]["operationId"] == "v1_list_library_items"
+    assert schema["paths"]["/api/v1/users"]["get"]["operationId"] == "v1_list_users"
     assert schema["paths"]["/api/v1/scans"]["post"]["operationId"] == "v1_submit_scan"
     assert "APIError" in schema["components"]["schemas"]
 
@@ -332,6 +334,7 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             await asyncio.sleep(0.001)
         async with KatalogClient(f"http://127.0.0.1:{port}") as client:
             assert (await client.health()).status == "ok"
+            assert (await client.list_users())[0].username == "tester"
             assert [item.title async for item in client.iter_library_items(limit=2)] == [
                 "Alpha",
                 "Beta",

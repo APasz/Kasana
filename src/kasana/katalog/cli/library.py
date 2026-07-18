@@ -17,7 +17,7 @@ from kasana.katalog.cli.app import (
     library_app,
     with_administration,
 )
-from kasana.katalog.cli.rendering import emit, emit_model, emit_models
+from kasana.katalog.cli.rendering import data_table, emit, emit_model, emit_models, success_panel
 
 
 class ExpectedKind(StrEnum):
@@ -37,6 +37,22 @@ def list_roots(context: typer.Context) -> None:
             f"{root.display_name or '-'} {root.path}"
             for root in roots
         ],
+        data_table(
+            "Library roots",
+            ("ID", "Name", "Kind", "Status", "Path", "Last scan"),
+            tuple(
+                (
+                    str(root.id),
+                    root.display_name or "—",
+                    root.expected_kind,
+                    "enabled" if root.enabled else "disabled",
+                    str(root.path),
+                    root.last_scan_completed_at or "never",
+                )
+                for root in roots
+            ),
+            empty_message="No library roots. Add one with `library add <path> --expected-kind …`.",
+        ),
     )
 
 
@@ -63,7 +79,12 @@ def add_root(
     root: KuraView = with_administration(
         cli, lambda administration: administration.add_root(root_input)
     )
-    emit_model(cli, root, [f"Added library root {root.id}: {root.path}"])
+    emit_model(
+        cli,
+        root,
+        [f"Added library root {root.id}: {root.path}"],
+        success_panel(f"Added library root {root.display_name or root.path} (ID {root.id})."),
+    )
 
 
 @library_app.command("update")
@@ -90,11 +111,21 @@ def update_root(
     root: KuraView = with_administration(
         cli, lambda administration: administration.update_root(root_id, changes)
     )
-    emit_model(cli, root, [f"Updated library root {root.id}: {root.path}"])
+    emit_model(
+        cli,
+        root,
+        [f"Updated library root {root.id}: {root.path}"],
+        success_panel(f"Updated library root {root.id}."),
+    )
 
 
 @library_app.command("remove")
 def remove_root(context: typer.Context, root_id: Annotated[int, typer.Argument(min=1)]) -> None:
     cli = context_from(context)
     with_administration(cli, lambda administration: administration.remove_root(root_id))
-    emit(cli, {"removed_root_id": root_id}, [f"Removed library root {root_id}."])
+    emit(
+        cli,
+        {"removed_root_id": root_id},
+        [f"Removed library root {root_id}."],
+        success_panel(f"Removed library root {root_id}."),
+    )

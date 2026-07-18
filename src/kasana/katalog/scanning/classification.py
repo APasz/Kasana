@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from kasana.katalog.models import AuditCategory, AvailabilityState
+from kasana.katalog.models import AuditCategory, AvailabilityState, ZaisanKind
 from kasana.katalog.parsing import (
     LibraryLayout,
     ParsedMedia,
@@ -22,6 +22,9 @@ from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot, parse_
 class ExistingFile:
     id: int
     library_item_id: int
+    item_kind: ZaisanKind
+    item_title: str
+    item_release_year: int | None
     path: Path
     size_bytes: int
     mtime_ns: int
@@ -105,11 +108,28 @@ def plan_files(
         if known is not None:
             unseen_ids.discard(known.id)
             if known.size_bytes == snapshot.size_bytes and known.mtime_ns == snapshot.mtime_ns:
+                if isinstance(parsed, ParsedMedia) and _requires_reclassification(known, parsed):
+                    plans.append(
+                        PlannedFile(
+                            PlanAction.CHANGE,
+                            snapshot,
+                            parsed=parsed,
+                            existing_file_id=known.id,
+                        )
+                    )
+                    continue
                 unchanged_count += 1
                 if known.availability is not AvailabilityState.AVAILABLE:
                     restored_ids.add(known.id)
                 continue
-            plans.append(PlannedFile(PlanAction.CHANGE, snapshot, existing_file_id=known.id))
+            plans.append(
+                PlannedFile(
+                    PlanAction.CHANGE,
+                    snapshot,
+                    parsed=parsed if isinstance(parsed, ParsedMedia) else None,
+                    existing_file_id=known.id,
+                )
+            )
             continue
         if moved is not None:
             unseen_ids.discard(moved.id)
@@ -130,3 +150,21 @@ def plan_files(
         unchanged_count=unchanged_count,
         findings=tuple(findings),
     )
+
+
+def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> bool:
+    match parsed.kind:
+        case ParsedMediaKind.MOVIE:
+            return existing.item_kind is ZaisanKind.MOVIE and (
+                existing.item_title != parsed.title
+                or (
+                    parsed.release_year is not None
+                    and existing.item_release_year != parsed.release_year
+                )
+            )
+        case ParsedMediaKind.SPECIAL:
+            return existing.item_kind is not ZaisanKind.SPECIAL
+        case ParsedMediaKind.EXTRA:
+            return existing.item_kind is not ZaisanKind.EXTRA
+        case ParsedMediaKind.EPISODE:
+            return False

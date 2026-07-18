@@ -42,7 +42,7 @@ _PARENT_KINDS: dict[ZaisanKind, frozenset[ZaisanKind]] = {
         }
     ),
 }
-_PLAYABLE_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
+PLAYABLE_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
     {ZaisanKind.MOVIE, ZaisanKind.EPISODE, ZaisanKind.SPECIAL, ZaisanKind.EXTRA}
 )
 
@@ -136,7 +136,7 @@ def attach_media_file(
     availability: AvailabilityState = AvailabilityState.AVAILABLE,
 ) -> MediaFile:
     item: Zaisan = _require_item(session, library_item_id)
-    if item.item_kind not in _PLAYABLE_KINDS:
+    if item.item_kind not in PLAYABLE_ITEM_KINDS:
         msg: LiteralString = f"{item.item_kind.value} items cannot own playable media files."
         raise ValueError(msg)
     if not absolute_path.is_absolute():
@@ -209,7 +209,7 @@ def append_watch_order_entry(
     session: Session, *, watch_order_id: int, library_item_id: int
 ) -> KeiroEntry:
     item: Zaisan = _require_item(session, library_item_id)
-    if item.item_kind not in _PLAYABLE_KINDS:
+    if item.item_kind not in PLAYABLE_ITEM_KINDS:
         msg: LiteralString = f"{item.item_kind.value} items cannot appear in a watch order."
         raise ValueError(msg)
     highest_position: int | None = session.scalar(
@@ -244,7 +244,7 @@ def record_playback_progress(
     played_at: datetime | None = None,
 ) -> PlaybackState:
     item: Zaisan = _require_item(session, library_item_id)
-    if item.item_kind not in _PLAYABLE_KINDS:
+    if item.item_kind not in PLAYABLE_ITEM_KINDS:
         msg: LiteralString = f"{item.item_kind.value} items cannot have playback state."
         raise ValueError(msg)
     if position_seconds < 0 or duration_seconds < 0 or position_seconds > duration_seconds:

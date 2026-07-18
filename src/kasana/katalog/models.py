@@ -66,6 +66,24 @@ class KeiroKind(StrEnum):
     CUSTOM = "custom"
 
 
+class PlaybackContextKind(StrEnum):
+    STANDALONE = "standalone"
+    SERIES = "series"
+    WATCH_ORDER = "watch_order"
+    MANUAL_QUEUE = "manual_queue"
+
+
+class MediaAccessOperation(StrEnum):
+    STREAM = "stream"
+    DOWNLOAD = "download"
+
+
+class PlaybackSessionEventKind(StrEnum):
+    PROGRESS = "progress"
+    COMPLETED = "completed"
+    ADVANCED = "advanced"
+
+
 class MetadataField(StrEnum):
     TITLE = "title"
     SORT_TITLE = "sort_title"
@@ -245,6 +263,9 @@ class Zaisan(Base):
     cached_artwork: Mapped[list[CachedArtwork]] = orm_relationship(
         back_populates="library_item", passive_deletes=True
     )
+    playback_session_entries: Mapped[list[PlaybackSessionEntry]] = orm_relationship(
+        back_populates="library_item", passive_deletes=True
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -315,6 +336,9 @@ class MediaFile(Base):
     )
 
     library_item: Mapped[Zaisan] = orm_relationship(back_populates="media_files")
+    access_tokens: Mapped[list[MediaAccessToken]] = orm_relationship(
+        back_populates="media_file", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (
         CheckConstraint("size_bytes >= 0", name="nonnegative_size"),
@@ -553,6 +577,9 @@ class Keiro(Base):
     entries: Mapped[list[KeiroEntry]] = orm_relationship(
         back_populates="watch_order", cascade="all, delete-orphan", passive_deletes=True
     )
+    playback_sessions: Mapped[list[PlaybackSession]] = orm_relationship(
+        back_populates="watch_order", passive_deletes=True
+    )
 
     __table_args__ = (
         Index("ix_watch_order_collection_name", "collection_id", "name", unique=True),
@@ -590,6 +617,9 @@ class User(Base):
     playback_states: Mapped[list[PlaybackState]] = orm_relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    playback_sessions: Mapped[list[PlaybackSession]] = orm_relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (Index("ix_user_username", "username", unique=True),)
 
@@ -616,4 +646,148 @@ class PlaybackState(Base):
         CheckConstraint("duration_seconds >= 0", name="nonnegative_duration"),
         CheckConstraint("play_count >= 0", name="nonnegative_play_count"),
         Index("ix_playback_state_user_item", "user_id", "library_item_id", unique=True),
+    )
+
+
+class PlaybackSession(Base):
+    __tablename__ = "playback_session"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    context_kind: Mapped[PlaybackContextKind] = mapped_column(
+        _enum(PlaybackContextKind, "playback_context_kind"), nullable=False
+    )
+    context_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_item.id", ondelete="SET NULL")
+    )
+    watch_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("watch_order.id", ondelete="SET NULL")
+    )
+    current_entry_position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = orm_relationship(back_populates="playback_sessions")
+    context_item: Mapped[Zaisan | None] = orm_relationship(foreign_keys=[context_item_id])
+    watch_order: Mapped[Keiro | None] = orm_relationship(back_populates="playback_sessions")
+    entries: Mapped[list[PlaybackSessionEntry]] = orm_relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    launch_tokens: Mapped[list[PlaybackLaunchToken]] = orm_relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    access_tokens: Mapped[list[MediaAccessToken]] = orm_relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    events: Mapped[list[PlaybackSessionEvent]] = orm_relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("current_entry_position >= 0", name="nonnegative_current_entry_position"),
+        Index("ix_playback_session_user_expiry", "user_id", "expires_at"),
+        Index("ix_playback_session_watch_order", "watch_order_id"),
+    )
+
+
+class PlaybackSessionEntry(Base):
+    __tablename__ = "playback_session_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    playback_session_id: Mapped[str] = mapped_column(
+        ForeignKey("playback_session.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    library_item_id: Mapped[int] = mapped_column(
+        ForeignKey("library_item.id", ondelete="CASCADE"), nullable=False
+    )
+    media_file_id: Mapped[int] = mapped_column(
+        ForeignKey("media_file.id", ondelete="CASCADE"), nullable=False
+    )
+    source_watch_order_position: Mapped[int | None] = mapped_column(Integer)
+
+    session: Mapped[PlaybackSession] = orm_relationship(back_populates="entries")
+    library_item: Mapped[Zaisan] = orm_relationship(back_populates="playback_session_entries")
+    media_file: Mapped[MediaFile] = orm_relationship()
+
+    __table_args__ = (
+        CheckConstraint("position >= 0", name="nonnegative_session_entry_position"),
+        CheckConstraint(
+            "source_watch_order_position IS NULL OR source_watch_order_position >= 0",
+            name="nonnegative_source_watch_order_position",
+        ),
+        Index(
+            "ix_playback_session_entry_position",
+            "playback_session_id",
+            "position",
+            unique=True,
+        ),
+    )
+
+
+class PlaybackLaunchToken(Base):
+    __tablename__ = "playback_launch_token"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    playback_session_id: Mapped[str] = mapped_column(
+        ForeignKey("playback_session.id", ondelete="CASCADE"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    session: Mapped[PlaybackSession] = orm_relationship(back_populates="launch_tokens")
+
+    __table_args__ = (
+        Index("ix_playback_launch_token_hash", "token_hash", unique=True),
+        Index("ix_playback_launch_token_expiry", "expires_at"),
+    )
+
+
+class MediaAccessToken(Base):
+    __tablename__ = "media_access_token"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    playback_session_id: Mapped[str] = mapped_column(
+        ForeignKey("playback_session.id", ondelete="CASCADE"), nullable=False
+    )
+    media_file_id: Mapped[int] = mapped_column(
+        ForeignKey("media_file.id", ondelete="CASCADE"), nullable=False
+    )
+    operation: Mapped[MediaAccessOperation] = mapped_column(
+        _enum(MediaAccessOperation, "media_access_operation"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    session: Mapped[PlaybackSession] = orm_relationship(back_populates="access_tokens")
+    media_file: Mapped[MediaFile] = orm_relationship(back_populates="access_tokens")
+
+    __table_args__ = (
+        Index("ix_media_access_token_hash", "token_hash", unique=True),
+        Index("ix_media_access_token_expiry", "expires_at"),
+    )
+
+
+class PlaybackSessionEvent(Base):
+    __tablename__ = "playback_session_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    playback_session_id: Mapped[str] = mapped_column(
+        ForeignKey("playback_session.id", ondelete="CASCADE"), nullable=False
+    )
+    entry_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_kind: Mapped[PlaybackSessionEventKind] = mapped_column(
+        _enum(PlaybackSessionEventKind, "playback_session_event_kind"), nullable=False
+    )
+    position_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    session: Mapped[PlaybackSession] = orm_relationship(back_populates="events")
+
+    __table_args__ = (
+        CheckConstraint("entry_position >= 0", name="nonnegative_event_entry_position"),
+        CheckConstraint("position_seconds >= 0", name="nonnegative_event_position"),
+        Index("ix_playback_session_event_session_time", "playback_session_id", "occurred_at"),
     )

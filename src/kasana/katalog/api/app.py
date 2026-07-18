@@ -36,10 +36,17 @@ from kasana.katalog.api.contracts import (
     MutationResult,
     OnDeckEntry,
     PaginatedResponse,
+    PlaybackCompletionResult,
+    PlaybackPlanLaunch,
+    PlaybackPlanRequest,
+    PlaybackProgressResult,
+    PlaybackSessionResponse,
     PlaybackStateResponse,
     ProgressUpdate,
     ScanRequest,
+    SessionProgressUpdate,
     StatusResponse,
+    UserSummary,
     WatchedFilter,
     WatchOrderDetail,
     WatchOrderSummary,
@@ -53,6 +60,7 @@ from kasana.katalog.api.service import (
 )
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MetadataWorkflowError
+from kasana.katalog.models import MediaAccessOperation
 from kasana.katalog.settings import KatalogSettings
 from kasana.kourier.errors import KourierError
 from kasana.shared.concurrency import run_blocking
@@ -122,6 +130,15 @@ def create_app(
         return await run_blocking(
             runtime.queries.status, active_jobs=active_jobs, failed_jobs=failed_jobs
         )
+
+    @app.get(
+        "/api/v1/users",
+        response_model=tuple[UserSummary, ...],
+        operation_id="v1_list_users",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_users(runtime: KatalogApiRuntime = Depends(_runtime)) -> tuple[UserSummary, ...]:
+        return await run_blocking(runtime.queries.list_users)
 
     @app.get(
         "/api/v1/library/items",
@@ -362,6 +379,202 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> BackgroundJob:
         return await runtime.jobs.get(job_id)
+
+    @app.post(
+        "/api/v1/playback/plans",
+        response_model=PlaybackPlanLaunch,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_playback_plan",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_playback_plan(
+        plan: PlaybackPlanRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackPlanLaunch:
+        return await run_blocking(runtime.queries.create_playback_plan, plan)
+
+    @app.get(
+        "/api/v1/playback/plans/{launch_token}",
+        response_model=PlaybackSessionResponse,
+        operation_id="v1_launch_playback_plan",
+        responses=_ERROR_RESPONSES,
+    )
+    async def launch_playback_plan(
+        launch_token: Annotated[str, Path(min_length=32, max_length=128)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackSessionResponse:
+        return await run_blocking(runtime.queries.launch_playback_plan, launch_token)
+
+    @app.get(
+        "/api/v1/playback/sessions/{session_id}",
+        response_model=PlaybackSessionResponse,
+        operation_id="v1_get_playback_session",
+        responses=_ERROR_RESPONSES,
+    )
+    async def get_playback_session(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackSessionResponse:
+        return await run_blocking(runtime.queries.get_playback_session, session_id)
+
+    @app.put(
+        "/api/v1/playback/sessions/{session_id}/progress",
+        response_model=PlaybackProgressResult,
+        operation_id="v1_update_playback_session_progress",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_playback_session_progress(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        update: SessionProgressUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackProgressResult:
+        return await run_blocking(runtime.queries.update_session_progress, session_id, update)
+
+    @app.post(
+        "/api/v1/playback/sessions/{session_id}/advance",
+        response_model=PlaybackSessionResponse,
+        operation_id="v1_advance_playback_session",
+        responses=_ERROR_RESPONSES,
+    )
+    async def advance_playback_session(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackSessionResponse:
+        return await run_blocking(runtime.queries.advance_playback_session, session_id)
+
+    @app.post(
+        "/api/v1/playback/sessions/{session_id}/complete",
+        response_model=PlaybackCompletionResult,
+        operation_id="v1_complete_playback_session",
+        responses=_ERROR_RESPONSES,
+    )
+    async def complete_playback_session(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackCompletionResult:
+        return await run_blocking(runtime.queries.complete_playback_session, session_id)
+
+    @app.delete(
+        "/api/v1/playback/sessions/{session_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        operation_id="v1_close_playback_session",
+        responses=_ERROR_RESPONSES,
+    )
+    async def close_playback_session(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        await run_blocking(runtime.queries.close_playback_session, session_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    async def transfer_media(
+        request: Request,
+        access_token: str,
+        range_header: str | None,
+        if_none_match: str | None,
+        runtime: KatalogApiRuntime,
+        *,
+        operation: MediaAccessOperation,
+        download: bool,
+    ) -> Response:
+        media_file = await run_blocking(
+            runtime.queries.resolve_media_access_token, access_token, operation
+        )
+        return runtime.file_transfers.response(
+            media_file,
+            method=request.method,
+            range_header=range_header,
+            if_none_match=if_none_match,
+            download=download,
+        )
+
+    @app.get(
+        "/api/v1/media/{access_token}",
+        operation_id="v1_stream_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def stream_media(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_media(
+            request,
+            access_token,
+            range_header,
+            if_none_match,
+            runtime,
+            operation=MediaAccessOperation.STREAM,
+            download=False,
+        )
+
+    @app.head(
+        "/api/v1/media/{access_token}",
+        operation_id="v1_head_stream_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def head_stream_media(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_media(
+            request,
+            access_token,
+            range_header,
+            if_none_match,
+            runtime,
+            operation=MediaAccessOperation.STREAM,
+            download=False,
+        )
+
+    @app.get(
+        "/api/v1/downloads/{access_token}",
+        operation_id="v1_download_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def download_media(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_media(
+            request,
+            access_token,
+            range_header,
+            if_none_match,
+            runtime,
+            operation=MediaAccessOperation.DOWNLOAD,
+            download=True,
+        )
+
+    @app.head(
+        "/api/v1/downloads/{access_token}",
+        operation_id="v1_head_download_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def head_download_media(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_media(
+            request,
+            access_token,
+            range_header,
+            if_none_match,
+            runtime,
+            operation=MediaAccessOperation.DOWNLOAD,
+            download=True,
+        )
 
     @app.put(
         "/api/v1/users/{user_id}/items/{item_id}/progress",

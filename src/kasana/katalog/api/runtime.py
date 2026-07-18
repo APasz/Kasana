@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 from pydantic import ValidationError
 
 from kasana.katalog.api.jobs import JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
+from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTransferPolicy
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MatchThresholds, MetadataProvider, MetadataWorkflow
 from kasana.katalog.scanning import IncrementalScanner
@@ -27,7 +29,17 @@ class KatalogApiRuntime:
     def __init__(self, settings: KatalogSettings, database: KatalogDatabase) -> None:
         self.settings = settings
         self.database = database
-        self.queries = KatalogQueryService(database, artwork_cache_path=settings.artwork_cache_path)
+        self.queries = KatalogQueryService(
+            database,
+            artwork_cache_path=settings.artwork_cache_path,
+            playback_session_ttl=timedelta(seconds=settings.playback_session_ttl_seconds),
+            playback_launch_token_ttl=timedelta(seconds=settings.playback_launch_token_ttl_seconds),
+            media_access_token_ttl=timedelta(seconds=settings.media_access_token_ttl_seconds),
+            max_playback_queue_size=settings.playback_max_queue_size,
+        )
+        self.file_transfers: FileTransferPolicy = RangeStreamingFileTransferPolicy(
+            chunk_size=settings.media_transfer_chunk_size
+        )
         self.jobs = JobRegistry()
 
     async def close(self) -> None:

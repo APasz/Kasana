@@ -32,10 +32,17 @@ from kasana.katalog.api.contracts import (
     MutationResult,
     OnDeckEntry,
     PaginatedResponse,
+    PlaybackCompletionResult,
+    PlaybackPlanLaunch,
+    PlaybackPlanRequest,
+    PlaybackProgressResult,
+    PlaybackSessionResponse,
     PlaybackStateResponse,
     ProgressUpdate,
     ScanRequest,
+    SessionProgressUpdate,
     StatusResponse,
+    UserSummary,
     WatchedFilter,
     WatchOrderDetail,
     WatchOrderSummary,
@@ -152,6 +159,18 @@ class KatalogClient:
 
     async def status(self) -> StatusResponse:
         return await self._get_model("/api/v1/status", StatusResponse)
+
+    async def list_users(self) -> tuple[UserSummary, ...]:
+        response = await self._request("GET", "/api/v1/users")
+        if not isinstance(response.payload, list):
+            raise _response_error(
+                "Katalog users response must be a JSON array.", response.request_id
+            )
+        payload = cast(list[object], response.payload)
+        try:
+            return tuple(UserSummary.model_validate(value) for value in payload)
+        except ValidationError as error:
+            raise _response_error("Katalog returned invalid users.", response.request_id) from error
 
     async def list_library_items(
         self,
@@ -323,6 +342,67 @@ class KatalogClient:
     async def get_job(self, job_id: str) -> BackgroundJob:
         return await self._get_model(f"/api/v1/jobs/{job_id}", BackgroundJob)
 
+    async def create_playback_plan(self, request: PlaybackPlanRequest) -> PlaybackPlanLaunch:
+        return await self._send_model("POST", "/api/v1/playback/plans", request, PlaybackPlanLaunch)
+
+    async def launch_playback_plan(self, launch_token: str) -> PlaybackSessionResponse:
+        _validate_opaque_token(launch_token, "launch_token")
+        return await self._get_model(
+            f"/api/v1/playback/plans/{launch_token}", PlaybackSessionResponse, retry=False
+        )
+
+    async def get_playback_session(self, session_id: str) -> PlaybackSessionResponse:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._get_model(
+            f"/api/v1/playback/sessions/{session_id}", PlaybackSessionResponse
+        )
+
+    async def update_playback_session_progress(
+        self, session_id: str, update: SessionProgressUpdate
+    ) -> PlaybackProgressResult:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._send_model(
+            "PUT",
+            f"/api/v1/playback/sessions/{session_id}/progress",
+            update,
+            PlaybackProgressResult,
+        )
+
+    async def advance_playback_session(self, session_id: str) -> PlaybackSessionResponse:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._send_model(
+            "POST", f"/api/v1/playback/sessions/{session_id}/advance", None, PlaybackSessionResponse
+        )
+
+    async def complete_playback_session(self, session_id: str) -> PlaybackCompletionResult:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._send_model(
+            "POST",
+            f"/api/v1/playback/sessions/{session_id}/complete",
+            None,
+            PlaybackCompletionResult,
+        )
+
+    async def close_playback_session(self, session_id: str) -> None:
+        _validate_opaque_token(session_id, "session_id")
+        await self._request("DELETE", f"/api/v1/playback/sessions/{session_id}")
+
+    async def stream_media(
+        self, stream_url: str, *, range_header: str | None = None
+    ) -> AsyncIterator[bytes]:
+        async for chunk in self._stream_transfer(
+            stream_url, range_header=range_header, download=False
+        ):
+            yield chunk
+
+    async def download_media(
+        self, download_url: str, *, range_header: str | None = None
+    ) -> AsyncIterator[bytes]:
+        async for chunk in self._stream_transfer(
+            download_url, range_header=range_header, download=True
+        ):
+            yield chunk
+
     async def update_progress(
         self, user_id: int, item_id: int, update: ProgressUpdate
     ) -> PlaybackStateResponse:
@@ -376,8 +456,9 @@ class KatalogClient:
         model: type[ModelT],
         *,
         params: list[tuple[str, str | int]] | None = None,
+        retry: bool = True,
     ) -> ModelT:
-        response = await self._request("GET", path, params=params)
+        response = await self._request("GET", path, params=params, retry=retry)
         return _validate_response(model, response.payload, response.request_id)
 
     async def _send_model[ModelT: BaseModel](
@@ -399,12 +480,13 @@ class KatalogClient:
         headers: Mapping[str, str] | None = None,
         json: object | None = None,
         expect_json: bool = True,
+        retry: bool = True,
     ) -> _ClientResponse:
         session = await self._get_session()
         request_headers = dict(headers or {})
         if self._bearer_token is not None:
             request_headers["Authorization"] = f"Bearer {self._bearer_token}"
-        attempts = self._max_idempotent_retries if method == "GET" else 0
+        attempts = self._max_idempotent_retries if method == "GET" and retry else 0
         for attempt in range(attempts + 1):
             try:
                 async with session.request(
@@ -441,6 +523,37 @@ class KatalogClient:
         msg = "Katalog request retry handling exhausted unexpectedly."
         raise RuntimeError(msg)
 
+    async def _stream_transfer(
+        self, path: str, *, range_header: str | None, download: bool
+    ) -> AsyncIterator[bytes]:
+        expected_prefix = "/api/v1/downloads/" if download else "/api/v1/media/"
+        if not path.startswith(expected_prefix):
+            msg = f"Media URLs must begin with {expected_prefix!r}."
+            raise ValueError(msg)
+        token = path.removeprefix(expected_prefix)
+        _validate_opaque_token(token, "access token")
+        session = await self._get_session()
+        headers: dict[str, str] = {}
+        if range_header is not None:
+            headers["Range"] = range_header
+        if self._bearer_token is not None:
+            headers["Authorization"] = f"Bearer {self._bearer_token}"
+        try:
+            async with session.get(self._base_url + path, headers=headers) as response:
+                request_id = response.headers.get("X-Request-ID")
+                if response.status >= 400:
+                    content = await response.read()
+                    payload = _decode_json(content, request_id) if content else None
+                    raise _api_error(response.status, payload, request_id)
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    yield chunk
+        except asyncio.CancelledError:
+            raise
+        except (TimeoutError, aiohttp.ClientError) as error:
+            raise KatalogClientError(
+                KatalogClientErrorKind.TRANSPORT, "Unable to reach Katalog."
+            ) from error
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is not None and not self._session.closed:
             return self._session
@@ -462,6 +575,16 @@ class _ClientResponse:
 
 def _params(**values: str | int | None) -> list[tuple[str, str | int]]:
     return [(name, value) for name, value in values.items() if value is not None]
+
+
+def _validate_opaque_token(token: str, name: str) -> None:
+    if (
+        not 32 <= len(token) <= 128
+        or not token.isascii()
+        or not all(character.isalnum() or character in {"_", "-"} for character in token)
+    ):
+        msg = f"{name} must be an opaque Katalog token."
+        raise ValueError(msg)
 
 
 def _decode_json(content: bytes, request_id: str | None) -> object:

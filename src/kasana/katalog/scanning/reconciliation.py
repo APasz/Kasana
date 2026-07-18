@@ -10,6 +10,7 @@ from pathlib import Path
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from kasana.katalog.container import canonical_container
 from kasana.katalog.models import (
     AuditIssue,
     AvailabilityState,
@@ -30,6 +31,7 @@ class ItemCache:
     series: dict[str, Zaisan] = field(default_factory=dict)
     seasons: dict[tuple[str, int], Zaisan] = field(default_factory=dict)
     episodes: dict[tuple[str, int, int], Zaisan] = field(default_factory=dict)
+    specials: dict[tuple[str, str], Zaisan] = field(default_factory=dict)
     extras: dict[tuple[str, str], Zaisan] = field(default_factory=dict)
 
 
@@ -63,7 +65,10 @@ def apply_scan(
         probe_result = probe_results[plan.snapshot.path]
         if plan.action is PlanAction.CHANGE:
             assert plan.existing_file_id is not None
-            update_file_details(existing_by_id[plan.existing_file_id], plan.snapshot, probe_result)
+            file = existing_by_id[plan.existing_file_id]
+            if plan.parsed is not None:
+                file.library_item = materialize_item(session, root.id, cache, plan.parsed)
+            update_file_details(file, plan.snapshot, probe_result)
             continue
         assert plan.parsed is not None
         item = materialize_item(session, root.id, cache, plan.parsed)
@@ -120,7 +125,9 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
                 cache.episodes[
                     (series.sort_title.casefold(), item.season_number, item.episode_number)
                 ] = item
-        elif item.item_kind is ZaisanKind.EXTRA and parent.item_kind is ZaisanKind.MOVIE:
+        elif item.item_kind is ZaisanKind.SPECIAL and parent.item_kind is ZaisanKind.SERIES:
+            cache.specials[(parent_key, title_key)] = item
+        elif item.item_kind is ZaisanKind.EXTRA:
             cache.extras[(parent_key, title_key)] = item
     return cache
 
@@ -130,23 +137,31 @@ def materialize_item(
 ) -> Zaisan:
     match parsed.kind:
         case ParsedMediaKind.MOVIE:
-            return get_movie(session, root_id, cache, parsed.title)
+            return get_movie(session, root_id, cache, parsed.title, parsed.release_year)
         case ParsedMediaKind.EXTRA:
-            assert parsed.parent_movie_title is not None
-            movie = get_movie(session, root_id, cache, parsed.parent_movie_title)
-            key = (movie.sort_title.casefold(), parsed.title.casefold())
-            extra = cache.extras.get(key)
-            if extra is None:
-                extra = Zaisan(
+            if parsed.parent_movie_title is not None:
+                parent = get_movie(session, root_id, cache, parsed.parent_movie_title)
+            else:
+                assert parsed.parent_series_title is not None
+                parent = get_series(session, root_id, cache, parsed.parent_series_title)
+            return get_extra(session, root_id, cache, parent, parsed.title)
+        case ParsedMediaKind.SPECIAL:
+            assert parsed.series_title is not None
+            series = get_series(session, root_id, cache, parsed.series_title)
+            key = (series.sort_title.casefold(), parsed.title.casefold())
+            special = cache.specials.get(key)
+            if special is None:
+                special = Zaisan(
                     library_root_id=root_id,
-                    parent=movie,
-                    item_kind=ZaisanKind.EXTRA,
+                    parent=series,
+                    item_kind=ZaisanKind.SPECIAL,
                     title=parsed.title,
                     sort_title=parsed.title,
+                    season_number=0,
                 )
-                session.add(extra)
-                cache.extras[key] = extra
-            return extra
+                session.add(special)
+                cache.specials[key] = special
+            return special
         case ParsedMediaKind.EPISODE:
             assert parsed.series_title is not None
             assert parsed.season_number is not None
@@ -186,7 +201,13 @@ def materialize_item(
             return episode
 
 
-def get_movie(session: Session, root_id: int, cache: ItemCache, title: str) -> Zaisan:
+def get_movie(
+    session: Session,
+    root_id: int,
+    cache: ItemCache,
+    title: str,
+    release_year: int | None = None,
+) -> Zaisan:
     key = title.casefold()
     movie = cache.movies.get(key)
     if movie is None:
@@ -195,9 +216,12 @@ def get_movie(session: Session, root_id: int, cache: ItemCache, title: str) -> Z
             item_kind=ZaisanKind.MOVIE,
             title=title,
             sort_title=title,
+            release_year=release_year,
         )
         session.add(movie)
         cache.movies[key] = movie
+    elif movie.release_year is None and release_year is not None:
+        movie.release_year = release_year
     return movie
 
 
@@ -216,6 +240,24 @@ def get_series(session: Session, root_id: int, cache: ItemCache, title: str) -> 
     return series
 
 
+def get_extra(
+    session: Session, root_id: int, cache: ItemCache, parent: Zaisan, title: str
+) -> Zaisan:
+    key = (parent.sort_title.casefold(), title.casefold())
+    extra = cache.extras.get(key)
+    if extra is None:
+        extra = Zaisan(
+            library_root_id=root_id,
+            parent=parent,
+            item_kind=ZaisanKind.EXTRA,
+            title=title,
+            sort_title=title,
+        )
+        session.add(extra)
+        cache.extras[key] = extra
+    return extra
+
+
 def media_file(item: Zaisan, snapshot: FileSnapshot, probe: ProbeResult) -> MediaFile:
     return MediaFile(
         library_item=item,
@@ -224,7 +266,7 @@ def media_file(item: Zaisan, snapshot: FileSnapshot, probe: ProbeResult) -> Medi
         mtime_ns=snapshot.mtime_ns,
         filesystem_device=snapshot.filesystem_device,
         filesystem_inode=snapshot.filesystem_inode,
-        container=probe.container,
+        container=canonical_container(probe.container) or probe.container,
         duration_seconds=probe.duration_seconds,
         video_streams=list(probe.video_streams),
         attached_pictures=list(probe.attached_pictures),
@@ -245,7 +287,7 @@ def update_file_location(file: MediaFile, snapshot: FileSnapshot) -> None:
 
 def update_file_details(file: MediaFile, snapshot: FileSnapshot, probe: ProbeResult) -> None:
     update_file_location(file, snapshot)
-    file.container = probe.container
+    file.container = canonical_container(probe.container) or probe.container
     file.duration_seconds = probe.duration_seconds
     file.video_streams = list(probe.video_streams)
     file.attached_pictures = list(probe.attached_pictures)

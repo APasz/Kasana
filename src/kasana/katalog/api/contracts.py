@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -43,6 +43,19 @@ class WatchOrderKind(StrEnum):
     CUSTOM = "custom"
 
 
+class PlaybackContextKind(StrEnum):
+    STANDALONE = "standalone"
+    SERIES = "series"
+    WATCH_ORDER = "watch_order"
+    MANUAL_QUEUE = "manual_queue"
+
+
+class PlaybackSessionEventKind(StrEnum):
+    PROGRESS = "progress"
+    COMPLETED = "completed"
+    ADVANCED = "advanced"
+
+
 class JobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -58,6 +71,12 @@ class APIModel(BaseModel):
 class HealthResponse(APIModel):
     status: Literal["ok"] = "ok"
     api_version: Literal["v1"] = "v1"
+
+
+class UserSummary(APIModel):
+    id: int = Field(gt=0)
+    username: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class StatusResponse(APIModel):
@@ -252,6 +271,135 @@ class ProgressUpdate(APIModel):
     position_seconds: float = Field(ge=0)
     duration_seconds: float = Field(ge=0)
     completed: bool = False
+
+
+class StandalonePlaybackContext(APIModel):
+    kind: Literal[PlaybackContextKind.STANDALONE] = PlaybackContextKind.STANDALONE
+    item_id: int = Field(gt=0)
+
+
+class SeriesPlaybackContext(APIModel):
+    kind: Literal[PlaybackContextKind.SERIES] = PlaybackContextKind.SERIES
+    series_id: int | None = Field(default=None, gt=0)
+    episode_id: int | None = Field(default=None, gt=0)
+    resume: bool = False
+
+    @model_validator(mode="after")
+    def validate_start(self) -> Self:
+        if self.resume and self.episode_id is not None:
+            msg = "A series context cannot combine resume with episode_id."
+            raise ValueError(msg)
+        if self.resume and self.series_id is None:
+            msg = "A resuming series context requires series_id."
+            raise ValueError(msg)
+        if not self.resume and self.series_id is None and self.episode_id is None:
+            msg = "A series context requires series_id or episode_id."
+            raise ValueError(msg)
+        return self
+
+
+class WatchOrderPlaybackContext(APIModel):
+    kind: Literal[PlaybackContextKind.WATCH_ORDER] = PlaybackContextKind.WATCH_ORDER
+    watch_order_id: int = Field(gt=0)
+    start_item_id: int | None = Field(default=None, gt=0)
+
+
+class ManualQueuePlaybackContext(APIModel):
+    kind: Literal[PlaybackContextKind.MANUAL_QUEUE] = PlaybackContextKind.MANUAL_QUEUE
+    item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def require_unique_items(self) -> Self:
+        if len(set(self.item_ids)) != len(self.item_ids):
+            msg = "A manual playback queue cannot contain duplicate item IDs."
+            raise ValueError(msg)
+        return self
+
+
+type PlaybackPlanContext = Annotated[
+    StandalonePlaybackContext
+    | SeriesPlaybackContext
+    | WatchOrderPlaybackContext
+    | ManualQueuePlaybackContext,
+    Field(discriminator="kind"),
+]
+
+
+class PlaybackPlanRequest(APIModel):
+    user_id: int = Field(gt=0)
+    context: PlaybackPlanContext
+
+
+class PlaybackPlanLaunch(APIModel):
+    launch_token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    expires_at: datetime
+
+
+class PlaybackContext(APIModel):
+    kind: PlaybackContextKind
+    item_id: int | None = Field(default=None, gt=0)
+    watch_order_id: int | None = Field(default=None, gt=0)
+
+
+class PlaybackNextEntry(APIModel):
+    position: int = Field(ge=0)
+    item_id: int = Field(gt=0)
+    display_title: str = Field(min_length=1, max_length=1_000)
+
+
+class PlaybackPlanEntry(APIModel):
+    position: int = Field(ge=0)
+    item_id: int = Field(gt=0)
+    display_title: str = Field(min_length=1, max_length=1_000)
+    series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
+    season_number: int | None = Field(default=None, ge=0)
+    episode_number: int | None = Field(default=None, ge=0)
+    duration_seconds: float | None = Field(default=None, ge=0)
+    saved_resume_position_seconds: float = Field(ge=0)
+    stream_url: str = Field(pattern=r"^/api/v1/media/[A-Za-z0-9_-]+$")
+    download_url: str = Field(pattern=r"^/api/v1/downloads/[A-Za-z0-9_-]+$")
+    audio_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=64)
+    subtitle_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=128)
+    next_entry: PlaybackNextEntry | None = None
+
+
+class PlaybackSessionEvent(APIModel):
+    id: int = Field(gt=0)
+    entry_position: int = Field(ge=0)
+    kind: PlaybackSessionEventKind
+    position_seconds: float = Field(ge=0)
+    occurred_at: datetime
+
+
+class PlaybackSessionResponse(APIModel):
+    id: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    user_id: int = Field(gt=0)
+    context: PlaybackContext
+    current_entry_position: int = Field(ge=0)
+    current_item: PlaybackPlanEntry | None = None
+    entries: tuple[PlaybackPlanEntry, ...] = Field(min_length=1, max_length=100)
+    created_at: datetime
+    expires_at: datetime
+    closed_at: datetime | None
+    last_event: PlaybackSessionEvent | None = None
+
+
+type PlaybackSession = PlaybackSessionResponse
+
+
+class SessionProgressUpdate(APIModel):
+    position_seconds: float = Field(ge=0)
+    seek: bool = False
+
+
+class PlaybackProgressResult(APIModel):
+    session: PlaybackSessionResponse
+    event: PlaybackSessionEvent
+
+
+class PlaybackCompletionResult(APIModel):
+    session: PlaybackSessionResponse
+    event: PlaybackSessionEvent
 
 
 class MetadataMatchRequest(APIModel):

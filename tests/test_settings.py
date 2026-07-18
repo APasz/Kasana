@@ -19,8 +19,9 @@ def test_component_settings_use_distinct_environment_prefixes(monkeypatch: Monke
     assert SharedSettings().log_level is LogLevel.DEBUG
     assert KatalogSettings().api_port == 9123
     assert KestrelSettings().player_backend is PlayerBackend.VLC
-    assert Kanvas_Settings().port == 8080
-    assert str(KourierSettings().katalog_url) == "http://127.0.0.1:8765/"
+    assert Kanvas_Settings().port == 5370
+    assert KestrelSettings().katalog_url == "http://127.0.0.1:5373"
+    assert str(KourierSettings().katalog_url) == "http://127.0.0.1:5373/"
 
 
 def test_tmdb_settings_read_typed_provider_environment(monkeypatch: MonkeyPatch) -> None:

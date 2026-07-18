@@ -27,3 +27,8 @@ class KatalogSettings(KSettings):
     artwork_cache_path: Path = Field(default=Path("kasana-artwork-cache"))
     artwork_concurrency: int = Field(default=4, ge=1, le=16)
     artwork_max_size_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
+    playback_session_ttl_seconds: int = Field(default=8 * 60 * 60, ge=60, le=7 * 24 * 60 * 60)
+    playback_launch_token_ttl_seconds: int = Field(default=5 * 60, ge=30, le=60 * 60)
+    media_access_token_ttl_seconds: int = Field(default=10 * 60, ge=30, le=60 * 60)
+    playback_max_queue_size: int = Field(default=100, ge=1, le=500)
+    media_transfer_chunk_size: int = Field(default=64 * 1024, ge=4 * 1024, le=1024 * 1024)

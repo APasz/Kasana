@@ -12,4 +12,4 @@ class Kanvas_Settings(KSettings):
     )
 
     host: str = "127.0.0.1"
-    port: int = Field(default=8080, ge=1, le=65535)
+    port: int = Field(default=5370, ge=1, le=65535)

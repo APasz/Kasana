@@ -11,7 +11,7 @@ class KourierSettings(KSettings):
         env_prefix="KASANA_KOURIER_",
     )
 
-    katalog_url: AnyUrl = AnyUrl("http://127.0.0.1:8765")
+    katalog_url: AnyUrl = AnyUrl("http://127.0.0.1:5373")
 
 
 class TMDBSettings(KSettings):

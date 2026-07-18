@@ -37,12 +37,16 @@ app: Typer = typer.Typer(
 )
 database_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 library_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+item_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 metadata_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 artwork_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+user_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 app.add_typer(database_app, name="database")
 app.add_typer(library_app, name="library")
+app.add_typer(item_app, name="item")
 app.add_typer(metadata_app, name="metadata")
 app.add_typer(artwork_app, name="artwork")
+app.add_typer(user_app, name="user")
 LOGGER: Logger = logging.getLogger(__name__)
 
 
@@ -130,7 +134,9 @@ for _command_module in (
     "kasana.katalog.cli.artwork",
     "kasana.katalog.cli.database",
     "kasana.katalog.cli.library",
+    "kasana.katalog.cli.items",
     "kasana.katalog.cli.metadata",
     "kasana.katalog.cli.scanning",
+    "kasana.katalog.cli.users",
 ):
     import_module(_command_module)
