@@ -577,8 +577,10 @@ kanvas-administration { display: block; max-width: 980px; }
 .k-generation-preview__issue-label { color: var(--k-text-muted); font-size: 0.7rem; font-weight: 650; text-transform: uppercase; }
 .k-generation-preview__issue-values { color: var(--k-text-faint); font-size: 0.75rem; }
 .k-generation-preview__entries { display: grid; max-height: 280px; gap: 3px; margin: 0; padding: 0; overflow: auto; color: var(--k-text-muted); font-size: 0.75rem; list-style: none; }
-.k-generation-preview__entries span { display: inline-block; width: 28px; color: var(--k-text-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
-.k-generation-preview__entries small { color: var(--k-text-faint); }
+.k-generation-preview__entries li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 6px; align-items: baseline; }
+.k-generation-preview__position { color: var(--k-text-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+.k-generation-preview__entry-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-generation-preview__entry-kind { color: var(--k-text-faint); }
 
 .k-token-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
 .k-token { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from html import escape
 from urllib.parse import urlencode
 
 from nicegui import ui
 
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.inputs import SelectOption, checkbox_input, select_input, text_input
 from kasana.kanvas.components.shell import page_shell
@@ -23,7 +23,7 @@ def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
         page_title("Library")
         _filter_strip(filters)
         source = "/kanvas/data/library?" + urlencode(_filter_query(filters))
-        ui.html(f'<kanvas-poster-grid source="{escape(source, quote=True)}"></kanvas-poster-grid>')
+        mount_browser_component(BrowserComponent.POSTER_GRID, {"source": source})
 
 
 def _filter_strip(filters: LibraryFilters) -> None:

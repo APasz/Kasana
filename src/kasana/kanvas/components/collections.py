@@ -7,9 +7,12 @@ from urllib.parse import urlencode
 
 from nicegui import ui
 
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.controls import ButtonType, action_button
+from kasana.kanvas.components.inputs import hidden_input
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
+from kasana.kanvas.components.typography import section_title
 from kasana.kanvas.viewmodels.collections import (
     CollectionMemberView,
     CollectionTileView,
@@ -22,9 +25,7 @@ from kasana.kanvas.viewmodels.collections import (
 def collection_grid(*, source: str) -> None:
     """Mount the bounded browser-owned collection grid."""
 
-    ui.html(
-        f'<kanvas-collection-grid source="{escape(source, quote=True)}"></kanvas-collection-grid>'
-    )
+    mount_browser_component(BrowserComponent.COLLECTION_GRID, {"source": source})
 
 
 def collection_tile(tile: CollectionTileView) -> None:
@@ -67,9 +68,11 @@ def collection_members(title: str, members: tuple[CollectionMemberView, ...]) ->
     if not members:
         return
     with (
-        ui.element("section").classes("k-collection-members").props(f'aria-label="{escape(title)}"')
+        ui.element("section").classes("k-collection-members").props(
+            f'aria-label="{escape(title, quote=True)}"'
+        )
     ):
-        ui.label(title).classes("k-section-title")
+        section_title(title)
         with ui.element("div").classes("k-child-grid"):
             for member in members:
                 poster_card(member.poster)
@@ -104,25 +107,24 @@ def item_picker_overlay(
     attributes = {
         "source": source,
         "action": action,
-        "revision": str(revision),
-        "playable-only": "true" if playable_only else "false",
+        "revision": revision,
+        "playable-only": playable_only,
         "label": label,
     }
-    rendered = " ".join(
-        f'{name}="{escape(value, quote=True)}"' for name, value in attributes.items()
-    )
-    ui.html(f"<kanvas-item-picker {rendered}></kanvas-item-picker>")
+    mount_browser_component(BrowserComponent.ITEM_PICKER, attributes)
 
 
 def watch_order_rows(*, source: str, action: str, launch_action: str, revision: int) -> None:
     """Mount a virtualised custom row component instead of Python-backed draggable rows."""
 
-    ui.html(
-        "<kanvas-watch-order-list "
-        f'source="{escape(source, quote=True)}" '
-        f'action="{escape(action, quote=True)}" '
-        f'launch-action="{escape(launch_action, quote=True)}" '
-        f'revision="{revision}"></kanvas-watch-order-list>'
+    mount_browser_component(
+        BrowserComponent.WATCH_ORDER_LIST,
+        {
+            "source": source,
+            "action": action,
+            "launch-action": launch_action,
+            "revision": revision,
+        },
     )
 
 
@@ -134,7 +136,7 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
         .classes("k-generation-preview")
         .props('aria-label="Generation preview"')
     ):
-        ui.label("Generation preview").classes("k-section-title")
+        section_title("Generation preview")
         ui.label(f"{len(preview.entries)} entries · {preview.apply_mode}").classes(
             "k-generation-preview__summary"
         )
@@ -149,9 +151,9 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
             .classes("k-action-row")
             .props(f'method="post" action="{escape(apply_action, quote=True)}"')
         ):
-            _hidden_input("revision", str(preview.revision))
-            _hidden_input("mode", preview.mode)
-            _hidden_input("apply_mode", preview.apply_mode)
+            hidden_input(name="revision", value=str(preview.revision))
+            hidden_input(name="mode", value=preview.mode)
+            hidden_input(name="apply_mode", value=preview.apply_mode)
             action_button("Apply generated order", primary=True, button_type=ButtonType.SUBMIT)
 
 
@@ -190,22 +192,11 @@ def _preview_rows(preview: GenerationPreviewView) -> None:
 
     if not preview.entries:
         return
-    values = "".join(
-        "<li>"
-        f"<span>{entry.position + 1}</span> {escape(entry.title)}"
-        f" <small>{escape(entry.kind)}</small>"
-        "</li>"
-        for entry in preview.entries
-    )
-    ui.html(
-        '<div class="k-generation-preview__issue">'
-        '<span class="k-generation-preview__issue-label">Generated order</span>'
-        f'<ol class="k-generation-preview__entries">{values}</ol>'
-        "</div>"
-    )
-
-
-def _hidden_input(name: str, value: str) -> None:
-    ui.element("input").props(
-        f'type="hidden" name="{escape(name, quote=True)}" value="{escape(value, quote=True)}"'
-    )
+    with ui.element("div").classes("k-generation-preview__issue"):
+        ui.label("Generated order").classes("k-generation-preview__issue-label")
+        with ui.element("ol").classes("k-generation-preview__entries"):
+            for entry in preview.entries:
+                with ui.element("li"):
+                    ui.label(str(entry.position + 1)).classes("k-generation-preview__position")
+                    ui.label(entry.title).classes("k-generation-preview__entry-title")
+                    ui.label(entry.kind).classes("k-generation-preview__entry-kind")

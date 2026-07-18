@@ -21,8 +21,16 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from kasana.kanvas import __main__ as kanvas_main
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
+from kasana.kanvas.components.collections import (
+    collection_artwork as render_collection_artwork,
+)
+from kasana.kanvas.components.collections import (
+    generation_preview,
+)
 from kasana.kanvas.components.controls import NavigationAction, keyboard_action
 from kasana.kanvas.components.feedback import feedback_state, skeleton_posters
+from kasana.kanvas.components.inputs import textarea_input
 from kasana.kanvas.components.media_rail import media_rail
 from kasana.kanvas.components.navigation import primary_navigation
 from kasana.kanvas.components.poster import poster_card
@@ -1201,7 +1209,66 @@ def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> Non
             media_rail(MediaRailView(title="Items", posters=(poster,)))
             feedback_state("Empty", "No entries")
             feedback_state("Retry", "Try again", retry=lambda: None)
-            skeleton_posters(2)
+        skeleton_posters(2)
+
+
+def test_browser_component_mounting_uses_native_elements_and_validates_attributes() -> None:
+    with Client(page("")) as client:
+        mount_browser_component(
+            BrowserComponent.ITEM_PICKER,
+            {
+                "label": 'Add "quoted" item',
+                "revision": 3,
+                "playable-only": True,
+            },
+        )
+        element = next(
+            element
+            for element in client.elements.values()
+            if element.tag == BrowserComponent.ITEM_PICKER
+        )
+
+    props = _element_props(element)
+    assert props["label"] == 'Add "quoted" item'
+    assert props["revision"] == "3"
+    assert props["playable-only"] == "true"
+
+    with pytest.raises(ValueError, match="kebab-case"):
+        mount_browser_component(BrowserComponent.POSTER_GRID, {"bad_attribute": "value"})
+
+
+def test_collection_components_cover_empty_states_and_shared_textarea() -> None:
+    empty_preview = GenerationPreviewView(
+        watchOrderId=1,
+        revision=1,
+        mode="air",
+        applyMode="replace",
+        entries=(),
+    )
+
+    with Client(page("")) as client:
+        render_collection_artwork("/kanvas/artwork/1/1", (), "Artwork")
+        render_collection_artwork(None, (), "Fallback")
+        textarea_input(
+            name="notes",
+            aria_label="Notes",
+            value='A "quoted" note',
+            placeholder="Optional notes",
+        )
+        generation_preview(empty_preview, apply_action="/kanvas/actions/watch-orders/1/apply")
+
+        textarea = next(
+            element for element in client.elements.values() if element.tag == "textarea"
+        )
+        fallback = next(
+            element
+            for element in client.elements.values()
+            if "k-collection-art__fallback" in _element_classes(element)
+        )
+
+    assert _element_props(textarea)["value"] == 'A "quoted" note'
+    assert _element_props(textarea)["placeholder"] == "Optional notes"
+    assert fallback.tag == "div"
 
 
 def test_native_icon_builder_rejects_unknown_icon() -> None:
@@ -1244,7 +1311,7 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         async def clear_watched(self, _item_id: int) -> None:
             pass
 
-    with Client(page("")):
+    with Client(page("")) as client:
         monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalog)
         await home_route.render_home(Kanvas_Settings())
         monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalog)
@@ -1254,6 +1321,14 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         await search_page()
         await administration_page()
         await design_page()
+
+        browser_components = [
+            element
+            for element in client.elements.values()
+            if element.tag in set(BrowserComponent)
+        ]
+        assert browser_components
+        assert all(element.tag != "nicegui-html" for element in browser_components)
 
 
 async def test_collection_and_watch_order_routes_render_the_editor_states(
@@ -1355,16 +1430,57 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             apply_mode="replace",
         )
 
-        html_elements = [
-            element for element in client.elements.values() if element.tag == "nicegui-html"
+        browser_components = [
+            element
+            for element in client.elements.values()
+            if element.tag in set(BrowserComponent)
+        ]
+        textareas = [element for element in client.elements.values() if element.tag == "textarea"]
+        hidden_fields = [
+            element
+            for element in client.elements.values()
+            if element.tag == "input" and _element_props(element).get("type") == "hidden"
+        ]
+        generation_entries = next(
+            element
+            for element in client.elements.values()
+            if "k-generation-preview__entries" in _element_classes(element)
+        )
+
+    assert generation_entries.tag == "ol"
+    assert browser_components
+    assert all(element.tag != "nicegui-html" for element in browser_components)
+    assert any(_element_props(element).get("name") == "overview" for element in textareas)
+    assert any(_element_props(element).get("value") == "Gate travel" for element in textareas)
+    assert any(_element_props(element).get("name") == "revision" for element in hidden_fields)
+
+
+async def test_collection_routes_share_one_unavailable_state(monkeypatch: MonkeyPatch) -> None:
+    class UnavailableCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def collection_detail(self, _collection_id: int) -> CollectionDetailView:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def watch_order_editor(self, _watch_order_id: int) -> WatchOrderEditorView:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+    monkeypatch.setattr(collections_route, "KanvasKatalogService", UnavailableCatalog)
+
+    with Client(page("")) as client:
+        await collections_route.render_collection_detail(Kanvas_Settings(), 4)
+        await collections_route.render_collection_edit(Kanvas_Settings(), 4)
+        await collections_route.render_watch_order_new(Kanvas_Settings(), 4)
+        await collections_route.render_watch_order(Kanvas_Settings(), 9, editable=True)
+
+        feedback_titles = [
+            element
+            for element in client.elements.values()
+            if "k-feedback__title" in _element_classes(element)
         ]
 
-    rendered = "\n".join(
-        cast(str, _element_props(element)["innerHTML"]) for element in html_elements
-    )
-    assert "kanvas-item-picker" in rendered
-    assert "kanvas-watch-order-list" in rendered
-    assert "k-generation-preview__entries" in rendered
+    assert len(feedback_titles) == 4
 
 
 async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None:
@@ -1683,6 +1799,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-poster" in javascript
     assert "posterMarkup" in javascript
     assert "sessionStorage" in javascript
+    assert "if (!this.grid.children.length && !state.done)" in javascript
 
 
 def test_administration_overview_transformation_and_adaptive_polling() -> None:

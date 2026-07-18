@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from html import escape
 from typing import Literal
 
 from nicegui import ui
 
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title
 from kasana.kanvas.settings import Kanvas_Settings
@@ -30,17 +30,16 @@ def render_administration(settings: Kanvas_Settings, section: AdministrationSect
         with ui.element("nav").classes("k-admin-nav").props('aria-label="Administration sections"'):
             for name, label, href in _SECTIONS:
                 active = " k-admin-nav__link--active" if name == section else ""
-                ui.html(
-                    f'<a class="k-admin-nav__link{active}" href="{escape(href, quote=True)}">'
-                    f"{escape(label)}</a>"
-                )
-        ui.html(
-            "<kanvas-administration "
-            f'section="{section}" '
-            'overview-source="/kanvas/data/administration/overview" '
-            'jobs-source="/kanvas/data/administration/jobs" '
-            'roots-source="/kanvas/data/administration/roots" '
-            'metadata-source="/kanvas/data/administration/metadata" '
-            'action-source="/kanvas/actions/administration">'
-            "</kanvas-administration>"
+                with ui.element("a").classes(f"k-admin-nav__link{active}").props(f'href="{href}"'):
+                    ui.label(label)
+        mount_browser_component(
+            BrowserComponent.ADMINISTRATION,
+            {
+                "section": section,
+                "overview-source": "/kanvas/data/administration/overview",
+                "jobs-source": "/kanvas/data/administration/jobs",
+                "roots-source": "/kanvas/data/administration/roots",
+                "metadata-source": "/kanvas/data/administration/metadata",
+                "action-source": "/kanvas/actions/administration",
+            },
         )

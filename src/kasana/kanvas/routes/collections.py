@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from html import escape
-
 from nicegui import ui
 
 from kasana.kanvas.components.collections import (
@@ -19,9 +17,15 @@ from kasana.kanvas.components.collections import (
 )
 from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.feedback import feedback_state
-from kasana.kanvas.components.inputs import SelectOption, select_input, text_input
+from kasana.kanvas.components.inputs import (
+    SelectOption,
+    hidden_input,
+    select_input,
+    text_input,
+    textarea_input,
+)
 from kasana.kanvas.components.shell import page_shell
-from kasana.kanvas.components.typography import page_title, section_title
+from kasana.kanvas.components.typography import page_title, quiet_copy, section_title
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService
 from kasana.kanvas.settings import Kanvas_Settings
@@ -72,7 +76,7 @@ async def render_collection_new(settings: Kanvas_Settings) -> None:
             text_input(
                 name="name", aria_label="Collection name", placeholder="Stargate", autofocus=True
             )
-            _textarea("overview", "Overview", None)
+            textarea_input(name="overview", aria_label="Overview")
             with ui.element("div").classes("k-action-row"):
                 action_button("Create", primary=True, button_type=ButtonType.SUBMIT)
                 action_button("Cancel", lambda: ui.navigate.to("/collections"))
@@ -113,7 +117,7 @@ async def render_collection_detail(settings: Kanvas_Settings, collection_id: int
         collection_members("Series", detail.series)
         collection_members("Other", detail.other_members)
         if detail.member_next_cursor is not None:
-            ui.label("More direct members are available in the editor.").classes("k-quiet-copy")
+            quiet_copy("More direct members are available in the editor.")
 
 
 async def render_collection_edit(settings: Kanvas_Settings, collection_id: int) -> None:
@@ -131,9 +135,9 @@ async def render_collection_edit(settings: Kanvas_Settings, collection_id: int) 
             .classes("k-editor-form")
             .props(f'method="post" action="/kanvas/actions/collections/{detail.id}"')
         ):
-            _hidden("revision", str(detail.revision))
+            hidden_input(name="revision", value=str(detail.revision))
             text_input(name="name", aria_label="Collection name", value=detail.name)
-            _textarea("overview", "Overview", detail.overview)
+            textarea_input(name="overview", aria_label="Overview", value=detail.overview)
             action_button("Save", primary=True, button_type=ButtonType.SUBMIT)
         with ui.element("div").classes("k-editor-section-heading"):
             section_title("Members")
@@ -156,8 +160,8 @@ async def render_collection_edit(settings: Kanvas_Settings, collection_id: int) 
             .classes("k-danger-zone")
             .props(f'method="post" action="/kanvas/actions/collections/{detail.id}/delete"')
         ):
-            _hidden("revision", str(detail.revision))
-            ui.label("Deleting a collection keeps every library item.").classes("k-quiet-copy")
+            hidden_input(name="revision", value=str(detail.revision))
+            quiet_copy("Deleting a collection keeps every library item.")
             text_input(
                 name="confirm",
                 aria_label="Type delete to confirm collection deletion",
@@ -181,7 +185,7 @@ async def render_watch_order_new(settings: Kanvas_Settings, collection_id: int) 
             .classes("k-editor-form")
             .props(f'method="post" action="/kanvas/actions/collections/{detail.id}/watch-orders"')
         ):
-            _hidden("collection_revision", str(detail.revision))
+            hidden_input(name="collection_revision", value=str(detail.revision))
             text_input(
                 name="name",
                 aria_label="Watch-order name",
@@ -250,7 +254,7 @@ async def render_watch_order(
                 .classes("k-danger-zone")
                 .props(f'method="post" action="/kanvas/actions/watch-orders/{editor.id}/delete"')
             ):
-                _hidden("revision", str(editor.revision))
+                hidden_input(name="revision", value=str(editor.revision))
                 text_input(
                     name="confirm",
                     aria_label="Type delete to confirm watch-order deletion",
@@ -269,7 +273,7 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
                 .classes("k-member-editor-row__form")
                 .props(f'method="post" action="{member_action}"')
             ):
-                _hidden("revision", str(collection.revision))
+                hidden_input(name="revision", value=str(collection.revision))
                 select_input(
                     name="relationship",
                     aria_label=f"Relationship for {member.poster.title}",
@@ -284,7 +288,7 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
                 )
                 action_button("Update", button_type=ButtonType.SUBMIT)
             with ui.element("form").props(f'method="post" action="{member_action}/remove"'):
-                _hidden("revision", str(collection.revision))
+                hidden_input(name="revision", value=str(collection.revision))
                 action_button("Remove", button_type=ButtonType.SUBMIT)
 
 
@@ -319,7 +323,7 @@ def _watch_order_edit_form(detail: WatchOrderEditorView) -> None:
         .classes("k-editor-form k-editor-form--compact")
         .props(f'method="post" action="/kanvas/actions/watch-orders/{detail.id}"')
     ):
-        _hidden("revision", str(detail.revision))
+        hidden_input(name="revision", value=str(detail.revision))
         text_input(name="name", aria_label="Watch-order name", value=detail.name)
         select_input(
             name="kind",
@@ -359,7 +363,7 @@ def _generation_controls(
             ),
             value=apply_mode or WatchOrderGenerationApplyMode.REPLACE.value,
         )
-        _hidden("revision", str(revision))
+        hidden_input(name="revision", value=str(revision))
         action_button("Preview", button_type=ButtonType.SUBMIT)
 
 
@@ -383,24 +387,6 @@ async def _generation_preview(
         )
     except KatalogClientError:
         return None
-
-
-def _textarea(name: str, label: str, value: str | None) -> None:
-    """Render a native form textarea with escaped initial text content."""
-
-    ui.html(
-        '<label class="k-control-shell k-textarea-shell">'
-        f'<span class="k-sr-only">{escape(label)}</span>'
-        f'<textarea class="k-textarea" name="{escape(name, quote=True)}" '
-        f'aria-label="{escape(label, quote=True)}">{escape(value or "")}</textarea>'
-        "</label>"
-    )
-
-
-def _hidden(name: str, value: str) -> None:
-    ui.element("input").props(
-        f'type="hidden" name="{escape(name, quote=True)}" value="{escape(value, quote=True)}"'
-    )
 
 
 def _collection_error(error: KatalogClientError) -> None:

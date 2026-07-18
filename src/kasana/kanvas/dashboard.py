@@ -1068,13 +1068,10 @@ async def design_page() -> None:
             ),
             apply_action="/kanvas/actions/watch-orders/1/apply-generation",
         )
-        ui.html(
-            '<div class="k-conflict-state">'
-            "<span>Revision conflict state.</span>"
-            '<button type="button" class="k-button">Reload</button>'
-            '<button type="button" class="k-button">Reapply</button>'
-            "</div>"
-        )
+        with ui.element("div").classes("k-conflict-state"):
+            ui.label("Revision conflict state.")
+            action_button("Reload")
+            action_button("Reapply")
         section_title("Administration states")
         ui.html(
             """

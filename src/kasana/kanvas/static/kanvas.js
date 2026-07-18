@@ -192,6 +192,10 @@
         const state = JSON.parse(stored);
         if (typeof state.posters !== 'string' || typeof state.done !== 'boolean') return false;
         this.grid.innerHTML = state.posters;
+        if (!this.grid.children.length && !state.done) {
+          sessionStorage.removeItem(this.stateKey);
+          return false;
+        }
         this.cursor = typeof state.cursor === 'string' ? state.cursor : null;
         this.done = state.done;
         this.grid.setAttribute('aria-busy', 'false');
