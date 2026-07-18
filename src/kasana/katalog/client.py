@@ -18,7 +18,14 @@ from kasana.katalog.api.contracts import (
     ArtworkSelection,
     Availability,
     BackgroundJob,
+    CollectionCreate,
+    CollectionDetail,
+    CollectionMembership,
+    CollectionMembershipCreate,
+    CollectionMembershipUpdate,
+    CollectionMutationResult,
     CollectionSummary,
+    CollectionUpdate,
     ContinueWatchingEntry,
     HealthResponse,
     JobSubmission,
@@ -44,8 +51,16 @@ from kasana.katalog.api.contracts import (
     StatusResponse,
     UserSummary,
     WatchedFilter,
+    WatchOrderCreate,
     WatchOrderDetail,
+    WatchOrderEntryCreate,
+    WatchOrderEntryDetail,
+    WatchOrderEntryMove,
+    WatchOrderGenerationPreview,
+    WatchOrderGenerationRequest,
+    WatchOrderMutationResult,
     WatchOrderSummary,
+    WatchOrderUpdate,
 )
 
 _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
@@ -64,7 +79,16 @@ class _LibraryItemFilters(TypedDict, total=False):
     search: str | None
 
 
+class _CollectionMemberFilters(TypedDict, total=False):
+    limit: int
+
+
+class _WatchOrderEntryFilters(TypedDict, total=False):
+    limit: int
+
+
 class KatalogClientErrorKind(StrEnum):
+    CONFLICT = "conflict"
     NOT_FOUND = "not_found"
     VALIDATION = "validation"
     UNAVAILABLE = "unavailable"
@@ -274,16 +298,89 @@ class KatalogClient:
         )
 
     async def list_collections(
-        self, *, cursor: str | None = None, limit: int = 50
+        self, *, cursor: str | None = None, limit: int = 50, search: str | None = None
     ) -> PaginatedResponse[CollectionSummary]:
         return await self._get_model(
             "/api/v1/collections",
             PaginatedResponse[CollectionSummary],
+            params=_params(cursor=cursor, limit=limit, search=search),
+        )
+
+    async def get_collection(self, collection_id: int) -> CollectionDetail:
+        return await self._get_model(f"/api/v1/collections/{collection_id}", CollectionDetail)
+
+    async def create_collection(self, request: CollectionCreate) -> CollectionMutationResult:
+        return await self._send_model(
+            "POST", "/api/v1/collections", request, CollectionMutationResult
+        )
+
+    async def update_collection(
+        self, collection_id: int, request: CollectionUpdate
+    ) -> CollectionMutationResult:
+        return await self._send_model(
+            "PATCH", f"/api/v1/collections/{collection_id}", request, CollectionMutationResult
+        )
+
+    async def delete_collection(
+        self, collection_id: int, *, expected_revision: int
+    ) -> CollectionMutationResult:
+        response = await self._request(
+            "DELETE",
+            f"/api/v1/collections/{collection_id}",
+            params=_params(expected_revision=expected_revision),
+        )
+        return _validate_response(CollectionMutationResult, response.payload, response.request_id)
+
+    async def list_collection_members(
+        self, collection_id: int, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[CollectionMembership]:
+        return await self._get_model(
+            f"/api/v1/collections/{collection_id}/items",
+            PaginatedResponse[CollectionMembership],
             params=_params(cursor=cursor, limit=limit),
         )
 
-    async def get_collection(self, collection_id: int) -> CollectionSummary:
-        return await self._get_model(f"/api/v1/collections/{collection_id}", CollectionSummary)
+    async def iter_collection_members(
+        self, collection_id: int, **filters: Unpack[_CollectionMemberFilters]
+    ) -> AsyncIterator[CollectionMembership]:
+        cursor: str | None = None
+        while True:
+            page = await self.list_collection_members(collection_id, cursor=cursor, **filters)
+            for membership in page.items:
+                yield membership
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    async def add_collection_member(
+        self, collection_id: int, request: CollectionMembershipCreate
+    ) -> CollectionMutationResult:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/collections/{collection_id}/items",
+            request,
+            CollectionMutationResult,
+        )
+
+    async def update_collection_member(
+        self, collection_id: int, library_item_id: int, request: CollectionMembershipUpdate
+    ) -> CollectionMutationResult:
+        return await self._send_model(
+            "PATCH",
+            f"/api/v1/collections/{collection_id}/items/{library_item_id}",
+            request,
+            CollectionMutationResult,
+        )
+
+    async def remove_collection_member(
+        self, collection_id: int, library_item_id: int, *, expected_revision: int
+    ) -> CollectionMutationResult:
+        response = await self._request(
+            "DELETE",
+            f"/api/v1/collections/{collection_id}/items/{library_item_id}",
+            params=_params(expected_revision=expected_revision),
+        )
+        return _validate_response(CollectionMutationResult, response.payload, response.request_id)
 
     async def list_collection_watch_orders(
         self, collection_id: int, *, cursor: str | None = None, limit: int = 50
@@ -294,6 +391,16 @@ class KatalogClient:
             params=_params(cursor=cursor, limit=limit),
         )
 
+    async def create_collection_watch_order(
+        self, collection_id: int, request: WatchOrderCreate
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/collections/{collection_id}/watch-orders",
+            request,
+            WatchOrderMutationResult,
+        )
+
     async def get_watch_order(
         self, watch_order_id: int, *, cursor: str | None = None, limit: int = 50
     ) -> WatchOrderDetail:
@@ -301,6 +408,85 @@ class KatalogClient:
             f"/api/v1/watch-orders/{watch_order_id}",
             WatchOrderDetail,
             params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def iter_watch_order_entries(
+        self, watch_order_id: int, **filters: Unpack[_WatchOrderEntryFilters]
+    ) -> AsyncIterator[WatchOrderEntryDetail]:
+        cursor: str | None = None
+        while True:
+            detail = await self.get_watch_order(watch_order_id, cursor=cursor, **filters)
+            for entry in detail.entries.items:
+                yield entry
+            if detail.entries.next_cursor is None:
+                return
+            cursor = detail.entries.next_cursor
+
+    async def update_watch_order(
+        self, watch_order_id: int, request: WatchOrderUpdate
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "PATCH", f"/api/v1/watch-orders/{watch_order_id}", request, WatchOrderMutationResult
+        )
+
+    async def delete_watch_order(
+        self, watch_order_id: int, *, expected_revision: int
+    ) -> WatchOrderMutationResult:
+        response = await self._request(
+            "DELETE",
+            f"/api/v1/watch-orders/{watch_order_id}",
+            params=_params(expected_revision=expected_revision),
+        )
+        return _validate_response(WatchOrderMutationResult, response.payload, response.request_id)
+
+    async def add_watch_order_entry(
+        self, watch_order_id: int, request: WatchOrderEntryCreate
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/watch-orders/{watch_order_id}/entries",
+            request,
+            WatchOrderMutationResult,
+        )
+
+    async def move_watch_order_entry(
+        self, watch_order_id: int, entry_id: int, request: WatchOrderEntryMove
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "PATCH",
+            f"/api/v1/watch-orders/{watch_order_id}/entries/{entry_id}",
+            request,
+            WatchOrderMutationResult,
+        )
+
+    async def remove_watch_order_entry(
+        self, watch_order_id: int, entry_id: int, *, expected_revision: int
+    ) -> WatchOrderMutationResult:
+        response = await self._request(
+            "DELETE",
+            f"/api/v1/watch-orders/{watch_order_id}/entries/{entry_id}",
+            params=_params(expected_revision=expected_revision),
+        )
+        return _validate_response(WatchOrderMutationResult, response.payload, response.request_id)
+
+    async def preview_watch_order_generation(
+        self, watch_order_id: int, request: WatchOrderGenerationRequest
+    ) -> WatchOrderGenerationPreview:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/watch-orders/{watch_order_id}/generate-preview",
+            request,
+            WatchOrderGenerationPreview,
+        )
+
+    async def apply_watch_order_generation(
+        self, watch_order_id: int, request: WatchOrderGenerationRequest
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/watch-orders/{watch_order_id}/apply-generation",
+            request,
+            WatchOrderMutationResult,
         )
 
     async def continue_watching(
@@ -608,7 +794,9 @@ def _api_error(
 ) -> KatalogClientError:
     error = _validate_api_error(payload)
     kind = (
-        KatalogClientErrorKind.NOT_FOUND
+        KatalogClientErrorKind.CONFLICT
+        if status_code == 409
+        else KatalogClientErrorKind.NOT_FOUND
         if status_code == 404
         else KatalogClientErrorKind.VALIDATION
         if status_code == 422

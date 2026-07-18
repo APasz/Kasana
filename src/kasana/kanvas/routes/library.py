@@ -34,6 +34,7 @@ def _filter_strip(filters: LibraryFilters) -> None:
             value=filters.search,
             placeholder="Search",
             aria_label="Search library",
+            autofocus=True,
         )
         search.props('data-kanvas-search="true"')
         select_input(

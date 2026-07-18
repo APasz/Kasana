@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,10 +11,12 @@ from typing import cast
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
+from fastapi import HTTPException
 from nicegui import app
 from nicegui.client import Client
 from nicegui.element import Element
 from nicegui.page import page
+from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -31,22 +34,57 @@ from kasana.kanvas.components.shell import (
 )
 from kasana.kanvas.dashboard import (
     administration_page,
+    apply_watch_order_generation_action,
+    artwork,
     build_dashboard,
+    collection_member_action,
+    collection_picker_data,
+    collections_data,
     collections_page,
+    create_collection_action,
+    create_watch_order_action,
+    delete_collection_action,
+    delete_watch_order_action,
     design_page,
     library_data,
+    remove_collection_member_action,
     search_page,
+    update_collection_action,
+    update_collection_member_action,
+    update_watch_order_action,
+    watch_order_data,
+    watch_order_entry_action,
+    watch_order_launch_action,
 )
+from kasana.kanvas.routes import collections as collections_route
 from kasana.kanvas.routes import home as home_route
 from kasana.kanvas.routes import item as item_route
 from kasana.kanvas.routes.library import render_library
-from kasana.kanvas.services.katalog import KanvasKatalogService, poster_from_summary, poster_state
+from kasana.kanvas.services.katalog import (
+    KanvasKatalogService,
+    OptimisticRevisionState,
+    collection_artwork,
+    group_collection_members,
+    poster_from_summary,
+    poster_state,
+)
 from kasana.kanvas.services.playback import (
     OptimisticWatchedState,
     launch_uri,
     playback_plan_request,
+    watch_order_playback_plan_request,
 )
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.kanvas.viewmodels.collections import (
+    CollectionDetailView,
+    CollectionMemberView,
+    CollectionTileView,
+    GenerationPreviewView,
+    ItemPickerView,
+    WatchOrderCardView,
+    WatchOrderEditorView,
+    WatchOrderRowView,
+)
 from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.kanvas.viewmodels.item import ItemDetailView
 from kasana.kanvas.viewmodels.library import CursorPager, LibraryFilters, PosterState, PosterView
@@ -54,6 +92,8 @@ from kasana.katalog.public import (
     ArtworkKind,
     ArtworkSelection,
     Availability,
+    CollectionDetail,
+    CollectionMembership,
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemDetail,
@@ -64,6 +104,7 @@ from kasana.katalog.public import (
     SeriesPlaybackContext,
     StandalonePlaybackContext,
     WatchedFilter,
+    WatchOrderPlaybackContext,
 )
 
 
@@ -185,6 +226,77 @@ def test_playback_plan_request_and_one_use_uri_do_not_contain_media_locations() 
     assert "/api/v1/media/" not in uri
 
 
+def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_here() -> None:
+    request = watch_order_playback_plan_request(17, user_id=3, start_item_id=9)
+
+    assert isinstance(request.context, WatchOrderPlaybackContext)
+    assert request.context.watch_order_id == 17
+    assert request.context.start_item_id == 9
+
+
+def test_collection_mosaic_is_stable_and_never_returns_an_absolute_artwork_path() -> None:
+    detail = CollectionDetail(
+        id=1,
+        name="Stargate",
+        item_count=3,
+        watch_order_count=0,
+        revision=1,
+    )
+    posters = (
+        PosterView(
+            id=1,
+            title="First",
+            href="/item/1",
+            posterUrl="/kanvas/artwork/1/11",
+            available=True,
+        ),
+        PosterView(
+            id=2,
+            title="Missing",
+            href="/item/2",
+            posterUrl="/kanvas/artwork/2/12",
+            available=False,
+        ),
+        PosterView(
+            id=3,
+            title="Second",
+            href="/item/3",
+            posterUrl="/kanvas/artwork/3/13",
+            available=True,
+        ),
+    )
+
+    artwork, mosaic = collection_artwork(detail, posters)
+
+    assert artwork is None
+    assert mosaic == ("/kanvas/artwork/1/11", "/kanvas/artwork/3/13")
+    assert all(value.startswith("/kanvas/") for value in mosaic)
+
+
+def test_collection_grouping_keeps_mixed_direct_members_without_expanding_series() -> None:
+    def member(item_id: int, kind: str) -> CollectionMemberView:
+        return CollectionMemberView(
+            poster=PosterView(id=item_id, title=kind, href=f"/item/{item_id}", available=True),
+            kind=kind,
+        )
+
+    movies, series, other = group_collection_members(
+        (member(1, "movie"), member(2, "series"), member(3, "episode"))
+    )
+
+    assert [entry.poster.id for entry in movies] == [1]
+    assert [entry.poster.id for entry in series] == [2]
+    assert [entry.poster.id for entry in other] == [3]
+
+
+def test_collection_optimistic_state_can_rollback_a_safe_mutation() -> None:
+    state: OptimisticRevisionState[tuple[int, int]] = OptimisticRevisionState(value=(1, 2))
+
+    assert state.begin((2, 1)) == (2, 1)
+    assert state.rollback() == (1, 2)
+    assert state.value == (1, 2)
+
+
 def test_watched_state_can_commit_or_rollback_an_optimistic_update() -> None:
     state = OptimisticWatchedState(watched=False)
 
@@ -242,6 +354,408 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
     assert payload["nextCursor"] is None
     assert payload["items"][0]["posterUrl"] == "/kanvas/artwork/7/8"
     assert "playback_url" not in json.dumps(payload)
+
+
+async def test_collection_index_endpoint_is_cursor_bounded_and_serialises_safe_tiles(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def page(
+        _self: object, *, cursor: str | None, search: str | None
+    ) -> tuple[tuple[CollectionTileView, ...], str | None]:
+        assert cursor == "after-first"
+        assert search == "Stargate"
+        return (
+            (
+                CollectionTileView(
+                    id=1,
+                    name="Stargate",
+                    itemCount=3,
+                    watchOrderCount=1,
+                    revision=2,
+                    mosaicUrls=("/kanvas/artwork/7/8",),
+                ),
+            ),
+            None,
+        )
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.collection_page", page)
+    request = Request(
+        {
+            "type": "http",
+            "query_string": b"cursor=after-first&search=Stargate",
+            "headers": [],
+        }
+    )
+
+    response = await collections_data(request)
+
+    assert response.status_code == 200
+    payload = json.loads(bytes(response.body))
+    assert payload["nextCursor"] is None
+    assert payload["items"] == [
+        {
+            "id": 1,
+            "name": "Stargate",
+            "itemCount": 3,
+            "watchOrderCount": 1,
+            "revision": 2,
+            "artworkUrl": None,
+            "mosaicUrls": ["/kanvas/artwork/7/8"],
+        }
+    ]
+
+
+async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class ConflictCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def add_collection_member(self, _collection_id: int, **_arguments: object) -> int:
+            raise KatalogClientError(KatalogClientErrorKind.CONFLICT, "revision changed")
+
+        async def collection_detail(self, _collection_id: int) -> SimpleNamespace:
+            return SimpleNamespace(revision=8)
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {"operation": "add", "revision": 7, "itemId": 12}
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalog)
+
+    response = await collection_member_action(4, cast(Request, JsonRequest()))
+
+    assert response.status_code == 409
+    payload = json.loads(bytes(response.body))
+    assert payload["intent"] == {"operation": "add", "revision": 7, "itemId": 12}
+    assert payload["currentRevision"] == 8
+    assert payload["reloadUrl"] == "/collections/4/edit"
+
+
+async def test_collection_and_watch_order_action_routes_use_explicit_public_mutations(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def create_collection(self, *, name: str, overview: str | None) -> int:
+            calls.append(("create-collection", (name, overview)))
+            return 4
+
+        async def update_collection(self, collection_id: int, **arguments: object) -> int:
+            calls.append(("update-collection", (collection_id, arguments)))
+            return 3
+
+        async def delete_collection(self, collection_id: int, *, revision: int) -> None:
+            calls.append(("delete-collection", (collection_id, revision)))
+
+        async def update_collection_member(self, collection_id: int, **arguments: object) -> int:
+            calls.append(("update-member", (collection_id, arguments)))
+            return 4
+
+        async def remove_collection_member(
+            self, collection_id: int, **arguments: object
+        ) -> tuple[int, tuple[str, ...]]:
+            calls.append(("remove-member", (collection_id, arguments)))
+            return 5, ()
+
+        async def create_watch_order(self, collection_id: int, **arguments: object) -> int:
+            calls.append(("create-order", (collection_id, arguments)))
+            return 9
+
+        async def update_watch_order(self, watch_order_id: int, **arguments: object) -> int:
+            calls.append(("update-order", (watch_order_id, arguments)))
+            return 6
+
+        async def delete_watch_order(self, watch_order_id: int, *, revision: int) -> int:
+            calls.append(("delete-order", (watch_order_id, revision)))
+            return 3
+
+        async def apply_generation(self, watch_order_id: int, **arguments: object) -> int:
+            calls.append(("apply-generation", (watch_order_id, arguments)))
+            return 7
+
+    class FormRequest:
+        def __init__(self, **values: str) -> None:
+            self._form = FormData(values)
+
+        async def form(self) -> FormData:
+            return self._form
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalog)
+
+    created = await create_collection_action(
+        cast(Request, FormRequest(name="Stargate", overview="Gate travel"))
+    )
+    updated = await update_collection_action(
+        4, cast(Request, FormRequest(revision="2", name="Stargate SG-1", overview=""))
+    )
+    member = await update_collection_member_action(
+        4,
+        7,
+        cast(Request, FormRequest(revision="3", relationship="spinoff")),
+    )
+    removed = await remove_collection_member_action(4, 7, cast(Request, FormRequest(revision="4")))
+    collection_deleted = await delete_collection_action(
+        4, cast(Request, FormRequest(revision="5", confirm="DELETE"))
+    )
+    order_created = await create_watch_order_action(
+        4,
+        cast(
+            Request,
+            FormRequest(collection_revision="6", name="Release", kind="custom"),
+        ),
+    )
+    order_updated = await update_watch_order_action(
+        9, cast(Request, FormRequest(revision="1", name="Air", kind="air"))
+    )
+    order_deleted = await delete_watch_order_action(
+        9, cast(Request, FormRequest(revision="2", confirm="delete"))
+    )
+    generated = await apply_watch_order_generation_action(
+        9,
+        cast(Request, FormRequest(revision="3", mode="air", apply_mode="replace")),
+    )
+
+    assert created.headers["location"] == "/collections/4"
+    assert updated.headers["location"] == "/collections/4"
+    assert member.headers["location"] == "/collections/4/edit"
+    assert removed.headers["location"] == "/collections/4/edit"
+    assert collection_deleted.headers["location"] == "/collections"
+    assert order_created.headers["location"] == "/watch-orders/9/edit"
+    assert order_updated.headers["location"] == "/watch-orders/9/edit"
+    assert order_deleted.headers["location"] == "/collections"
+    assert generated.headers["location"] == "/watch-orders/9/edit"
+    assert [name for name, _ in calls] == [
+        "create-collection",
+        "update-collection",
+        "update-member",
+        "remove-member",
+        "delete-collection",
+        "create-order",
+        "update-order",
+        "delete-order",
+        "apply-generation",
+    ]
+
+
+async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def item_picker_page(
+            self, collection_id: int, **arguments: object
+        ) -> tuple[tuple[ItemPickerView, ...], str | None]:
+            assert collection_id == 4
+            assert arguments["playable_only"] is True
+            calls.append("picker")
+            return (
+                (
+                    ItemPickerView(
+                        id=7,
+                        title="Pilot",
+                        kind="episode",
+                        year=1997,
+                        available=True,
+                        alreadyMember=False,
+                    ),
+                ),
+                "next",
+            )
+
+        async def watch_order_page(
+            self, watch_order_id: int, **arguments: object
+        ) -> tuple[tuple[WatchOrderRowView, ...], str | None, int]:
+            assert watch_order_id == 9
+            assert arguments["cursor"] == "later"
+            calls.append("rows")
+            return (
+                (
+                    WatchOrderRowView(
+                        id=3,
+                        position=0,
+                        itemId=7,
+                        title="Pilot",
+                        kind="episode",
+                        available=True,
+                    ),
+                ),
+                None,
+                6,
+            )
+
+        async def add_watch_order_entry(self, _watch_order_id: int, **_arguments: object) -> int:
+            calls.append("add")
+            return 7
+
+        async def move_watch_order_entry(self, _watch_order_id: int, **_arguments: object) -> int:
+            calls.append("move")
+            return 8
+
+        async def move_watch_order_entry_to_boundary(
+            self, _watch_order_id: int, **_arguments: object
+        ) -> int:
+            calls.append("boundary")
+            return 9
+
+        async def remove_watch_order_entry(self, _watch_order_id: int, **_arguments: object) -> int:
+            calls.append("remove")
+            return 10
+
+    class JsonRequest:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        async def json(self) -> object:
+            return self._payload
+
+    class FakePlayback:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def create_watch_order_launch_uri(
+            self, watch_order_id: int, *, start_item_id: int | None
+        ) -> str:
+            assert (watch_order_id, start_item_id) == (9, 7)
+            return "kasana://play/" + "A" * 32
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasPlaybackService", FakePlayback)
+
+    picker_response = await collection_picker_data(
+        4,
+        Request({"type": "http", "query_string": b"search=pilot&playable=true", "headers": []}),
+    )
+    rows_response = await watch_order_data(
+        9, Request({"type": "http", "query_string": b"cursor=later", "headers": []})
+    )
+    add = await watch_order_entry_action(
+        9, cast(Request, JsonRequest({"operation": "add", "revision": 6, "itemId": 7}))
+    )
+    move = await watch_order_entry_action(
+        9,
+        cast(
+            Request,
+            JsonRequest(
+                {
+                    "operation": "move",
+                    "revision": 7,
+                    "entryId": 3,
+                    "beforeEntryId": None,
+                    "afterEntryId": None,
+                }
+            ),
+        ),
+    )
+    boundary = await watch_order_entry_action(
+        9,
+        cast(
+            Request,
+            JsonRequest({"operation": "move", "revision": 8, "entryId": 3, "boundary": "end"}),
+        ),
+    )
+    removed = await watch_order_entry_action(
+        9, cast(Request, JsonRequest({"operation": "remove", "revision": 9, "entryId": 3}))
+    )
+    launched = await watch_order_launch_action(9, cast(Request, JsonRequest({"itemId": 7})))
+
+    assert json.loads(bytes(picker_response.body))["nextCursor"] == "next"
+    assert json.loads(bytes(rows_response.body))["revision"] == 6
+    assert json.loads(bytes(launched.body))["launchUri"] == "kasana://play/" + "A" * 32
+    assert [
+        json.loads(bytes(response.body))["revision"] for response in (add, move, boundary, removed)
+    ] == [
+        7,
+        8,
+        9,
+        10,
+    ]
+    assert calls == ["picker", "rows", "add", "move", "boundary", "remove"]
+
+
+async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_states(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class ArtworkCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def artwork_content(
+            self, item_id: int, _artwork_id: int
+        ) -> tuple[bytes, str, str | None]:
+            if item_id == 8:
+                raise KatalogClientError(KatalogClientErrorKind.NOT_FOUND, "gone")
+            if item_id == 9:
+                raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+            return b"art", "image/jpeg", "etag-value"
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {"operation": "unknown", "revision": 1}
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ArtworkCatalog)
+
+    response = await artwork(7, 8)
+    invalid = await collection_member_action(4, cast(Request, JsonRequest()))
+
+    assert response.body == b"art"
+    assert response.headers["etag"] == "etag-value"
+    assert response.headers["cache-control"] == "private, max-age=3600"
+    assert invalid.status_code == 422
+    with pytest.raises(HTTPException, match="Artwork was not found"):
+        await artwork(8, 8)
+    with pytest.raises(HTTPException, match="Artwork is unavailable"):
+        await artwork(9, 8)
+
+
+async def test_browser_data_endpoints_return_typed_katalog_failure_states(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FailingCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def collection_page(self, **_arguments: object) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
+
+        async def item_picker_page(self, _collection_id: int, **_arguments: object) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def watch_order_page(self, _watch_order_id: int, **_arguments: object) -> object:
+            raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingCatalog)
+
+    collections = await collections_data(
+        Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    picker = await collection_picker_data(
+        4, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    entries = await watch_order_data(
+        9, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    invalid_library = await library_data(
+        Request({"type": "http", "query_string": b"year=invalid", "headers": []})
+    )
+
+    assert [
+        response.status_code for response in (collections, picker, entries, invalid_library)
+    ] == [
+        503,
+        503,
+        503,
+        422,
+    ]
 
 
 def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> None:
@@ -306,10 +820,121 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalog)
         await item_route.render_item(Kanvas_Settings(), 7)
         render_library(Kanvas_Settings(), LibraryFilters(search="poster"))
-        await collections_page()
+        await collections_page(Request({"type": "http", "query_string": b"", "headers": []}))
         await search_page()
         await administration_page()
         await design_page()
+
+
+async def test_collection_and_watch_order_routes_render_the_editor_states(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    poster = PosterView(
+        id=7,
+        title="Pilot",
+        href="/item/7",
+        posterUrl="/kanvas/artwork/7/8",
+        available=True,
+    )
+    member = CollectionMemberView(poster=poster, kind="movie", relationship="primary")
+    collection = CollectionDetailView(
+        id=4,
+        name="Stargate",
+        overview="Gate travel",
+        itemCount=1,
+        watchOrderCount=1,
+        revision=3,
+        mosaicUrls=("/kanvas/artwork/7/8",),
+        movies=(member,),
+        memberNextCursor="next-members",
+        watchOrders=(
+            WatchOrderCardView(
+                id=9,
+                collectionId=4,
+                name="Release",
+                kind="custom",
+                entryCount=1,
+                revision=2,
+                progressPercent=25,
+                nextItemTitle="Pilot",
+            ),
+        ),
+    )
+    editor = WatchOrderEditorView(
+        id=9,
+        collectionId=4,
+        collectionName="Stargate",
+        name="Release",
+        kind="custom",
+        entryCount=1,
+        revision=2,
+    )
+    preview = GenerationPreviewView(
+        watchOrderId=9,
+        revision=2,
+        mode="air",
+        applyMode="replace",
+        entries=(
+            WatchOrderRowView(
+                id=1,
+                position=0,
+                itemId=7,
+                title="Pilot",
+                kind="episode",
+                available=True,
+            ),
+        ),
+        undatedTitles=("Special",),
+        unavailableTitles=("Missing",),
+        duplicateTitles=("Pilot",),
+        nonPlayableTitles=("Series",),
+        removedEntryTitles=("Old entry",),
+    )
+
+    class RouteCatalog:
+        def __init__(self, _settings: Kanvas_Settings) -> None:
+            pass
+
+        async def collection_detail(self, collection_id: int) -> CollectionDetailView:
+            assert collection_id == 4
+            return collection
+
+        async def watch_order_editor(self, watch_order_id: int) -> WatchOrderEditorView:
+            assert watch_order_id == 9
+            return editor
+
+        async def generation_preview(
+            self, watch_order_id: int, **arguments: object
+        ) -> GenerationPreviewView:
+            assert watch_order_id == 9
+            assert arguments["revision"] == 2
+            return preview
+
+    monkeypatch.setattr(collections_route, "KanvasKatalogService", RouteCatalog)
+
+    with Client(page("")) as client:
+        await collections_route.render_collection_new(Kanvas_Settings())
+        await collections_route.render_collection_detail(Kanvas_Settings(), 4)
+        await collections_route.render_collection_edit(Kanvas_Settings(), 4)
+        await collections_route.render_watch_order_new(Kanvas_Settings(), 4)
+        await collections_route.render_watch_order(
+            Kanvas_Settings(),
+            9,
+            editable=True,
+            preview_mode="air",
+            apply_mode="replace",
+        )
+
+        html_elements = [
+            element for element in client.elements.values() if element.tag == "nicegui-html"
+        ]
+
+    rendered = "\n".join(
+        cast(str, _element_props(element)["innerHTML"]) for element in html_elements
+    )
+    assert "kanvas-item-picker" in rendered
+    assert "kanvas-watch-order-list" in rendered
+    assert "k-generation-preview__entries" in rendered
 
 
 async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None:
@@ -329,6 +954,7 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
         assert "k-input" in _element_classes(library_search)
         assert _element_props(library_search)["type"] == "search"
         assert _element_props(library_search)["value"] == "poster"
+        assert _element_props(library_search)["autofocus"] is True
         assert "k-control-shell" in _element_classes(_parent_element(library_search))
         assert "k-input-shell" in _element_classes(_parent_element(library_search))
         library_year = _input_named(library_client, "year")
@@ -365,6 +991,12 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
             if element.tag == "button" and _element_props(element).get("aria-label") == "Search"
         )
         assert _element_props(search_button)["type"] == "submit"
+
+    with Client(page("")) as collections_client:
+        await collections_route.render_collections_index(Kanvas_Settings(), search=None)
+        collections_search = _input_named(collections_client, "search")
+
+        assert _element_props(collections_search)["autofocus"] is True
 
     with Client(page("")) as design_client:
         await design_page()
@@ -522,6 +1154,50 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     assert next_cursor == "next"
 
 
+async def test_item_picker_uses_a_bounded_server_side_library_search(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    item = _item()
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def iter_collection_members(
+            self, collection_id: int, *, limit: int
+        ) -> AsyncIterator[CollectionMembership]:
+            assert collection_id == 4
+            assert limit == 100
+            yield CollectionMembership(id=1, collection_id=4, item=item)
+
+        async def list_library_items(
+            self, *, cursor: str | None, limit: int, search: str | None
+        ) -> PaginatedResponse[LibraryItemSummary]:
+            assert cursor == "next"
+            assert limit == 48
+            assert search == "Stargate"
+            return PaginatedResponse(items=(item,), next_cursor=None, limit=limit)
+
+    def fake_client(*_args: object, **_kwargs: object) -> FakeClient:
+        return FakeClient()
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", fake_client)
+
+    items, next_cursor = await KanvasKatalogService(Kanvas_Settings()).item_picker_page(
+        4,
+        cursor="next",
+        search="Stargate",
+        playable_only=False,
+    )
+
+    assert next_cursor is None
+    assert items[0].already_member is True
+    assert items[0].poster_url is None
+
+
 def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     build_dashboard()
     paths = {route.path for route in app.routes if isinstance(route, Route)}
@@ -531,6 +1207,12 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/library",
         "/item/{item_id}",
         "/collections",
+        "/collections/new",
+        "/collections/{collection_id}",
+        "/collections/{collection_id}/edit",
+        "/collections/{collection_id}/watch-orders/new",
+        "/watch-orders/{watch_order_id}",
+        "/watch-orders/{watch_order_id}/edit",
         "/search",
         "/administration",
         "/_design",
@@ -554,6 +1236,16 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%" in css
     assert "IntersectionObserver" in javascript
     assert "MAX_MOUNTED_POSTERS" in javascript
+    assert "kanvas-collection-grid" in javascript
+    assert "kanvas-item-picker" in javascript
+    assert "kanvas-watch-order-list" in javascript
+    assert "dragstart" in javascript
+    assert "onDrop" in javascript
+    assert "moveBoundary" in javascript
+    assert "showConflict" in javascript
+    assert "currentRevision" in javascript
+    assert 'data-row-action="play"' in javascript
+    assert "<dialog" in javascript
     assert "kanvas-poster" in javascript
     assert "posterMarkup" in javascript
     assert "sessionStorage" in javascript

@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LibraryItemKind(StrEnum):
@@ -41,6 +41,26 @@ class WatchOrderKind(StrEnum):
     CHRONOLOGICAL = "chronological"
     RECOMMENDED = "recommended"
     CUSTOM = "custom"
+
+
+class CollectionRelationship(StrEnum):
+    PRIMARY = "primary"
+    SEQUEL = "sequel"
+    PREQUEL = "prequel"
+    SPINOFF = "spinoff"
+    REMAKE = "remake"
+    ALTERNATE_CONTINUITY = "alternate_continuity"
+    RELATED = "related"
+
+
+class WatchOrderGenerationMode(StrEnum):
+    AIR = "air"
+    RELEASE = "release"
+
+
+class WatchOrderGenerationApplyMode(StrEnum):
+    REPLACE = "replace"
+    MERGE = "merge"
 
 
 class PlaybackContextKind(StrEnum):
@@ -111,6 +131,7 @@ class LibraryItemSummary(APIModel):
 class LibraryItemDetailBase(LibraryItemSummary):
     overview: str | None = Field(default=None, max_length=20_000)
     release_date: str | None = None
+    air_date: str | None = None
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
     playback_url: str = Field(pattern=r"^/api/v1/playback/items/\d+$")
@@ -199,6 +220,68 @@ class CollectionSummary(APIModel):
     overview: str | None = Field(default=None, max_length=20_000)
     item_count: int = Field(ge=0)
     watch_order_count: int = Field(ge=0)
+    revision: int = Field(ge=1)
+
+
+class CollectionCreate(APIModel):
+    name: str = Field(min_length=1, max_length=1_000)
+    overview: str | None = Field(default=None, max_length=20_000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Collection name must not be blank.")
+        return normalized
+
+
+class CollectionUpdate(APIModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=1_000)
+    overview: str | None = Field(default=None, max_length=20_000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Collection name must not be blank.")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if not {"name", "overview"}.intersection(self.model_fields_set):
+            raise ValueError("Collection update must include name or overview.")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("Collection name cannot be null.")
+        return self
+
+
+class CollectionMembership(APIModel):
+    id: int = Field(gt=0)
+    collection_id: int = Field(gt=0)
+    item: LibraryItemSummary
+    relationship: CollectionRelationship | None = None
+
+
+class CollectionMembershipCreate(APIModel):
+    expected_revision: int = Field(ge=1)
+    library_item_id: int = Field(gt=0)
+    relationship: CollectionRelationship | None = None
+
+
+class CollectionMembershipUpdate(APIModel):
+    expected_revision: int = Field(ge=1)
+    relationship: CollectionRelationship | None = None
+
+
+class CollectionDetail(CollectionSummary):
+    representative_artwork: ArtworkSelection | None = None
+    members: tuple[CollectionMembership, ...] = Field(default=(), max_length=20)
+    watch_orders: tuple[WatchOrderSummary, ...] = Field(default=(), max_length=20)
 
 
 class WatchOrderSummary(APIModel):
@@ -207,6 +290,109 @@ class WatchOrderSummary(APIModel):
     name: str = Field(min_length=1, max_length=1_000)
     kind: WatchOrderKind
     entry_count: int = Field(ge=0)
+    revision: int = Field(ge=1)
+
+
+class WatchOrderCreate(APIModel):
+    expected_collection_revision: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=1_000)
+    kind: WatchOrderKind
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Watch-order name must not be blank.")
+        return normalized
+
+
+class WatchOrderUpdate(APIModel):
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=1_000)
+    kind: WatchOrderKind | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Watch-order name must not be blank.")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if not {"name", "kind"}.intersection(self.model_fields_set):
+            raise ValueError("Watch-order update must include name or kind.")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("Watch-order name cannot be null.")
+        return self
+
+
+class WatchOrderEntryCreate(APIModel):
+    expected_revision: int = Field(ge=1)
+    library_item_id: int = Field(gt=0)
+    insert_before_entry_id: int | None = Field(default=None, gt=0)
+    insert_after_entry_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_anchor(self) -> Self:
+        if self.insert_before_entry_id is not None and self.insert_after_entry_id is not None:
+            raise ValueError("An entry cannot be inserted before and after at the same time.")
+        return self
+
+
+class WatchOrderEntryMove(APIModel):
+    expected_revision: int = Field(ge=1)
+    move_before_entry_id: int | None = Field(default=None, gt=0)
+    move_after_entry_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_anchor(self) -> Self:
+        if self.move_before_entry_id is not None and self.move_after_entry_id is not None:
+            raise ValueError("An entry cannot be moved before and after at the same time.")
+        return self
+
+
+class WatchOrderGenerationRequest(APIModel):
+    expected_revision: int = Field(ge=1)
+    mode: WatchOrderGenerationMode
+    apply_mode: WatchOrderGenerationApplyMode = WatchOrderGenerationApplyMode.REPLACE
+
+
+class WatchOrderEntryDetail(APIModel):
+    id: int = Field(gt=0)
+    position: int = Field(ge=0)
+    item: LibraryItemSummary
+
+
+class WatchOrderGenerationPreview(APIModel):
+    watch_order_id: int = Field(gt=0)
+    revision: int = Field(ge=1)
+    mode: WatchOrderGenerationMode
+    entries: tuple[LibraryItemSummary, ...]
+    undated_items: tuple[LibraryItemSummary, ...] = ()
+    unavailable_items: tuple[LibraryItemSummary, ...] = ()
+    duplicate_items: tuple[LibraryItemSummary, ...] = ()
+    non_playable_items: tuple[LibraryItemSummary, ...] = ()
+
+
+class CollectionMutationResult(APIModel):
+    collection_id: int = Field(gt=0)
+    revision: int = Field(ge=1)
+    membership: CollectionMembership | None = None
+    deleted: bool = False
+    warnings: tuple[str, ...] = ()
+
+
+class WatchOrderMutationResult(APIModel):
+    watch_order_id: int = Field(gt=0)
+    revision: int = Field(ge=1)
+    collection_revision: int = Field(ge=1)
+    entry: WatchOrderEntryDetail | None = None
+    deleted: bool = False
 
 
 class OrderedPlayableEntry(APIModel):
@@ -264,7 +450,7 @@ class PaginatedResponse[ItemT](APIModel):
 
 class WatchOrderDetail(APIModel):
     watch_order: WatchOrderSummary
-    entries: PaginatedResponse[OrderedPlayableEntry]
+    entries: PaginatedResponse[WatchOrderEntryDetail]
 
 
 class ProgressUpdate(APIModel):

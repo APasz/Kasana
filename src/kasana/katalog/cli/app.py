@@ -17,6 +17,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from typer.main import Typer
 
 from kasana.katalog.admin import AdminError, KatalogAdmin
+from kasana.katalog.api.service import (
+    CatalogConflictError,
+    CatalogNotFoundError,
+    CatalogValidationError,
+    KatalogQueryService,
+)
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.settings import KatalogSettings
 from kasana.shared import SharedSettings, configure_logging
@@ -41,12 +47,16 @@ item_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 metadata_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 artwork_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 user_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+collection_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+watch_order_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 app.add_typer(database_app, name="database")
 app.add_typer(library_app, name="library")
 app.add_typer(item_app, name="item")
 app.add_typer(metadata_app, name="metadata")
 app.add_typer(artwork_app, name="artwork")
 app.add_typer(user_app, name="user")
+app.add_typer(collection_app, name="collection")
+app.add_typer(watch_order_app, name="watch-order")
 LOGGER: Logger = logging.getLogger(__name__)
 
 
@@ -84,6 +94,24 @@ def with_administration[Result](
     try:
         return operation(KatalogAdmin(database))
     except (AdminError, SQLAlchemyError) as error:
+        fail(cli, str(error), 3)
+    finally:
+        database.close()
+
+
+def with_catalog_queries[Result](
+    cli: CLIContext, operation: Callable[[KatalogQueryService], Result]
+) -> Result:
+    """Run revisioned collection commands against the local Katalog database."""
+    database = KatalogDatabase(database_path(cli))
+    queries = KatalogQueryService(database, artwork_cache_path=cli.settings.artwork_cache_path)
+    try:
+        return operation(queries)
+    except CatalogConflictError as error:
+        fail(cli, str(error), 4)
+    except (CatalogNotFoundError, CatalogValidationError) as error:
+        fail(cli, str(error), 2)
+    except SQLAlchemyError as error:
         fail(cli, str(error), 3)
     finally:
         database.close()
@@ -138,5 +166,6 @@ for _command_module in (
     "kasana.katalog.cli.metadata",
     "kasana.katalog.cli.scanning",
     "kasana.katalog.cli.users",
+    "kasana.katalog.cli.collections",
 ):
     import_module(_command_module)

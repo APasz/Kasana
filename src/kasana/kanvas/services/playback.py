@@ -12,6 +12,7 @@ from kasana.katalog.public import (
     PlaybackPlanRequest,
     SeriesPlaybackContext,
     StandalonePlaybackContext,
+    WatchOrderPlaybackContext,
 )
 
 
@@ -34,6 +35,23 @@ class KanvasPlaybackService:
             launch = await client.create_playback_plan(
                 playback_plan_request(
                     conditional_item.item, user_id=self._settings.user_id, resume=resume
+                )
+            )
+        return launch_uri(launch.launch_token)
+
+    async def create_watch_order_launch_uri(
+        self, watch_order_id: int, *, start_item_id: int | None = None
+    ) -> str:
+        """Launch an order while retaining its Katalog watch-order context."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            launch = await client.create_playback_plan(
+                watch_order_playback_plan_request(
+                    watch_order_id,
+                    user_id=self._settings.user_id,
+                    start_item_id=start_item_id,
                 )
             )
         return launch_uri(launch.launch_token)
@@ -95,6 +113,20 @@ def playback_plan_request(
     """Build a typed public Katalog plan request for one item action."""
 
     return PlaybackPlanRequest(user_id=user_id, context=playback_context(item, resume=resume))
+
+
+def watch_order_playback_plan_request(
+    watch_order_id: int, *, user_id: int, start_item_id: int | None = None
+) -> PlaybackPlanRequest:
+    """Build an order-aware plan request for play and play-from-here controls."""
+
+    return PlaybackPlanRequest(
+        user_id=user_id,
+        context=WatchOrderPlaybackContext(
+            watch_order_id=watch_order_id,
+            start_item_id=start_item_id,
+        ),
+    )
 
 
 def launch_uri(launch_token: str) -> str:

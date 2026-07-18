@@ -67,7 +67,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260718_0006"}
+    assert json.loads(current.output) == {"revision": "20260718_0007"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -143,6 +143,131 @@ def test_item_discovery_commands_emit_playback_ids(tmp_path: Path) -> None:
     )
     assert item.exit_code == 0, item.output
     assert json.loads(item.output)["title"] == "CLI Film"
+
+
+def test_collection_and_watch_order_commands_emit_stable_json(tmp_path: Path) -> None:
+    runner = CliRunner()
+    database_path = tmp_path / "catalogue.sqlite3"
+    environment = _environment(database_path)
+    _initialise(runner, environment)
+    movie_id = _create_movie(database_path, tmp_path / "collection-library")
+
+    created = runner.invoke(
+        katalog_cli.app,
+        ["--json", "collection", "create", "CLI collection", "--overview", "Initial"],
+        env=environment,
+    )
+    assert created.exit_code == 0, created.output
+    collection = json.loads(created.output)
+    assert collection == {
+        "collection_id": 1,
+        "deleted": False,
+        "membership": None,
+        "revision": 1,
+        "warnings": [],
+    }
+    assert (
+        runner.invoke(katalog_cli.app, ["--json", "collection", "list"], env=environment).exit_code
+        == 0
+    )
+
+    updated = runner.invoke(
+        katalog_cli.app,
+        ["--json", "collection", "update", "1", "--revision", "1", "--overview", "Updated"],
+        env=environment,
+    )
+    assert updated.exit_code == 0, updated.output
+    assert json.loads(updated.output)["revision"] == 2
+    added = runner.invoke(
+        katalog_cli.app,
+        ["--json", "collection", "add-item", "1", str(movie_id), "--revision", "2"],
+        env=environment,
+    )
+    assert added.exit_code == 0, added.output
+    assert json.loads(added.output)["membership"]["item"]["id"] == movie_id
+    shown = runner.invoke(katalog_cli.app, ["--json", "collection", "show", "1"], env=environment)
+    assert shown.exit_code == 0, shown.output
+    assert json.loads(shown.output)["members"][0]["item"]["id"] == movie_id
+
+    order_created = runner.invoke(
+        katalog_cli.app,
+        [
+            "--json",
+            "watch-order",
+            "create",
+            "1",
+            "CLI order",
+            "--collection-revision",
+            "3",
+        ],
+        env=environment,
+    )
+    assert order_created.exit_code == 0, order_created.output
+    order = json.loads(order_created.output)
+    assert order["watch_order_id"] == 1
+    assert (
+        runner.invoke(
+            katalog_cli.app, ["--json", "watch-order", "list", "1"], env=environment
+        ).exit_code
+        == 0
+    )
+    added_entry = runner.invoke(
+        katalog_cli.app,
+        ["--json", "watch-order", "add", "1", str(movie_id), "--revision", "1"],
+        env=environment,
+    )
+    assert added_entry.exit_code == 0, added_entry.output
+    entry_id = json.loads(added_entry.output)["entry"]["id"]
+    assert (
+        runner.invoke(
+            katalog_cli.app,
+            ["--json", "watch-order", "move", "1", str(entry_id), "--revision", "2"],
+            env=environment,
+        ).exit_code
+        == 0
+    )
+    preview = runner.invoke(
+        katalog_cli.app,
+        ["--json", "watch-order", "preview-generation", "1", "--revision", "3", "--mode", "air"],
+        env=environment,
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.output)["entries"][0]["id"] == movie_id
+    applied = runner.invoke(
+        katalog_cli.app,
+        ["--json", "watch-order", "apply-generation", "1", "--revision", "3", "--mode", "release"],
+        env=environment,
+    )
+    assert applied.exit_code == 0, applied.output
+    shown_order = runner.invoke(
+        katalog_cli.app, ["--json", "watch-order", "show", "1"], env=environment
+    )
+    assert shown_order.exit_code == 0, shown_order.output
+    assert json.loads(shown_order.output)["entries"]["items"][0]["item"]["id"] == movie_id
+    removed_entry = runner.invoke(
+        katalog_cli.app,
+        ["--json", "watch-order", "remove", "1", str(entry_id), "--revision", "4"],
+        env=environment,
+    )
+    assert removed_entry.exit_code == 0, removed_entry.output
+    deleted_order = runner.invoke(
+        katalog_cli.app,
+        ["--json", "watch-order", "delete", "1", "--revision", "5", "--yes"],
+        env=environment,
+    )
+    assert deleted_order.exit_code == 0, deleted_order.output
+    removed_member = runner.invoke(
+        katalog_cli.app,
+        ["--json", "collection", "remove-item", "1", str(movie_id), "--revision", "5"],
+        env=environment,
+    )
+    assert removed_member.exit_code == 0, removed_member.output
+    deleted_collection = runner.invoke(
+        katalog_cli.app,
+        ["--json", "collection", "delete", "1", "--revision", "6", "--yes"],
+        env=environment,
+    )
+    assert deleted_collection.exit_code == 0, deleted_collection.output
 
 
 def test_item_search_prioritizes_titles_and_applies_filters(tmp_path: Path) -> None:

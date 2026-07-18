@@ -22,7 +22,14 @@ from kasana.katalog.api.contracts import (
     ArtworkSelection,
     Availability,
     BackgroundJob,
+    CollectionCreate,
+    CollectionDetail,
+    CollectionMembership,
+    CollectionMembershipCreate,
+    CollectionMembershipUpdate,
+    CollectionMutationResult,
     CollectionSummary,
+    CollectionUpdate,
     ContinueWatchingEntry,
     HealthResponse,
     JobSubmission,
@@ -48,12 +55,20 @@ from kasana.katalog.api.contracts import (
     StatusResponse,
     UserSummary,
     WatchedFilter,
+    WatchOrderCreate,
     WatchOrderDetail,
+    WatchOrderEntryCreate,
+    WatchOrderEntryMove,
+    WatchOrderGenerationPreview,
+    WatchOrderGenerationRequest,
+    WatchOrderMutationResult,
     WatchOrderSummary,
+    WatchOrderUpdate,
 )
 from kasana.katalog.api.jobs import JobNotFoundError, JobRegistryFullError
 from kasana.katalog.api.runtime import KatalogApiRuntime, MetadataProviderConfigurationError
 from kasana.katalog.api.service import (
+    CatalogConflictError,
     CatalogNotFoundError,
     CatalogValidationError,
     LibraryItemFilters,
@@ -67,6 +82,7 @@ from kasana.shared.concurrency import run_blocking
 
 _LOGGER = logging.getLogger(__name__)
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    409: {"model": APIError, "description": "Stale resource revision."},
     404: {"model": APIError, "description": "Resource not found."},
     422: {"model": APIError, "description": "Invalid request."},
     503: {"model": APIError, "description": "Katalog is temporarily unavailable."},
@@ -261,21 +277,139 @@ def create_app(
     async def list_collections(
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        search: Annotated[str | None, Query(max_length=1_000)] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PaginatedResponse[CollectionSummary]:
-        return await run_blocking(runtime.queries.list_collections, cursor=cursor, limit=limit)
+        return await run_blocking(
+            runtime.queries.list_collections, cursor=cursor, limit=limit, search=search
+        )
+
+    @app.post(
+        "/api/v1/collections",
+        response_model=CollectionMutationResult,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_collection",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_collection(
+        collection: CollectionCreate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(runtime.queries.create_collection, collection)
 
     @app.get(
         "/api/v1/collections/{collection_id}",
-        response_model=CollectionSummary,
+        response_model=CollectionDetail,
         operation_id="v1_get_collection",
         responses=_ERROR_RESPONSES,
     )
     async def get_collection(
         collection_id: Annotated[int, Path(gt=0)],
         runtime: KatalogApiRuntime = Depends(_runtime),
-    ) -> CollectionSummary:
+    ) -> CollectionDetail:
         return await run_blocking(runtime.queries.get_collection, collection_id)
+
+    @app.patch(
+        "/api/v1/collections/{collection_id}",
+        response_model=CollectionMutationResult,
+        operation_id="v1_update_collection",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_collection(
+        collection_id: Annotated[int, Path(gt=0)],
+        changes: CollectionUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(runtime.queries.update_collection, collection_id, changes)
+
+    @app.delete(
+        "/api/v1/collections/{collection_id}",
+        response_model=CollectionMutationResult,
+        operation_id="v1_delete_collection",
+        responses=_ERROR_RESPONSES,
+    )
+    async def delete_collection(
+        collection_id: Annotated[int, Path(gt=0)],
+        expected_revision: Annotated[int, Query(ge=1)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(
+            runtime.queries.delete_collection,
+            collection_id,
+            expected_revision=expected_revision,
+        )
+
+    @app.get(
+        "/api/v1/collections/{collection_id}/items",
+        response_model=PaginatedResponse[CollectionMembership],
+        operation_id="v1_list_collection_members",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_collection_members(
+        collection_id: Annotated[int, Path(gt=0)],
+        cursor: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PaginatedResponse[CollectionMembership]:
+        return await run_blocking(
+            runtime.queries.list_collection_members,
+            collection_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    @app.post(
+        "/api/v1/collections/{collection_id}/items",
+        response_model=CollectionMutationResult,
+        operation_id="v1_add_collection_member",
+        responses=_ERROR_RESPONSES,
+    )
+    async def add_collection_member(
+        collection_id: Annotated[int, Path(gt=0)],
+        membership: CollectionMembershipCreate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(
+            runtime.queries.add_collection_membership, collection_id, membership
+        )
+
+    @app.patch(
+        "/api/v1/collections/{collection_id}/items/{item_id}",
+        response_model=CollectionMutationResult,
+        operation_id="v1_update_collection_member",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_collection_member(
+        collection_id: Annotated[int, Path(gt=0)],
+        item_id: Annotated[int, Path(gt=0)],
+        membership: CollectionMembershipUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(
+            runtime.queries.update_collection_membership,
+            collection_id,
+            item_id,
+            membership,
+        )
+
+    @app.delete(
+        "/api/v1/collections/{collection_id}/items/{item_id}",
+        response_model=CollectionMutationResult,
+        operation_id="v1_remove_collection_member",
+        responses=_ERROR_RESPONSES,
+    )
+    async def remove_collection_member(
+        collection_id: Annotated[int, Path(gt=0)],
+        item_id: Annotated[int, Path(gt=0)],
+        expected_revision: Annotated[int, Query(ge=1)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(
+            runtime.queries.remove_collection_membership,
+            collection_id,
+            item_id,
+            expected_revision=expected_revision,
+        )
 
     @app.get(
         "/api/v1/collections/{collection_id}/watch-orders",
@@ -296,6 +430,20 @@ def create_app(
             limit=limit,
         )
 
+    @app.post(
+        "/api/v1/collections/{collection_id}/watch-orders",
+        response_model=WatchOrderMutationResult,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_collection_watch_order",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_collection_watch_order(
+        collection_id: Annotated[int, Path(gt=0)],
+        watch_order: WatchOrderCreate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(runtime.queries.create_watch_order, collection_id, watch_order)
+
     @app.get(
         "/api/v1/watch-orders/{watch_order_id}",
         response_model=WatchOrderDetail,
@@ -310,6 +458,114 @@ def create_app(
     ) -> WatchOrderDetail:
         return await run_blocking(
             runtime.queries.get_watch_order, watch_order_id, cursor=cursor, limit=limit
+        )
+
+    @app.patch(
+        "/api/v1/watch-orders/{watch_order_id}",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_update_watch_order",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_watch_order(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        changes: WatchOrderUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(runtime.queries.update_watch_order, watch_order_id, changes)
+
+    @app.delete(
+        "/api/v1/watch-orders/{watch_order_id}",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_delete_watch_order",
+        responses=_ERROR_RESPONSES,
+    )
+    async def delete_watch_order(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        expected_revision: Annotated[int, Query(ge=1)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(
+            runtime.queries.delete_watch_order,
+            watch_order_id,
+            expected_revision=expected_revision,
+        )
+
+    @app.post(
+        "/api/v1/watch-orders/{watch_order_id}/entries",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_add_watch_order_entry",
+        responses=_ERROR_RESPONSES,
+    )
+    async def add_watch_order_entry(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        entry: WatchOrderEntryCreate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(runtime.queries.add_watch_order_entry, watch_order_id, entry)
+
+    @app.patch(
+        "/api/v1/watch-orders/{watch_order_id}/entries/{entry_id}",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_move_watch_order_entry",
+        responses=_ERROR_RESPONSES,
+    )
+    async def move_watch_order_entry(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        entry_id: Annotated[int, Path(gt=0)],
+        move: WatchOrderEntryMove,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(
+            runtime.queries.move_watch_order_entry, watch_order_id, entry_id, move
+        )
+
+    @app.delete(
+        "/api/v1/watch-orders/{watch_order_id}/entries/{entry_id}",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_remove_watch_order_entry",
+        responses=_ERROR_RESPONSES,
+    )
+    async def remove_watch_order_entry(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        entry_id: Annotated[int, Path(gt=0)],
+        expected_revision: Annotated[int, Query(ge=1)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(
+            runtime.queries.remove_watch_order_entry,
+            watch_order_id,
+            entry_id,
+            expected_revision=expected_revision,
+        )
+
+    @app.post(
+        "/api/v1/watch-orders/{watch_order_id}/generate-preview",
+        response_model=WatchOrderGenerationPreview,
+        operation_id="v1_preview_watch_order_generation",
+        responses=_ERROR_RESPONSES,
+    )
+    async def preview_watch_order_generation(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        generation: WatchOrderGenerationRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderGenerationPreview:
+        return await run_blocking(
+            runtime.queries.preview_watch_order_generation, watch_order_id, generation
+        )
+
+    @app.post(
+        "/api/v1/watch-orders/{watch_order_id}/apply-generation",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_apply_watch_order_generation",
+        responses=_ERROR_RESPONSES,
+    )
+    async def apply_watch_order_generation(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        generation: WatchOrderGenerationRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(
+            runtime.queries.apply_watch_order_generation, watch_order_id, generation
         )
 
     @app.get(
@@ -748,6 +1004,10 @@ def _install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(JobNotFoundError)
     async def not_found(request: Request, error: Exception) -> JSONResponse:
         return _error_response(request, status.HTTP_404_NOT_FOUND, "not_found", str(error))
+
+    @app.exception_handler(CatalogConflictError)
+    async def conflict(request: Request, error: CatalogConflictError) -> JSONResponse:
+        return _error_response(request, status.HTTP_409_CONFLICT, "revision_conflict", str(error))
 
     @app.exception_handler(CatalogValidationError)
     @app.exception_handler(ValueError)

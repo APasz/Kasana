@@ -57,6 +57,7 @@ class Kinship(StrEnum):
     SPINOFF = "spinoff"
     REMAKE = "remake"
     ALTERNATE_CONTINUITY = "alternate_continuity"
+    RELATED = "related"
 
 
 class KeiroKind(StrEnum):
@@ -222,6 +223,7 @@ class Zaisan(Base):
     sort_title: Mapped[str] = mapped_column(String, nullable=False)
     release_year: Mapped[int | None] = mapped_column(Integer)
     release_date: Mapped[date | None] = mapped_column(Date)
+    air_date: Mapped[date | None] = mapped_column(Date)
     season_number: Mapped[int | None] = mapped_column(Integer)
     episode_number: Mapped[int | None] = mapped_column(Integer)
     overview: Mapped[str | None] = mapped_column(Text)
@@ -525,6 +527,7 @@ class Collection(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     overview: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     memberships: Mapped[list[CollectionKin]] = orm_relationship(
         back_populates="collection", cascade="all, delete-orphan", passive_deletes=True
@@ -533,7 +536,10 @@ class Collection(Base):
         back_populates="collection", cascade="all, delete-orphan", passive_deletes=True
     )
 
-    __table_args__ = (Index("ix_collection_name", "name", unique=True),)
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="positive_collection_revision"),
+        Index("ix_collection_name", "name"),
+    )
 
 
 class CollectionKin(Base):
@@ -572,6 +578,7 @@ class Keiro(Base):
     order_kind: Mapped[KeiroKind] = mapped_column(
         _enum(KeiroKind, "watch_order_kind"), nullable=False
     )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     collection: Mapped[Collection] = orm_relationship(back_populates="watch_orders")
     entries: Mapped[list[KeiroEntry]] = orm_relationship(
@@ -582,6 +589,7 @@ class Keiro(Base):
     )
 
     __table_args__ = (
+        CheckConstraint("revision >= 1", name="positive_watch_order_revision"),
         Index("ix_watch_order_collection_name", "collection_id", "name", unique=True),
     )
 
@@ -604,6 +612,7 @@ class KeiroEntry(Base):
     __table_args__ = (
         CheckConstraint("position >= 0", name="nonnegative_position"),
         Index("ix_watch_order_entry_traversal", "watch_order_id", "position", unique=True),
+        Index("ix_watch_order_entry_item", "watch_order_id", "library_item_id", unique=True),
     )
 
 
