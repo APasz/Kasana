@@ -32,6 +32,8 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     HealthResponse,
+    HierarchyRepairPreview,
+    HierarchyRepairRequest,
     JobStatus,
     JobSubmission,
     LibraryItemDetail,
@@ -249,6 +251,18 @@ def create_app(
         return await run_blocking(
             runtime.queries.list_items, filters=filters, cursor=cursor, limit=limit
         )
+
+    @app.get(
+        "/api/v1/library/recently-added",
+        response_model=PaginatedResponse[LibraryItemSummary],
+        operation_id="v1_list_recently_added_catalogue_items",
+        responses=_ERROR_RESPONSES,
+    )
+    async def recently_added_catalogue_items(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        return await run_blocking(runtime.queries.recently_added_catalogue_items, limit=limit)
 
     @app.get(
         "/api/v1/library/items/{item_id}",
@@ -1038,6 +1052,43 @@ def create_app(
     ) -> JobSubmission:
         job = await runtime.submit_artwork_fetch(root_id=fetch.library_root_id)
         return JobSubmission(job=job)
+
+    @app.post(
+        "/api/v1/repairs/hierarchy",
+        response_model=JobSubmission,
+        status_code=status.HTTP_202_ACCEPTED,
+        operation_id="v1_submit_hierarchy_repair",
+        responses=_ERROR_RESPONSES,
+    )
+    async def submit_hierarchy_repair(
+        repair: HierarchyRepairRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> JobSubmission:
+        job = await runtime.submit_hierarchy_repair(
+            root_id=repair.library_root_id,
+            issue_id=repair.issue_id,
+            item_id=repair.item_id,
+            apply=repair.apply,
+        )
+        return JobSubmission(job=job)
+
+    @app.get(
+        "/api/v1/repairs/hierarchy/preview",
+        response_model=HierarchyRepairPreview,
+        operation_id="v1_get_hierarchy_repair_preview",
+        responses=_ERROR_RESPONSES,
+    )
+    async def hierarchy_repair_preview(
+        library_root_id: Annotated[int | None, Query(gt=0)] = None,
+        issue_id: Annotated[int | None, Query(gt=0)] = None,
+        item_id: Annotated[int | None, Query(gt=0)] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> HierarchyRepairPreview:
+        return await runtime.hierarchy_repair_preview(
+            root_id=library_root_id,
+            issue_id=issue_id,
+            item_id=item_id,
+        )
 
     return app
 

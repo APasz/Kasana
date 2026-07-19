@@ -49,6 +49,7 @@ artwork_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 user_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 collection_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 watch_order_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+repair_app: Typer = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
 app.add_typer(database_app, name="database")
 app.add_typer(library_app, name="library")
 app.add_typer(item_app, name="item")
@@ -57,6 +58,7 @@ app.add_typer(artwork_app, name="artwork")
 app.add_typer(user_app, name="user")
 app.add_typer(collection_app, name="collection")
 app.add_typer(watch_order_app, name="watch-order")
+app.add_typer(repair_app, name="repair")
 LOGGER: Logger = logging.getLogger(__name__)
 
 
@@ -167,5 +169,6 @@ for _command_module in (
     "kasana.katalog.cli.scanning",
     "kasana.katalog.cli.users",
     "kasana.katalog.cli.collections",
+    "kasana.katalog.cli.repair",
 ):
     import_module(_command_module)

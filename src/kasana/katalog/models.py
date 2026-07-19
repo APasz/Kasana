@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     false,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.orm import relationship as orm_relationship
@@ -228,6 +229,37 @@ class MaintenanceJob(Base):
     )
 
 
+class HierarchyRepairRun(Base):
+    """Durable audit trail for a hierarchy repair proposal or applied unit."""
+
+    __tablename__ = "hierarchy_repair_run"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    library_root_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_root.id", ondelete="SET NULL")
+    )
+    issue_id: Mapped[int | None] = mapped_column(ForeignKey("audit_issue.id", ondelete="SET NULL"))
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("library_item.id", ondelete="SET NULL"))
+    dry_run: Mapped[bool] = mapped_column(nullable=False)
+    backup_path: Mapped[str | None] = mapped_column(String)
+    action_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    manual_review_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    result: Mapped[JSONObject] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
+
+    __table_args__ = (
+        Index("ix_hierarchy_repair_run_created", "created_at"),
+        Index("ix_hierarchy_repair_run_root_created", "library_root_id", "created_at"),
+    )
+
+
 class AuditIssue(Base):
     __tablename__ = "audit_issue"
 
@@ -283,6 +315,12 @@ class Zaisan(Base):
         default=AvailabilityState.AVAILABLE,
     )
     locked_metadata_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.current_timestamp(),
+    )
 
     library_root: Mapped[Kura] = orm_relationship(back_populates="items")
     parent: Mapped[Zaisan | None] = orm_relationship(
@@ -381,6 +419,13 @@ class MediaFile(Base):
     )
     audio_streams: Mapped[list[JSONObject]] = mapped_column(JSON, nullable=False, default=list)
     subtitle_streams: Mapped[list[JSONObject]] = mapped_column(JSON, nullable=False, default=list)
+    local_poster_path: Mapped[str | None] = mapped_column(String)
+    subtitle_sidecar_paths: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     availability: Mapped[AvailabilityState] = mapped_column(
         _enum(AvailabilityState, "availability_state"),
         nullable=False,

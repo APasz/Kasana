@@ -188,6 +188,102 @@ def test_incremental_scan_detects_add_change_move_and_missing(
     assert database.run_transaction(read_availability) is AvailabilityState.UNAVAILABLE
 
 
+def test_real_library_layouts_never_materialise_organisational_folders(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    shows = tmp_path / "TVShows"
+    anime = tmp_path / "Anime"
+    for path in (
+        movies / "00's" / "Film Name.mkv",
+        movies / "10's" / "Another Film" / "Another Film.mkv",
+        movies / "10's" / "Another Film" / "extra.mkv",
+        movies / "10's" / "Another Film" / "poster.jpg",
+        movies / "10's" / "Another Film" / "Another Film.en.srt",
+        movies / "1990s" / "Nineteen Ninety.mkv",
+        movies / "2000s" / "Two Thousand.mkv",
+        shows / "Show Name" / "Season 01" / "S01E01.mkv",
+        anime / "Shows" / "Anime Name" / "Volume 01" / "E01.mkv",
+        anime / "Films" / "Anime Film.mkv",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    _register_root(database, shows, ZaisanKind.SERIES)
+    _register_root(database, anime, ZaisanKind.SERIES)
+
+    scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
+
+    result = scanner.scan()
+
+    assert result.totals.added == 8
+
+    def hierarchy(session: Session) -> list[tuple[str, ZaisanKind, str | None]]:
+        items = session.scalars(select(Zaisan).order_by(Zaisan.id)).all()
+        by_id = {item.id: item for item in items}
+        return [
+            (item.title, item.item_kind, by_id[item.parent_id].title if item.parent_id else None)
+            for item in items
+        ]
+
+    indexed = database.run_transaction(hierarchy)
+    assert ("Film Name", ZaisanKind.MOVIE, None) in indexed
+    assert ("Another Film", ZaisanKind.MOVIE, None) in indexed
+    assert ("extra", ZaisanKind.EXTRA, "Another Film") in indexed
+    assert ("Show Name", ZaisanKind.SERIES, None) in indexed
+    assert ("Season 1", ZaisanKind.SEASON, "Show Name") in indexed
+    assert ("S01E01", ZaisanKind.EPISODE, "Season 1") in indexed
+    assert ("Anime Name", ZaisanKind.SERIES, None) in indexed
+    assert ("Anime Film", ZaisanKind.MOVIE, None) in indexed
+    organisational_titles = {
+        "00's",
+        "10's",
+        "1990s",
+        "2000s",
+        "Movies",
+        "TVShows",
+        "Anime",
+        "Shows",
+        "Films",
+        "Volume 01",
+    }
+    assert not organisational_titles & {title for title, _, _ in indexed}
+
+    def local_sidecars(session: Session) -> tuple[str | None, list[str]]:
+        media_file = session.scalar(
+            select(MediaFile).where(
+                MediaFile.absolute_path
+                == str(movies / "10's" / "Another Film" / "Another Film.mkv")
+            )
+        )
+        assert media_file is not None
+        return media_file.local_poster_path, media_file.subtitle_sidecar_paths
+
+    poster_path, subtitle_paths = database.run_transaction(local_sidecars)
+    assert poster_path == str(movies / "10's" / "Another Film" / "poster.jpg")
+    assert subtitle_paths == [str(movies / "10's" / "Another Film" / "Another Film.en.srt")]
+
+
+def test_movie_directory_with_multiple_main_candidates_requires_review(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    folder = movies / "10's" / "Ambiguous Film"
+    folder.mkdir(parents=True)
+    (folder / "Feature one.mkv").write_bytes(b"one")
+    (folder / "Feature two.mkv").write_bytes(b"two")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 0
+    assert any(
+        finding.category is AuditCategory.AMBIGUOUS_STRUCTURE
+        and "Multiple possible main movie files" in finding.message
+        for finding in result.findings
+    )
+
+
 def test_abbreviated_decade_directories_index_files_and_repair_legacy_grouping(
     database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
 ) -> None:

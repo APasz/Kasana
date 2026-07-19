@@ -26,6 +26,7 @@ class KatalogDatabase:
         if busy_timeout_ms <= 0:
             msg = "The SQLite busy timeout must be positive."
             raise ValueError(msg)
+        self.database_path = database_path
 
         self.engine: Engine = create_engine(
             f"sqlite:///{database_path}",
@@ -58,6 +59,21 @@ class KatalogDatabase:
     def run_transaction(self, operation: Callable[[Session], Result]) -> Result:
         with self.transaction() as session:
             return operation(session)
+
+    def backup_to(self, destination: Path) -> None:
+        """Create a consistent SQLite backup without touching media files."""
+
+        if not destination.is_absolute():
+            msg = "The SQLite backup path must be absolute."
+            raise ValueError(msg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = sqlite3.connect(self.database_path)
+        target = sqlite3.connect(destination)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
 
     def close(self) -> None:
         self.engine.dispose()

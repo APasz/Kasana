@@ -28,6 +28,8 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     HealthResponse,
+    HierarchyRepairPreview,
+    HierarchyRepairRequest,
     JobSubmission,
     LibraryItemDetail,
     LibraryItemKind,
@@ -240,6 +242,15 @@ class KatalogClient:
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
+
+    async def recently_added_catalogue_items(
+        self, *, limit: int = 20
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        return await self._get_model(
+            "/api/v1/library/recently-added",
+            PaginatedResponse[LibraryItemSummary],
+            params=_params(limit=limit),
+        )
 
     async def get_library_item(self, item_id: int, *, etag: str | None = None) -> ConditionalItem:
         headers = {"If-None-Match": etag} if etag is not None else None
@@ -668,6 +679,22 @@ class KatalogClient:
 
     async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobSubmission:
         return await self._send_model("POST", "/api/v1/artwork/fetch", request, JobSubmission)
+
+    async def submit_hierarchy_repair(self, request: HierarchyRepairRequest) -> JobSubmission:
+        return await self._send_model("POST", "/api/v1/repairs/hierarchy", request, JobSubmission)
+
+    async def hierarchy_repair_preview(
+        self,
+        *,
+        root_id: int | None = None,
+        issue_id: int | None = None,
+        item_id: int | None = None,
+    ) -> HierarchyRepairPreview:
+        return await self._get_model(
+            "/api/v1/repairs/hierarchy/preview",
+            HierarchyRepairPreview,
+            params=_params(library_root_id=root_id, issue_id=issue_id, item_id=item_id),
+        )
 
     async def _get_model[ModelT: BaseModel](
         self,

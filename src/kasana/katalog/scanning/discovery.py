@@ -72,6 +72,14 @@ class Discovery:
     findings: tuple[AuditFinding, ...]
 
 
+@dataclass(frozen=True)
+class MediaSidecars:
+    """Local sidecars proved to belong to one playable media file."""
+
+    poster: Path | None
+    subtitles: tuple[Path, ...]
+
+
 def discover(root_path: Path, video_extensions: frozenset[str]) -> Discovery:
     """Walk one root without following links and retain unreadable paths as findings."""
 
@@ -137,6 +145,31 @@ def sidecar_findings(discovery: Discovery) -> tuple[AuditFinding, ...]:
     return tuple(findings)
 
 
+def sidecars_by_media(discovery: Discovery) -> dict[Path, MediaSidecars]:
+    """Associate only unambiguous local sidecars; sidecars never become library items."""
+
+    files_by_directory: dict[Path, list[FileSnapshot]] = defaultdict(list)
+    for file in discovery.files:
+        files_by_directory[file.path.parent].append(file)
+    posters_by_media: dict[Path, Path] = {}
+    subtitles_by_media: dict[Path, list[Path]] = defaultdict(list)
+    for poster in discovery.posters:
+        candidate = _poster_candidate(poster, files_by_directory[poster.parent])
+        if candidate is not None:
+            posters_by_media[candidate.path] = poster
+    for subtitle in discovery.subtitle_sidecars:
+        candidates = _subtitle_candidates(subtitle, files_by_directory[subtitle.parent])
+        if len(candidates) == 1:
+            subtitles_by_media[candidates[0].path].append(subtitle)
+    return {
+        file.path: MediaSidecars(
+            poster=posters_by_media.get(file.path),
+            subtitles=tuple(sorted(subtitles_by_media[file.path])),
+        )
+        for file in discovery.files
+    }
+
+
 def probe_audit_findings(probe_results: Mapping[Path, ProbeResult]) -> tuple[AuditFinding, ...]:
     findings: list[AuditFinding] = []
     for path, result in probe_results.items():
@@ -185,6 +218,36 @@ def sidecar_matches_video(sidecar: Path, video_stems: set[str]) -> bool:
         return len(normalized_video_stems) == 1
     prefix, separator, suffix = stem.rpartition(".")
     return bool(separator and len(suffix) in {2, 3} and prefix in normalized_video_stems)
+
+
+def _subtitle_candidates(sidecar: Path, files: Sequence[FileSnapshot]) -> tuple[FileSnapshot, ...]:
+    """Return the exact media file(s) a subtitle filename can describe."""
+
+    normalized_stem = sidecar.stem.casefold()
+    exact = tuple(file for file in files if file.path.stem.casefold() == normalized_stem)
+    if exact:
+        return exact
+    prefix, separator, suffix = normalized_stem.rpartition(".")
+    language_match = tuple(
+        file
+        for file in files
+        if separator and len(suffix) in {2, 3} and file.path.stem.casefold() == prefix
+    )
+    if language_match:
+        return language_match
+    if _LANGUAGE_SIDECAR_STEM_PATTERN.fullmatch(normalized_stem) is not None and len(files) == 1:
+        return tuple(files)
+    return ()
+
+
+def _poster_candidate(poster: Path, files: Sequence[FileSnapshot]) -> FileSnapshot | None:
+    """Attach a title-directory poster to its feature, never an incidental extra."""
+
+    if len(files) == 1:
+        return files[0]
+    directory_title = poster.parent.name.casefold()
+    title_matches = tuple(file for file in files if file.path.stem.casefold() == directory_title)
+    return title_matches[0] if len(title_matches) == 1 else None
 
 
 def codec_findings(

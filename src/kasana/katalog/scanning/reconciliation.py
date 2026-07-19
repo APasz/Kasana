@@ -22,7 +22,7 @@ from kasana.katalog.models import (
 from kasana.katalog.parsing import ParsedMedia, ParsedMediaKind
 from kasana.katalog.probe import ProbeResult
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile
-from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot
+from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot, MediaSidecars
 
 
 @dataclass
@@ -40,6 +40,7 @@ def apply_scan(
     root: Kura,
     plans: Sequence[PlannedFile],
     probe_results: Mapping[Path, ProbeResult],
+    sidecars: Mapping[Path, MediaSidecars],
     unavailable_ids: frozenset[int],
     restored_ids: frozenset[int],
     existing_files: Sequence[ExistingFile],
@@ -60,7 +61,9 @@ def apply_scan(
     for plan in plans:
         if plan.action is PlanAction.MOVE:
             assert plan.existing_file_id is not None
-            update_file_location(existing_by_id[plan.existing_file_id], plan.snapshot)
+            update_file_location(
+                existing_by_id[plan.existing_file_id], plan.snapshot, sidecars[plan.snapshot.path]
+            )
             continue
         probe_result = probe_results[plan.snapshot.path]
         if plan.action is PlanAction.CHANGE:
@@ -68,11 +71,15 @@ def apply_scan(
             file = existing_by_id[plan.existing_file_id]
             if plan.parsed is not None:
                 file.library_item = materialize_item(session, root.id, cache, plan.parsed)
-            update_file_details(file, plan.snapshot, probe_result)
+            update_file_details(file, plan.snapshot, probe_result, sidecars[plan.snapshot.path])
             continue
         assert plan.parsed is not None
         item = materialize_item(session, root.id, cache, plan.parsed)
-        session.add(media_file(item, plan.snapshot, probe_result))
+        session.add(media_file(item, plan.snapshot, probe_result, sidecars[plan.snapshot.path]))
+    for file in existing_by_id.values():
+        attachment = sidecars.get(Path(file.absolute_path))
+        if attachment is not None:
+            update_sidecars(file, attachment)
     for file_id in unavailable_ids:
         existing_by_id[file_id].availability = AvailabilityState.UNAVAILABLE
     for file_id in restored_ids:
@@ -258,7 +265,9 @@ def get_extra(
     return extra
 
 
-def media_file(item: Zaisan, snapshot: FileSnapshot, probe: ProbeResult) -> MediaFile:
+def media_file(
+    item: Zaisan, snapshot: FileSnapshot, probe: ProbeResult, sidecars: MediaSidecars
+) -> MediaFile:
     return MediaFile(
         library_item=item,
         absolute_path=str(snapshot.path),
@@ -272,24 +281,36 @@ def media_file(item: Zaisan, snapshot: FileSnapshot, probe: ProbeResult) -> Medi
         attached_pictures=list(probe.attached_pictures),
         audio_streams=list(probe.audio_streams),
         subtitle_streams=list(probe.subtitle_streams),
+        local_poster_path=str(sidecars.poster) if sidecars.poster is not None else None,
+        subtitle_sidecar_paths=[str(path) for path in sidecars.subtitles],
         availability=AvailabilityState.AVAILABLE,
     )
 
 
-def update_file_location(file: MediaFile, snapshot: FileSnapshot) -> None:
+def update_file_location(file: MediaFile, snapshot: FileSnapshot, sidecars: MediaSidecars) -> None:
     file.absolute_path = str(snapshot.path)
     file.size_bytes = snapshot.size_bytes
     file.mtime_ns = snapshot.mtime_ns
     file.filesystem_device = snapshot.filesystem_device
     file.filesystem_inode = snapshot.filesystem_inode
     file.availability = AvailabilityState.AVAILABLE
+    update_sidecars(file, sidecars)
 
 
-def update_file_details(file: MediaFile, snapshot: FileSnapshot, probe: ProbeResult) -> None:
-    update_file_location(file, snapshot)
+def update_file_details(
+    file: MediaFile, snapshot: FileSnapshot, probe: ProbeResult, sidecars: MediaSidecars
+) -> None:
+    update_file_location(file, snapshot, sidecars)
     file.container = canonical_container(probe.container) or probe.container
     file.duration_seconds = probe.duration_seconds
     file.video_streams = list(probe.video_streams)
     file.attached_pictures = list(probe.attached_pictures)
     file.audio_streams = list(probe.audio_streams)
     file.subtitle_streams = list(probe.subtitle_streams)
+
+
+def update_sidecars(file: MediaFile, sidecars: MediaSidecars) -> None:
+    """Persist only local sidecars unambiguously attached during this scan."""
+
+    file.local_poster_path = str(sidecars.poster) if sidecars.poster is not None else None
+    file.subtitle_sidecar_paths = [str(path) for path in sidecars.subtitles]

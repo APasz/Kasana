@@ -44,6 +44,8 @@ from kasana.katalog.public import (
     CollectionMembershipUpdate,
     CollectionRelationship,
     CollectionUpdate,
+    HierarchyRepairPreview,
+    HierarchyRepairRequest,
     KatalogClient,
     LibraryItemKind,
     LibraryItemSummary,
@@ -128,7 +130,7 @@ class KanvasKatalogService:
             continue_page, on_deck_page, added_page = await gather(
                 client.continue_watching(self._settings.user_id, limit=_RAIL_PAGE_SIZE),
                 client.on_deck(self._settings.user_id, limit=_RAIL_PAGE_SIZE),
-                client.list_library_items(limit=_RAIL_PAGE_SIZE),
+                client.recently_added_catalogue_items(limit=_RAIL_PAGE_SIZE),
             )
 
         return (
@@ -144,7 +146,7 @@ class KanvasKatalogService:
                 posters=tuple(poster_from_summary(entry.item) for entry in on_deck_page.items),
             ),
             MediaRailView(
-                title="Added",
+                title="Recently Added",
                 posters=tuple(poster_from_summary(item) for item in added_page.items),
             ),
         )
@@ -239,6 +241,17 @@ class KanvasKatalogService:
     async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobView:
         async with self._client() as client:
             submission = await client.submit_artwork_fetch(request)
+        return job_view(submission.job)
+
+    async def hierarchy_repair_preview(self) -> HierarchyRepairPreview:
+        """Load an administration-only structural proposal without raw media paths."""
+
+        async with self._client() as client:
+            return await client.hierarchy_repair_preview()
+
+    async def submit_hierarchy_repair(self, request: HierarchyRepairRequest) -> JobView:
+        async with self._client() as client:
+            submission = await client.submit_hierarchy_repair(request)
         return job_view(submission.job)
 
     async def cancel_job(self, job_id: str) -> JobView:

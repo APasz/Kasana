@@ -685,6 +685,49 @@ class ArtworkFetchRequest(APIModel):
     library_root_id: int | None = Field(default=None, gt=0)
 
 
+class HierarchyRepairRequest(APIModel):
+    """A durable hierarchy-repair job request; mutation is opt-in and confirmed."""
+
+    library_root_id: int | None = Field(default=None, gt=0)
+    issue_id: int | None = Field(default=None, gt=0)
+    item_id: int | None = Field(default=None, gt=0)
+    apply: bool = False
+    confirmed: bool = False
+
+    @model_validator(mode="after")
+    def require_confirmation_for_apply(self) -> Self:
+        if self.apply and not self.confirmed:
+            msg = "Hierarchy repair apply requests require confirmed=true."
+            raise ValueError(msg)
+        return self
+
+
+class HierarchyRepairImpact(APIModel):
+    playback_states: int = Field(ge=0)
+    metadata_bindings: int = Field(ge=0)
+    collection_memberships: int = Field(ge=0)
+    watch_order_entries: int = Field(ge=0)
+
+
+class HierarchyRepairActionSummary(APIModel):
+    kind: str = Field(min_length=1, max_length=100)
+    item_id: int | None = Field(default=None, gt=0)
+    target_item_id: int | None = Field(default=None, gt=0)
+    explanation: str = Field(min_length=1, max_length=2_000)
+
+
+class HierarchyRepairManualReview(APIModel):
+    root_id: int = Field(gt=0)
+    item_id: int | None = Field(default=None, gt=0)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class HierarchyRepairPreview(APIModel):
+    actions: tuple[HierarchyRepairActionSummary, ...]
+    manual_reviews: tuple[HierarchyRepairManualReview, ...]
+    impact: HierarchyRepairImpact
+
+
 class MutationResult(APIModel):
     item_id: int = Field(gt=0)
     action: str = Field(min_length=1, max_length=100)

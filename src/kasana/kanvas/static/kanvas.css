@@ -202,6 +202,15 @@ kanvas-poster {
     font-weight: 650;
 }
 
+.k-poster__fallback {
+    background-color: var(--k-surface-2);
+    background-image: linear-gradient(135deg, transparent 42%, rgb(255 255 255 / 3%) 42%, rgb(255 255 255 / 3%) 58%, transparent 58%);
+}
+
+.k-poster__fallback--1 { background-image: linear-gradient(45deg, transparent 42%, rgb(255 255 255 / 3%) 42%, rgb(255 255 255 / 3%) 58%, transparent 58%); }
+.k-poster__fallback--2 { background-image: radial-gradient(circle at 22% 24%, rgb(255 255 255 / 4%) 0 1px, transparent 2px), radial-gradient(circle at 78% 76%, rgb(255 255 255 / 3%) 0 1px, transparent 2px); }
+.k-poster__fallback--3 { background-image: linear-gradient(0deg, transparent 49%, rgb(255 255 255 / 3%) 50%, transparent 51%), linear-gradient(90deg, transparent 49%, rgb(255 255 255 / 3%) 50%, transparent 51%); }
+
 .k-poster__meta {
     display: block;
     min-height: 38px;
@@ -224,6 +233,10 @@ kanvas-poster {
 .k-poster--unavailable .k-poster__image { filter: grayscale(1); }
 .k-poster--selected .k-poster__art { border-color: var(--k-accent); }
 .k-poster--loading .k-poster__art { background: linear-gradient(110deg, var(--k-surface-1), var(--k-surface-active), var(--k-surface-1)); }
+
+.k-onboarding { display: flex; justify-content: space-between; gap: 18px; margin: 0 0 22px; padding: 14px; border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); color: var(--k-text-muted); }
+.k-onboarding strong { display: block; color: var(--k-text); }
+.k-onboarding p { max-width: 680px; margin: 5px 0 10px; font-size: 0.82rem; }
 
 .k-poster:hover .k-poster__art,
 .k-poster:focus-visible .k-poster__art { border-color: var(--k-border-strong); transform: scale(1.015); }

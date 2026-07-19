@@ -7,12 +7,23 @@ from datetime import timedelta
 
 from pydantic import ValidationError
 
-from kasana.katalog.api.contracts import BackgroundJob
+from kasana.katalog.api.contracts import (
+    BackgroundJob,
+    HierarchyRepairActionSummary,
+    HierarchyRepairImpact,
+    HierarchyRepairManualReview,
+    HierarchyRepairPreview,
+)
 from kasana.katalog.api.jobs import JobContext, JobOutcome, JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTransferPolicy
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MatchThresholds, MetadataProvider, MetadataWorkflow
+from kasana.katalog.repair import (
+    HierarchyRepairFilters,
+    HierarchyRepairService,
+    repair_backup_path,
+)
 from kasana.katalog.scanning import IncrementalScanner
 from kasana.katalog.settings import KatalogSettings
 from kasana.kourier.settings import TMDBSettings
@@ -133,6 +144,88 @@ class KatalogApiRuntime:
             return result
 
         return await self.jobs.submit("artwork-fetch", fetch, library_root_id=root_id)
+
+    async def submit_hierarchy_repair(
+        self,
+        *,
+        root_id: int | None,
+        issue_id: int | None,
+        item_id: int | None,
+        apply: bool,
+    ) -> BackgroundJob:
+        """Run a durable dry-run or explicitly confirmed hierarchy repair job."""
+
+        filters = HierarchyRepairFilters(root_id=root_id, issue_id=issue_id, item_id=item_id)
+
+        async def repair(context: JobContext) -> JobOutcome:
+            await context.report(
+                phase="planning",
+                unit="actions",
+                message="Planning hierarchy repair.",
+            )
+            service = HierarchyRepairService(self.database)
+            if apply:
+                backup_path = repair_backup_path(self.database.database_path)
+                await run_blocking(self.database.backup_to, backup_path)
+                result = await run_blocking(service.apply, filters, backup_path=backup_path)
+            else:
+                result = await run_blocking(service.dry_run, filters)
+            counters = result.plan.counters
+            await context.report(
+                phase="complete",
+                current=len(result.plan.actions),
+                total=len(result.plan.actions),
+                unit="actions",
+                message="Hierarchy repair complete."
+                if apply
+                else "Hierarchy repair dry run complete.",
+                force=True,
+            )
+            return JobOutcome(
+                message=(
+                    f"Applied {len(result.plan.actions)} hierarchy actions."
+                    if apply
+                    else f"Proposed {len(result.plan.actions)} hierarchy actions."
+                ),
+                counters=counters,
+            )
+
+        return await self.jobs.submit("hierarchy-repair", repair, library_root_id=root_id)
+
+    async def hierarchy_repair_preview(
+        self, *, root_id: int | None, issue_id: int | None, item_id: int | None
+    ) -> HierarchyRepairPreview:
+        """Expose a read-only repair proposal without creating a job or audit record."""
+
+        plan = await run_blocking(
+            HierarchyRepairService(self.database).preview,
+            HierarchyRepairFilters(root_id=root_id, issue_id=issue_id, item_id=item_id),
+        )
+        return HierarchyRepairPreview(
+            actions=tuple(
+                HierarchyRepairActionSummary(
+                    kind=action.kind.value,
+                    item_id=action.item_id,
+                    target_item_id=action.target_item_id,
+                    explanation=action.explanation,
+                )
+                for action in plan.actions
+            ),
+            manual_reviews=tuple(
+                HierarchyRepairManualReview(
+                    root_id=review.root_id,
+                    item_id=review.item_id,
+                    reason=review.reason,
+                )
+                for review in plan.manual_reviews
+            ),
+            impact=HierarchyRepairImpact(
+                playback_states=plan.impact.playback_states,
+                metadata_bindings=plan.impact.metadata_bindings,
+                collection_memberships=plan.impact.collection_memberships,
+                watch_order_entries=plan.impact.watch_order_entries,
+            ),
+        )
 
     def _workflow(self) -> MetadataWorkflow:
         return MetadataWorkflow(

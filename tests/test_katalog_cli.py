@@ -10,9 +10,9 @@ from typer.testing import CliRunner
 from kasana.katalog.cli import app as katalog_cli
 from kasana.katalog.cli import scanning as scanning_cli
 from kasana.katalog.database import KatalogDatabase
-from kasana.katalog.models import ZaisanKind
+from kasana.katalog.models import Zaisan, ZaisanKind
 from kasana.katalog.scanning import IncrementalScanner, ScanResult
-from kasana.katalog.services import create_library_item, create_library_root
+from kasana.katalog.services import attach_media_file, create_library_item, create_library_root
 
 
 def _environment(database_path: Path) -> dict[str, str]:
@@ -67,7 +67,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260719_0008"}
+    assert json.loads(current.output) == {"revision": "20260719_0010"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -143,6 +143,82 @@ def test_item_discovery_commands_emit_playback_ids(tmp_path: Path) -> None:
     )
     assert item.exit_code == 0, item.output
     assert json.loads(item.output)["title"] == "CLI Film"
+
+
+def test_hierarchy_repair_command_defaults_to_dry_run_and_requires_explicit_apply(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    database_path = tmp_path / "catalogue.sqlite3"
+    environment = _environment(database_path)
+    _initialise(runner, environment)
+    library_path = tmp_path / "Movies"
+    database = KatalogDatabase(database_path.resolve())
+    try:
+
+        def create(session: Session) -> int:
+            root = create_library_root(
+                session,
+                path=library_path,
+                expected_media_kind=ZaisanKind.MOVIE,
+            )
+            malformed = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.MOVIE,
+                title="2000s",
+            )
+            attach_media_file(
+                session,
+                library_item_id=malformed.id,
+                absolute_path=library_path / "2000s" / "CLI Film.mkv",
+                size_bytes=1,
+                mtime_ns=1,
+                container="matroska",
+            )
+            return malformed.id
+
+        malformed_id = database.run_transaction(create)
+    finally:
+        database.close()
+
+    preview = runner.invoke(
+        katalog_cli.app,
+        ["repair", "hierarchy", "--dry-run", "--json"],
+        env=environment,
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.output)["applied"] is False
+
+    blocked = runner.invoke(
+        katalog_cli.app,
+        ["repair", "hierarchy", "--apply"],
+        env=environment,
+    )
+    assert blocked.exit_code == 2
+    assert "--yes" in blocked.output
+
+    applied = runner.invoke(
+        katalog_cli.app,
+        ["repair", "hierarchy", "--apply", "--yes", "--json"],
+        env=environment,
+    )
+    assert applied.exit_code == 0, applied.output
+    assert json.loads(applied.output)["applied"] is True
+    assert tuple(tmp_path.glob("catalogue.sqlite3.hierarchy-repair-*.bak"))
+
+    database = KatalogDatabase(database_path.resolve())
+    try:
+
+        def read_title(session: Session) -> str:
+            item = session.get(Zaisan, malformed_id)
+            assert item is not None
+            return item.title
+
+        title = database.run_transaction(read_title)
+    finally:
+        database.close()
+    assert title == "CLI Film"
 
 
 def test_collection_and_watch_order_commands_emit_stable_json(tmp_path: Path) -> None:

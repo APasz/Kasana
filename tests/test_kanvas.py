@@ -1323,9 +1323,7 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         await design_page()
 
         browser_components = [
-            element
-            for element in client.elements.values()
-            if element.tag in set(BrowserComponent)
+            element for element in client.elements.values() if element.tag in set(BrowserComponent)
         ]
         assert browser_components
         assert all(element.tag != "nicegui-html" for element in browser_components)
@@ -1431,9 +1429,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         )
 
         browser_components = [
-            element
-            for element in client.elements.values()
-            if element.tag in set(BrowserComponent)
+            element for element in client.elements.values() if element.tag in set(BrowserComponent)
         ]
         textareas = [element for element in client.elements.values() if element.tag == "textarea"]
         hidden_fields = [
@@ -1686,6 +1682,11 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
         ) -> PaginatedResponse[LibraryItemSummary]:
             return PaginatedResponse(items=(item,), next_cursor="next", limit=48)
 
+        async def recently_added_catalogue_items(
+            self, *, limit: int = 20
+        ) -> PaginatedResponse[LibraryItemSummary]:
+            return PaginatedResponse(items=(item,), next_cursor=None, limit=limit)
+
     def fake_client(*_args: object, **_kwargs: object) -> FakeClient:
         return FakeClient()
 
@@ -1695,7 +1696,7 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     rails = await service.home_rails()
     posters, next_cursor = await service.library_page(LibraryFilters(anime=True), cursor=None)
 
-    assert [rail.title for rail in rails] == ["Continue", "On Deck", "Added"]
+    assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
     assert posters[0].poster_url == "/kanvas/artwork/7/8"
     assert next_cursor == "next"
 
@@ -1765,6 +1766,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/administration/libraries",
         "/administration/jobs",
         "/administration/artwork",
+        "/administration/hierarchy",
         "/_design",
     } <= paths
     assert keyboard_action("Enter") is NavigationAction.ACTIVATE
@@ -1799,13 +1801,17 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-poster" in javascript
     assert "posterMarkup" in javascript
     assert "sessionStorage" in javascript
-    assert "if (!this.grid.children.length && !state.done)" in javascript
+    assert "LIBRARY_GRID_SCHEMA_VERSION" in javascript
+    assert "libraryGridPayload" in javascript
+    assert "AbortController" in javascript
+    assert "normalisedGridSource" in javascript
+    assert "kanvas-onboarding" in javascript
 
 
 def test_administration_overview_transformation_and_adaptive_polling() -> None:
     overview = overview_from_status(
         StatusResponse(
-            database_revision="20260719_0008",
+            database_revision="20260719_0010",
             item_count=4,
             media_file_count=5,
             available_file_count=4,

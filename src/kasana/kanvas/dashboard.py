@@ -50,6 +50,7 @@ from kasana.kanvas.viewmodels.library import LibraryFilters, PosterState, Poster
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     CollectionRelationship,
+    HierarchyRepairRequest,
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryRootCreate,
@@ -177,6 +178,17 @@ async def administration_metadata_data(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/kanvas/data/administration/hierarchy", include_in_schema=False)
+async def administration_hierarchy_data() -> JSONResponse:
+    """Return a path-redacted hierarchy preview for the explicit repair workflow."""
+
+    try:
+        preview = await KanvasKatalogService(_settings).hierarchy_repair_preview()
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not plan hierarchy repair.")
+    return JSONResponse(preview.model_dump(mode="json"))
+
+
 @app.post("/kanvas/actions/administration", include_in_schema=False)
 async def administration_action(request: Request) -> JSONResponse:
     """Apply explicit administration intents through the typed Kanvas service boundary."""
@@ -197,6 +209,14 @@ async def administration_action(request: Request) -> JSONResponse:
         if operation == "artwork-fetch":
             job = await service.submit_artwork_fetch(
                 ArtworkFetchRequest(library_root_id=_optional_integer(payload.get("rootId")))
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "hierarchy-repair":
+            apply = payload.get("apply") is True
+            if apply and payload.get("confirmed") is not True:
+                return _invalid_action("Applying hierarchy repair requires explicit confirmation.")
+            job = await service.submit_hierarchy_repair(
+                HierarchyRepairRequest(apply=apply, confirmed=apply)
             )
             return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
         if operation == "cancel-job":
@@ -841,6 +861,9 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     _kanvas_page("/administration/artwork", "Kanvas · Artwork maintenance")(
         administration_artwork_page
     )
+    _kanvas_page("/administration/hierarchy", "Kanvas · Hierarchy repair")(
+        administration_hierarchy_page
+    )
     _kanvas_page("/_design", "Kanvas · Design review")(design_page)
     _pages_registered = True
 
@@ -961,6 +984,10 @@ async def administration_jobs_page() -> None:
 
 async def administration_artwork_page() -> None:
     render_administration(_settings, "artwork")
+
+
+async def administration_hierarchy_page() -> None:
+    render_administration(_settings, "hierarchy")
 
 
 async def design_page() -> None:

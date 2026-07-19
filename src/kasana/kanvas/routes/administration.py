@@ -11,7 +11,7 @@ from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title
 from kasana.kanvas.settings import Kanvas_Settings
 
-AdministrationSection = Literal["overview", "metadata", "libraries", "jobs", "artwork"]
+AdministrationSection = Literal["overview", "metadata", "libraries", "jobs", "artwork", "hierarchy"]
 
 _SECTIONS: tuple[tuple[AdministrationSection, str, str], ...] = (
     ("overview", "Overview", "/administration"),
@@ -19,6 +19,7 @@ _SECTIONS: tuple[tuple[AdministrationSection, str, str], ...] = (
     ("libraries", "Libraries", "/administration/libraries"),
     ("jobs", "Jobs", "/administration/jobs"),
     ("artwork", "Artwork", "/administration/artwork"),
+    ("hierarchy", "Hierarchy", "/administration/hierarchy"),
 )
 
 
@@ -40,6 +41,7 @@ def render_administration(settings: Kanvas_Settings, section: AdministrationSect
                 "jobs-source": "/kanvas/data/administration/jobs",
                 "roots-source": "/kanvas/data/administration/roots",
                 "metadata-source": "/kanvas/data/administration/metadata",
+                "hierarchy-source": "/kanvas/data/administration/hierarchy",
                 "action-source": "/kanvas/actions/administration",
             },
         )

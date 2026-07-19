@@ -14,6 +14,7 @@ class LibraryLayout(StrEnum):
     TV_SHOWS = "tv_shows"
     ANIME_SHOWS = "anime_shows"
     ANIME_FILM = "anime_film"
+    ANIME = "anime"
     UNKNOWN = "unknown"
 
 
@@ -34,6 +35,7 @@ class ParsedMedia:
     episode_number: int | None = None
     parent_movie_title: str | None = None
     parent_series_title: str | None = None
+    is_directory_movie: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,11 @@ _EPISODE_MARKER_PATTERN: Pattern[str] = re.compile(
     r"|\(\d{1,2}[xX]\d{1,3}\)",
     re.IGNORECASE,
 )
+_RECOGNISED_EXTRA_PATTERN: Pattern[str] = re.compile(
+    r"(?:^|[. _-])(?:extra(?:s)?|bonus|trailer|featurette|sample|"
+    r"behind[. _-]*the[. _-]*scenes|deleted[. _-]*scenes?)(?:$|[. _-])",
+    re.IGNORECASE,
+)
 
 
 def infer_library_layout(root_path: Path) -> LibraryLayout:
@@ -78,6 +85,8 @@ def infer_library_layout(root_path: Path) -> LibraryLayout:
             return LibraryLayout.ANIME_SHOWS
         case "animefilm":
             return LibraryLayout.ANIME_FILM
+        case "anime":
+            return LibraryLayout.ANIME
         case _:
             return LibraryLayout.UNKNOWN
 
@@ -129,6 +138,8 @@ def parse_media_path(
             return _parse_movie_path(directories, filename_stem, has_decade_directory=True)
         case LibraryLayout.ANIME_FILM:
             return _parse_movie_path(directories, filename_stem, has_decade_directory=False)
+        case LibraryLayout.ANIME:
+            return _parse_anime_path(directories, filename_stem)
         case LibraryLayout.TV_SHOWS:
             return _parse_episode_path(directories, filename_stem, allow_volume=False)
         case LibraryLayout.ANIME_SHOWS:
@@ -144,7 +155,7 @@ def _parse_movie_path(
     if (
         has_decade_directory
         and effective_directories
-        and _is_decade_directory(effective_directories[0])
+        and is_decade_directory(effective_directories[0])
     ):
         effective_directories = effective_directories[1:]
     if not effective_directories:
@@ -152,7 +163,18 @@ def _parse_movie_path(
         return ParsedMedia(kind=ParsedMediaKind.MOVIE, title=title, release_year=release_year)
     if len(effective_directories) == 1:
         title, release_year = _movie_title_and_year(effective_directories[0])
-        return ParsedMedia(kind=ParsedMediaKind.MOVIE, title=title, release_year=release_year)
+        if _is_recognised_extra(filename_stem):
+            return ParsedMedia(
+                kind=ParsedMediaKind.EXTRA,
+                title=filename_stem,
+                parent_movie_title=title,
+            )
+        return ParsedMedia(
+            kind=ParsedMediaKind.MOVIE,
+            title=title,
+            release_year=release_year,
+            is_directory_movie=True,
+        )
     if len(effective_directories) == 2 and effective_directories[1].casefold() == "extras":
         parent_movie_title, _ = _movie_title_and_year(effective_directories[0])
         return ParsedMedia(
@@ -163,6 +185,23 @@ def _parse_movie_path(
     return ParseFailure(
         "Movie files must be direct children of a title directory or its extras directory."
     )
+
+
+def _parse_anime_path(
+    directories: tuple[str, ...], filename_stem: str
+) -> ParsedMedia | ParseFailure:
+    if not directories:
+        return ParseFailure("Anime files must be below the Shows or Films organisational folder.")
+    category, *remainder = directories
+    match category.casefold():
+        case "shows":
+            return _parse_episode_path(tuple(remainder), filename_stem, allow_volume=True)
+        case "films":
+            return _parse_movie_path(tuple(remainder), filename_stem, has_decade_directory=False)
+        case _:
+            return ParseFailure(
+                "Anime files must be below the Shows or Films organisational folder."
+            )
 
 
 def _parse_episode_path(
@@ -211,8 +250,22 @@ def _parse_episode_path(
     )
 
 
-def _is_decade_directory(directory_name: str) -> bool:
+def is_decade_directory(directory_name: str) -> bool:
+    """Recognise organisational decade folders without treating numeric titles as folders."""
+
     return _DECADE_PATTERN.fullmatch(directory_name) is not None
+
+
+def has_episode_marker(filename_stem: str) -> bool:
+    """Return whether a filename itself supplies an episode identifier."""
+
+    return _EPISODE_MARKER_PATTERN.search(filename_stem) is not None
+
+
+def _is_recognised_extra(filename_stem: str) -> bool:
+    """Keep clear feature labels beneath their logical movie rather than promoting them."""
+
+    return _RECOGNISED_EXTRA_PATTERN.search(filename_stem) is not None
 
 
 def _movie_title_and_year(value: str) -> tuple[str, int | None]:

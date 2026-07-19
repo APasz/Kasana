@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -138,6 +139,8 @@ def plan_files(
         if isinstance(parsed, ParseFailure):
             continue
         plans.append(PlannedFile(PlanAction.ADD, snapshot, parsed=parsed))
+    plans, movie_findings = _reject_ambiguous_movie_candidates(plans)
+    findings.extend(movie_findings)
     unavailable_ids = {
         file.id
         for file in existing_files
@@ -150,6 +153,46 @@ def plan_files(
         unchanged_count=unchanged_count,
         findings=tuple(findings),
     )
+
+
+def _reject_ambiguous_movie_candidates(
+    plans: list[PlannedFile],
+) -> tuple[list[PlannedFile], tuple[AuditFinding, ...]]:
+    """Do not choose an arbitrary primary feature from a movie title directory.
+
+    A directory layout lets the scanner identify a film from its enclosing
+    directory, but two non-extra videos in that directory are not enough
+    information to select one as the primary feature.  Retaining the existing
+    catalogue unchanged and emitting an audit issue is safer than creating a
+    misleading item or attaching both files as main media.
+    """
+
+    candidates_by_directory: dict[Path, list[PlannedFile]] = defaultdict(list)
+    for plan in plans:
+        parsed = plan.parsed
+        if (
+            parsed is not None
+            and parsed.kind is ParsedMediaKind.MOVIE
+            and parsed.is_directory_movie
+        ):
+            candidates_by_directory[plan.snapshot.path.parent].append(plan)
+
+    ambiguous_plans: set[PlannedFile] = set()
+    findings: list[AuditFinding] = []
+    for directory, candidates in candidates_by_directory.items():
+        if len(candidates) < 2:
+            continue
+        names = ", ".join(candidate.snapshot.path.name for candidate in candidates)
+        findings.append(
+            AuditFinding(
+                AuditCategory.AMBIGUOUS_STRUCTURE,
+                directory,
+                "Multiple possible main movie files were found; no file was selected "
+                f"automatically: {names}.",
+            )
+        )
+        ambiguous_plans.update(candidates)
+    return [plan for plan in plans if plan not in ambiguous_plans], tuple(findings)
 
 
 def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> bool:

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 
 from nicegui import ui
+from nicegui.element import Element
 
 
 class BrowserComponent(StrEnum):
@@ -14,6 +15,7 @@ class BrowserComponent(StrEnum):
 
     ADMINISTRATION = "kanvas-administration"
     COLLECTION_GRID = "kanvas-collection-grid"
+    ONBOARDING = "kanvas-onboarding"
     ITEM_PICKER = "kanvas-item-picker"
     POSTER_GRID = "kanvas-poster-grid"
     WATCH_ORDER_LIST = "kanvas-watch-order-list"
@@ -26,7 +28,7 @@ _ATTRIBUTE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 
 def mount_browser_component(
     component: BrowserComponent, attributes: Mapping[str, BrowserAttribute]
-) -> None:
+) -> Element:
     """Mount one typed browser component as a native NiceGUI element.
 
     This avoids the dynamic HTML wrapper lifecycle entirely. Attribute names are
@@ -39,7 +41,7 @@ def mount_browser_component(
     rendered_attributes = " ".join(
         f"{name}={_attribute_value(value)!r}" for name, value in attributes.items()
     )
-    ui.element(component.value).props(rendered_attributes)
+    return ui.element(component.value).props(rendered_attributes)
 
 
 def _attribute_value(value: BrowserAttribute) -> str:

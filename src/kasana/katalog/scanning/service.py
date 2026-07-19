@@ -22,6 +22,7 @@ from kasana.katalog.models import (
 )
 from kasana.katalog.parsing import infer_library_layout
 from kasana.katalog.probe import FFProbeClient, ProbeFailure, ProbeResult
+from kasana.katalog.scanning.audit import structural_findings
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile, plan_files
 from kasana.katalog.scanning.discovery import (
     AuditFinding,
@@ -31,6 +32,7 @@ from kasana.katalog.scanning.discovery import (
     discover,
     probe_audit_findings,
     sidecar_findings,
+    sidecars_by_media,
 )
 from kasana.katalog.scanning.reconciliation import apply_scan
 
@@ -106,6 +108,7 @@ class IncrementalScanner:
                         root,
                         (),
                         {},
+                        {},
                         unavailable_ids,
                         frozenset(),
                         existing_files,
@@ -126,6 +129,7 @@ class IncrementalScanner:
         )
         findings.extend(plan.findings)
         findings.extend(sidecar_findings(filesystem))
+        sidecars = sidecars_by_media(filesystem)
         totals.ambiguous += sum(
             finding.category
             in {
@@ -162,6 +166,7 @@ class IncrementalScanner:
                     root,
                     successful_plans,
                     probe_results,
+                    sidecars,
                     plan.unavailable_ids,
                     plan.restored_ids,
                     existing_files,
@@ -222,6 +227,9 @@ class IncrementalScanner:
     def _database_audit(self, root: Kura) -> tuple[AuditFinding, ...]:
         def inspect(session: Session) -> tuple[AuditFinding, ...]:
             items = session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all()
+            media_files = session.scalars(
+                select(MediaFile).join(Zaisan).where(Zaisan.library_root_id == root.id)
+            ).all()
             findings: list[AuditFinding] = []
             episode_counts: dict[tuple[int | None, int | None, int | None], int] = defaultdict(int)
             for item in items:
@@ -244,6 +252,14 @@ class IncrementalScanner:
                             f"Episode identifier {identifier!r} occurs {count} times.",
                         )
                     )
+            findings.extend(
+                structural_findings(
+                    root,
+                    layout=infer_library_layout(Path(root.path)),
+                    items=items,
+                    media_files=media_files,
+                )
+            )
             return tuple(findings)
 
         return self.database.run_transaction(inspect)

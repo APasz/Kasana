@@ -32,15 +32,25 @@
     };
   };
 
+  const fallbackGrapheme = (title) => {
+    const graphemes = typeof Intl.Segmenter === 'function'
+      ? Array.from(new Intl.Segmenter(undefined, {granularity: 'grapheme'}).segment(title), ({segment}) => segment)
+      : Array.from(title);
+    const useful = graphemes.find((grapheme) => /[\p{L}\p{N}]/u.test(grapheme));
+    return useful ? useful.toLocaleUpperCase() : '•';
+  };
+
+  const fallbackPattern = (id) => ((id * 2654435761) >>> 0) % 4;
+
   const posterMarkup = (poster) => {
     const progress = poster.progressPercent == null ? '' :
       `<span class="k-progress" aria-label="Playback progress"><span class="k-progress__value" style="--k-progress:${poster.progressPercent}%"></span></span>`;
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
-      : `<span class="k-poster__fallback">${escapeHtml(poster.title.slice(0, 1).toUpperCase())}</span>`;
+      : `<span class="k-poster__fallback k-poster__fallback--${fallbackPattern(poster.id)}" aria-hidden="true">${escapeHtml(fallbackGrapheme(poster.title))}</span>`;
     const watched = poster.state === 'watched' ? '<span class="k-poster__watched">Watched</span>' : '';
     const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
-    return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
+    return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
       <span class="k-poster__art">${artwork}${progress}${watched}</span>
       <span class="k-poster__meta"><span class="k-poster__title">${escapeHtml(poster.title)}</span>${subtitle}</span>
     </a>`;
@@ -87,7 +97,40 @@
     return element;
   };
 
+  const LIBRARY_GRID_SCHEMA_VERSION = 2;
+  const libraryAssetVersion = () => {
+    const scripts = Array.from(document.scripts);
+    const script = scripts.find((candidate) => candidate.src.includes('/_kanvas/kanvas.js'));
+    if (!script) return 'unversioned';
+    return new URL(script.src, window.location.origin).searchParams.get('v') || 'unversioned';
+  };
+
+  const normalisedGridSource = (source) => {
+    const url = new URL(source, window.location.origin);
+    url.searchParams.delete('cursor');
+    const entries = Array.from(url.searchParams.entries())
+      .sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue));
+    url.search = new URLSearchParams(entries).toString();
+    return `${url.pathname}${url.search}`;
+  };
+
+  const libraryGridPayload = (payload) => {
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+      throw new TypeError('Library payload does not contain an items array');
+    }
+    if (payload.nextCursor != null && typeof payload.nextCursor !== 'string') {
+      throw new TypeError('Library payload contains an invalid cursor');
+    }
+    const items = payload.items.map(normalisePoster);
+    if (items.some((item) => item === null)) throw new TypeError('Library payload contains an invalid poster');
+    return {items, nextCursor: payload.nextCursor ?? null};
+  };
+
   class KanvasPosterGrid extends HTMLElement {
+    static get observedAttributes() {
+      return ['source'];
+    }
+
     constructor() {
       super();
       this.cursor = null;
@@ -98,58 +141,100 @@
       this.status = null;
       this.sentinel = null;
       this.stateKey = null;
+      this.posters = [];
+      this.mountedStart = 0;
+      this.requestController = null;
+      this.generation = 0;
       this.onPageHide = () => this.saveState();
     }
 
     connectedCallback() {
+      this.initialise();
+    }
+
+    attributeChangedCallback(name, previous, current) {
+      if (name === 'source' && this.isConnected && previous !== current) this.initialise();
+    }
+
+    disconnectedCallback() {
+      this.generation += 1;
+      this.requestController?.abort();
+      this.requestController = null;
+      this.observer?.disconnect();
+      this.observer = null;
+      window.removeEventListener('pagehide', this.onPageHide);
+    }
+
+    initialise() {
+      this.generation += 1;
+      this.requestController?.abort();
+      this.requestController = null;
+      this.observer?.disconnect();
       const source = this.getAttribute('source');
-      if (!source) return;
-      this.stateKey = `kanvas:grid:${source}`;
-      this.innerHTML = '<div class="k-grid-status" aria-live="polite"></div><div class="k-grid" aria-busy="true"></div><div class="k-grid-sentinel" aria-hidden="true"></div>';
+      this.cursor = null;
+      this.done = false;
+      this.loading = false;
+      this.posters = [];
+      this.mountedStart = 0;
+      this.stateKey = source ? this.buildStateKey(source) : null;
+      this.innerHTML = '<div class="k-grid-status" aria-live="polite">Loading library…</div><div class="k-grid" aria-busy="true"></div><div class="k-grid-sentinel" aria-hidden="true"></div>';
       this.status = this.querySelector('.k-grid-status');
       this.grid = this.querySelector('.k-grid');
       this.sentinel = this.querySelector('.k-grid-sentinel');
+      if (!source || !this.grid || !this.status || !this.sentinel) {
+        if (this.status) this.status.textContent = 'The library grid could not be configured.';
+        return;
+      }
       this.observer = new IntersectionObserver((entries) => {
         if (entries.some((entry) => entry.isIntersecting)) this.loadNext();
       }, {rootMargin: '640px 0px'});
       this.observer.observe(this.sentinel);
+      window.removeEventListener('pagehide', this.onPageHide);
       window.addEventListener('pagehide', this.onPageHide);
       if (!this.restoreState()) this.loadNext();
     }
 
-    disconnectedCallback() {
-      this.observer?.disconnect();
-      window.removeEventListener('pagehide', this.onPageHide);
+    buildStateKey(source) {
+      const user = this.getAttribute('state-user') || 'anonymous';
+      return `kanvas:grid:v${LIBRARY_GRID_SCHEMA_VERSION}:asset=${libraryAssetVersion()}:user=${encodeURIComponent(user)}:filters=${encodeURIComponent(normalisedGridSource(source))}`;
     }
 
     async loadNext() {
       if (this.loading || this.done || !this.grid || !this.status) return;
       const source = this.getAttribute('source');
       if (!source) return;
+      const generation = this.generation;
+      const controller = new AbortController();
+      this.requestController?.abort();
+      this.requestController = controller;
       this.loading = true;
       this.grid.setAttribute('aria-busy', 'true');
-      this.status.textContent = this.grid.children.length ? 'Loading more…' : 'Loading library…';
+      this.status.textContent = this.posters.length ? 'Loading more…' : 'Loading library…';
       try {
         const url = new URL(source, window.location.origin);
         if (this.cursor) url.searchParams.set('cursor', this.cursor);
-        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        const response = await fetch(url, {
+          headers: {'Accept': 'application/json'},
+          credentials: 'same-origin',
+          signal: controller.signal
+        });
         if (!response.ok) throw new Error(`Library request failed (${response.status})`);
-        const payload = await response.json();
-        const items = Array.isArray(payload.items) ? payload.items : [];
-        if (!items.length && !this.grid.children.length) {
+        const payload = libraryGridPayload(await response.json());
+        if (generation !== this.generation) return;
+        if (!payload.items.length && !this.posters.length) {
           this.status.textContent = 'No items match these filters.';
         } else {
           const fragment = document.createDocumentFragment();
-          for (const item of items) {
-            fragment.append(posterElement(item));
-          }
+          for (const item of payload.items) fragment.append(posterElement(item));
+          this.posters.push(...payload.items);
           this.grid.append(fragment);
           this.trimMountedPosters();
           this.status.textContent = payload.nextCursor ? '' : 'End of library.';
         }
-        this.cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
+        this.cursor = payload.nextCursor;
         this.done = this.cursor === null;
       } catch (error) {
+        if (controller.signal.aborted || generation !== this.generation) return;
         this.status.textContent = 'Could not load this part of the library.';
         const retry = document.createElement('button');
         retry.type = 'button';
@@ -158,8 +243,10 @@
         retry.addEventListener('click', () => { retry.remove(); this.loadNext(); }, {once: true});
         this.status.append(retry);
       } finally {
+        if (generation !== this.generation) return;
         this.loading = false;
-        this.grid.setAttribute('aria-busy', 'false');
+        this.requestController = null;
+        this.grid?.setAttribute('aria-busy', 'false');
       }
     }
 
@@ -170,16 +257,24 @@
         if (!first || first.contains(document.activeElement)) return;
         const height = first.getBoundingClientRect().height;
         first.remove();
+        this.mountedStart += 1;
         window.scrollBy(0, -height);
       }
     }
 
     saveState() {
-      if (!this.stateKey || !this.grid) return;
+      if (!this.stateKey || !this.posters.length) {
+        if (this.stateKey) sessionStorage.removeItem(this.stateKey);
+        return;
+      }
       sessionStorage.setItem(this.stateKey, JSON.stringify({
+        schema: LIBRARY_GRID_SCHEMA_VERSION,
+        asset: libraryAssetVersion(),
+        filters: normalisedGridSource(this.getAttribute('source') || ''),
+        user: this.getAttribute('state-user') || 'anonymous',
         cursor: this.cursor,
         done: this.done,
-        posters: this.grid.innerHTML,
+        posters: this.posters,
         scrollY: window.scrollY
       }));
     }
@@ -190,13 +285,25 @@
       if (!stored) return false;
       try {
         const state = JSON.parse(stored);
-        if (typeof state.posters !== 'string' || typeof state.done !== 'boolean') return false;
-        this.grid.innerHTML = state.posters;
-        if (!this.grid.children.length && !state.done) {
-          sessionStorage.removeItem(this.stateKey);
-          return false;
-        }
-        this.cursor = typeof state.cursor === 'string' ? state.cursor : null;
+        const expectedFilters = normalisedGridSource(this.getAttribute('source') || '');
+        if (
+          state.schema !== LIBRARY_GRID_SCHEMA_VERSION ||
+          state.asset !== libraryAssetVersion() ||
+          state.filters !== expectedFilters ||
+          state.user !== (this.getAttribute('state-user') || 'anonymous') ||
+          !Array.isArray(state.posters) ||
+          !state.posters.length ||
+          typeof state.done !== 'boolean' ||
+          (state.cursor != null && typeof state.cursor !== 'string')
+        ) throw new TypeError('Incompatible library grid state');
+        const posters = state.posters.map(normalisePoster);
+        if (posters.some((poster) => poster === null)) throw new TypeError('Invalid saved poster');
+        this.posters = posters;
+        this.mountedStart = Math.max(0, posters.length - MAX_MOUNTED_POSTERS);
+        const mounted = document.createDocumentFragment();
+        for (const poster of posters.slice(this.mountedStart)) mounted.append(posterElement(poster));
+        this.grid.replaceChildren(mounted);
+        this.cursor = state.cursor ?? null;
         this.done = state.done;
         this.grid.setAttribute('aria-busy', 'false');
         this.status.textContent = this.done ? 'End of library.' : '';
@@ -211,6 +318,24 @@
 
   if (!customElements.get('kanvas-poster')) customElements.define('kanvas-poster', KanvasPoster);
   if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);
+
+  class KanvasOnboarding extends HTMLElement {
+    connectedCallback() {
+      const key = this.getAttribute('state-key') || 'default';
+      const storageKey = `kanvas:onboarding:${key}`;
+      if (sessionStorage.getItem(storageKey) === 'dismissed') {
+        this.replaceChildren();
+        return;
+      }
+      this.innerHTML = '<section class="k-onboarding" role="status"><div><strong>Artwork is not configured yet</strong><p>Your scanned library is ready to review. Configure TMDB, review scanner issues, then choose when to match and fetch artwork.</p><span class="k-action-row"><a class="k-button" href="/administration/hierarchy">Review scanner issues</a><a class="k-button" href="/administration/metadata">Configure TMDB</a><a class="k-button" href="/administration/artwork">Fetch artwork</a></span></div><button type="button" class="k-button" data-onboarding-dismiss>Dismiss</button></section>';
+      this.querySelector('[data-onboarding-dismiss]')?.addEventListener('click', () => {
+        sessionStorage.setItem(storageKey, 'dismissed');
+        this.replaceChildren();
+      });
+    }
+  }
+
+  if (!customElements.get('kanvas-onboarding')) customElements.define('kanvas-onboarding', KanvasOnboarding);
 
   const movePosterFocus = (current, key) => {
     const grid = current.closest('.k-grid, .k-child-grid');
@@ -760,6 +885,7 @@
       super();
       this.section = 'overview';
       this.overview = null;
+      this.hierarchy = null;
       this.jobs = [];
       this.roots = [];
       this.reviewItems = [];
@@ -821,6 +947,9 @@
           this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
           this.reviewIndex = Math.min(this.reviewIndex, Math.max(0, this.reviewItems.length - 1));
         }
+        if (this.section === 'hierarchy') {
+          this.hierarchy = await this.fetchJson(this.source('hierarchy-source'));
+        }
         this.render();
       } catch (error) {
         if (error?.name !== 'AbortError') this.renderError();
@@ -860,6 +989,7 @@
       if (this.section === 'libraries') return this.renderLibraries();
       if (this.section === 'jobs') return this.renderJobs();
       if (this.section === 'artwork') return this.renderArtwork();
+      if (this.section === 'hierarchy') return this.renderHierarchy();
       this.renderOverview();
     }
 
@@ -913,6 +1043,24 @@
       this.bindActions();
     }
 
+    renderHierarchy() {
+      const data = this.hierarchy;
+      if (!data || !Array.isArray(data.actions) || !Array.isArray(data.manual_reviews)) return this.renderError();
+      const impact = data.impact || {};
+      const actions = data.actions.map((action) => `<li><strong>${escapeHtml(action.kind || 'repair')}</strong> · ${escapeHtml(action.explanation || 'No explanation.')}</li>`).join('');
+      const reviews = data.manual_reviews.map((review) => `<li>${escapeHtml(review.reason || 'Manual review required.')}</li>`).join('');
+      this.innerHTML = `<section class="k-admin-panel" aria-live="polite">
+        <div class="k-admin-row"><span>Proposed repairs</span><span class="k-admin-row__value">${data.actions.length}</span></div>
+        <div class="k-admin-row"><span>Manual review</span><span class="k-admin-row__value">${data.manual_reviews.length}</span></div>
+        <div class="k-admin-row"><span>Affected references</span><span class="k-admin-row__value">${Number(impact.playback_states || 0)} playback · ${Number(impact.metadata_bindings || 0)} metadata · ${Number(impact.collection_memberships || 0)} collections · ${Number(impact.watch_order_entries || 0)} watch-order entries</span></div>
+        <div class="k-action-row"><button type="button" class="k-button" data-admin-hierarchy-dry>Run durable dry run</button><button type="button" class="k-button k-button--primary" data-admin-hierarchy-apply>Apply repair</button></div>
+        <details open><summary>Proposed repair summary</summary><ul class="k-admin-detail-list">${actions || '<li>No automatic repairs are currently safe.</li>'}</ul></details>
+        <details><summary>Detected structural issues requiring review</summary><ul class="k-admin-detail-list">${reviews || '<li>No ambiguous structural issues were detected.</li>'}</ul></details>
+        <p class="k-quiet-copy">Apply creates a database backup and runs as a durable administration job. Media files are never changed.</p>
+      </section>`;
+      this.bindActions();
+    }
+
     renderMetadata() {
       const item = this.reviewItems[this.reviewIndex];
       if (!item) {
@@ -930,6 +1078,12 @@
 
     bindActions() {
       this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => this.operation(button.dataset.adminOperation, {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null})));
+      this.querySelector('[data-admin-hierarchy-dry]')?.addEventListener('click', () => this.operation('hierarchy-repair', {apply: false}));
+      this.querySelector('[data-admin-hierarchy-apply]')?.addEventListener('click', () => {
+        if (window.confirm('Apply the proposed hierarchy repair? A database backup will be created first.')) {
+          this.operation('hierarchy-repair', {apply: true, confirmed: true});
+        }
+      });
       this.querySelectorAll('[data-admin-cancel]').forEach((button) => button.addEventListener('click', () => { if (window.confirm('Cancel this job?')) this.operation('cancel-job', {jobId: button.dataset.adminCancel}); }));
       this.querySelector('[data-admin-more]')?.addEventListener('click', () => this.moreJobs());
       this.querySelectorAll('[data-admin-candidate]').forEach((button) => button.addEventListener('click', () => { this.candidateIndex = Number(button.dataset.adminCandidate); this.renderMetadata(); }));

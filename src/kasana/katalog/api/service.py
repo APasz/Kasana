@@ -372,6 +372,41 @@ class KatalogQueryService:
 
         return self._database.run_transaction(load)
 
+    def recently_added_catalogue_items(
+        self, *, limit: int
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        """Return recent catalogue identities rather than a rail of incidental episodes."""
+
+        normalized_limit = _page_limit(limit)
+
+        def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
+            rows = tuple(
+                session.scalars(
+                    select(Zaisan)
+                    .where(Zaisan.availability == AvailabilityState.AVAILABLE)
+                    .order_by(Zaisan.added_at.desc(), Zaisan.id.desc())
+                ).all()
+            )
+            by_id = {item.id: item for item in rows}
+            selected: list[Zaisan] = []
+            seen_ids: set[int] = set()
+            for item in rows:
+                candidate = _recent_catalogue_identity(item, by_id)
+                if candidate is None or candidate.id in seen_ids:
+                    continue
+                selected.append(candidate)
+                seen_ids.add(candidate.id)
+                if len(selected) == normalized_limit:
+                    break
+            summaries = _summaries_for(session, tuple(selected))
+            return PaginatedResponse(
+                items=tuple(summaries[item.id] for item in selected),
+                next_cursor=None,
+                limit=normalized_limit,
+            )
+
+        return self._database.run_transaction(load)
+
     def get_item(self, item_id: int) -> LibraryItemDetail:
         def load(session: Session) -> LibraryItemDetail:
             item = _require(session, Zaisan, item_id, "Library item")
@@ -2090,6 +2125,30 @@ def _apply_item_filters(
                 )
             )
     return statement
+
+
+def _recent_catalogue_identity(item: Zaisan, items_by_id: dict[int, Zaisan]) -> Zaisan | None:
+    """Coalesce newly added episodes and specials to their owning series."""
+
+    if item.item_kind in {ZaisanKind.MOVIE, ZaisanKind.SERIES}:
+        return item
+    if item.item_kind is ZaisanKind.EPISODE:
+        season = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        series = (
+            items_by_id.get(season.parent_id)
+            if season is not None and season.parent_id is not None
+            else None
+        )
+        return series if series is not None and series.item_kind is ZaisanKind.SERIES else None
+    if item.item_kind is ZaisanKind.SPECIAL:
+        parent = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        if parent is None:
+            return None
+        if parent.item_kind is ZaisanKind.SERIES:
+            return parent
+        series = items_by_id.get(parent.parent_id) if parent.parent_id is not None else None
+        return series if series is not None and series.item_kind is ZaisanKind.SERIES else None
+    return None
 
 
 def _item_page(
