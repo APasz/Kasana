@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from asyncio import gather
 from collections.abc import AsyncGenerator
@@ -78,6 +79,19 @@ _WATCH_ORDER_PAGE_SIZE = 50
 _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
 _ARTWORK_URL = re.compile(r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$")
+_LOGGER = logging.getLogger(__name__)
+
+
+class LibraryPosterTransformationError(RuntimeError):
+    """A poster transformation failure with only safe diagnostics attached."""
+
+    def __init__(self, item_id: int, field_names: tuple[str, ...]) -> None:
+        self.item_id = item_id
+        self.field_names = field_names
+        super().__init__(
+            f"Library poster transformation failed for item {item_id}; "
+            f"fields={','.join(field_names)}"
+        )
 
 
 @dataclass
@@ -289,7 +303,18 @@ class KanvasKatalogService:
                 availability=filters.availability,
                 search=filters.search,
             )
-        return tuple(poster_from_summary(item) for item in page.items), page.next_cursor
+        posters: list[PosterView] = []
+        for item in page.items:
+            try:
+                posters.append(poster_from_summary(item))
+            except Exception:
+                field_names = tuple(sorted(item.model_dump().keys()))
+                _LOGGER.error(
+                    "Kanvas library poster transformation failed",
+                    extra={"library_item_id": item.id, "library_item_fields": field_names},
+                )
+                raise LibraryPosterTransformationError(item.id, field_names) from None
+        return tuple(posters), page.next_cursor
 
     async def item_detail(self, item_id: int) -> ItemDetailView:
         """Create a safe item view without exposing Katalog playback or media URLs."""

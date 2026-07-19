@@ -10,14 +10,28 @@
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
 
+  const localArtworkUrl = (value) => typeof value === 'string' && /^\/kanvas\/artwork\/\d+\/\d+$/.test(value);
+  const safeRequestId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
+  const safePosterId = (value) => value && typeof value === 'object' && Number.isSafeInteger(value.id) && value.id > 0 ? value.id : null;
+
+  class LibraryLoadError extends Error {
+    constructor(category, {status = null, requestId = null, cause = null} = {}) {
+      super(category);
+      this.category = category;
+      this.status = status;
+      this.requestId = safeRequestId(requestId);
+      this.cause = cause;
+    }
+  }
+
   const normalisePoster = (value) => {
     if (!value || typeof value !== 'object') return null;
     const poster = value;
-    if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id)) return null;
+    if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id) || poster.id <= 0) return null;
     if (typeof poster.title !== 'string' || !poster.title) return null;
     if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
-    if (poster.posterUrl != null && typeof poster.posterUrl !== 'string') return null;
+    if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
     if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
@@ -28,7 +42,8 @@
       posterUrl: poster.posterUrl ?? null,
       subtitle: poster.subtitle ?? null,
       progressPercent: poster.progressPercent ?? null,
-      state: poster.state
+      state: poster.state,
+      available: poster.available
     };
   };
 
@@ -97,7 +112,8 @@
     return element;
   };
 
-  const LIBRARY_GRID_SCHEMA_VERSION = 2;
+  const LIBRARY_GRID_SCHEMA_VERSION = 3;
+  const LIBRARY_RESPONSE_SCHEMA_VERSION = 1;
   const libraryAssetVersion = () => {
     const scripts = Array.from(document.scripts);
     const script = scripts.find((candidate) => candidate.src.includes('/_kanvas/kanvas.js'));
@@ -115,15 +131,22 @@
   };
 
   const libraryGridPayload = (payload) => {
-    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
-      throw new TypeError('Library payload does not contain an items array');
+    if (!payload || typeof payload !== 'object' || payload.schemaVersion !== LIBRARY_RESPONSE_SCHEMA_VERSION || !Array.isArray(payload.items)) {
+      throw new LibraryLoadError('invalid_envelope');
     }
     if (payload.nextCursor != null && typeof payload.nextCursor !== 'string') {
-      throw new TypeError('Library payload contains an invalid cursor');
+      throw new LibraryLoadError('invalid_envelope');
     }
-    const items = payload.items.map(normalisePoster);
-    if (items.some((item) => item === null)) throw new TypeError('Library payload contains an invalid poster');
-    return {items, nextCursor: payload.nextCursor ?? null};
+    const requestId = safeRequestId(payload.requestId);
+    if (!requestId) throw new LibraryLoadError('invalid_envelope');
+    const items = [];
+    const invalidPosterIds = [];
+    for (const item of payload.items) {
+      const poster = normalisePoster(item);
+      if (poster) items.push(poster);
+      else invalidPosterIds.push(safePosterId(item));
+    }
+    return {items, invalidPosterIds, nextCursor: payload.nextCursor ?? null, requestId};
   };
 
   class KanvasPosterGrid extends HTMLElement {
@@ -145,6 +168,10 @@
       this.mountedStart = 0;
       this.requestController = null;
       this.generation = 0;
+      this.requestId = null;
+      this.invalidPosterCount = 0;
+      this.retryRequired = false;
+      this.hasSuccessfulPage = false;
       this.onPageHide = () => this.saveState();
     }
 
@@ -176,6 +203,10 @@
       this.loading = false;
       this.posters = [];
       this.mountedStart = 0;
+      this.requestId = null;
+      this.invalidPosterCount = 0;
+      this.retryRequired = false;
+      this.hasSuccessfulPage = false;
       this.stateKey = source ? this.buildStateKey(source) : null;
       this.innerHTML = '<div class="k-grid-status" aria-live="polite">Loading library…</div><div class="k-grid" aria-busy="true"></div><div class="k-grid-sentinel" aria-hidden="true"></div>';
       this.status = this.querySelector('.k-grid-status');
@@ -199,10 +230,11 @@
       return `kanvas:grid:v${LIBRARY_GRID_SCHEMA_VERSION}:asset=${libraryAssetVersion()}:user=${encodeURIComponent(user)}:filters=${encodeURIComponent(normalisedGridSource(source))}`;
     }
 
-    async loadNext() {
-      if (this.loading || this.done || !this.grid || !this.status) return;
+    async loadNext({retry = false} = {}) {
+      if (this.loading || this.done || this.retryRequired && !retry || !this.grid || !this.status) return;
       const source = this.getAttribute('source');
       if (!source) return;
+      if (retry) this.retryRequired = false;
       const generation = this.generation;
       const controller = new AbortController();
       this.requestController?.abort();
@@ -218,35 +250,147 @@
           credentials: 'same-origin',
           signal: controller.signal
         });
-        if (!response.ok) throw new Error(`Library request failed (${response.status})`);
-        const payload = libraryGridPayload(await response.json());
+        const responseRequestId = safeRequestId(response.headers.get('X-Request-ID'));
+        if (!response.ok) {
+          throw await this.httpFailure(response, responseRequestId);
+        }
+        const contentType = response.headers.get('content-type') || '';
+        if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+          throw new LibraryLoadError('invalid_content_type', {
+            status: response.status,
+            requestId: responseRequestId
+          });
+        }
+        let documentPayload;
+        try {
+          documentPayload = await response.json();
+        } catch (error) {
+          throw new LibraryLoadError('invalid_json', {
+            status: response.status,
+            requestId: responseRequestId,
+            cause: error
+          });
+        }
+        let payload;
+        try {
+          payload = libraryGridPayload(documentPayload);
+        } catch (error) {
+          if (error instanceof LibraryLoadError) {
+            error.status = response.status;
+            error.requestId = error.requestId || responseRequestId;
+            throw error;
+          }
+          throw new LibraryLoadError('invalid_envelope', {
+            status: response.status,
+            requestId: responseRequestId,
+            cause: error
+          });
+        }
         if (generation !== this.generation) return;
-        if (!payload.items.length && !this.posters.length) {
+        this.requestId = payload.requestId;
+        if (payload.invalidPosterIds.length) this.reportInvalidPosters(payload.invalidPosterIds);
+        this.invalidPosterCount += payload.invalidPosterIds.length;
+        if (!payload.items.length && !this.posters.length && !payload.invalidPosterIds.length) {
           this.status.textContent = 'No items match these filters.';
         } else {
-          const fragment = document.createDocumentFragment();
-          for (const item of payload.items) fragment.append(posterElement(item));
-          this.posters.push(...payload.items);
-          this.grid.append(fragment);
-          this.trimMountedPosters();
-          this.status.textContent = payload.nextCursor ? '' : 'End of library.';
+          try {
+            const fragment = document.createDocumentFragment();
+            for (const item of payload.items) fragment.append(posterElement(item));
+            this.posters.push(...payload.items);
+            this.grid.append(fragment);
+            this.trimMountedPosters();
+          } catch (error) {
+            throw new LibraryLoadError('rendering_failure', {
+              status: response.status,
+              requestId: payload.requestId,
+              cause: error
+            });
+          }
+          this.status.textContent = this.pageStatus(payload.nextCursor);
         }
         this.cursor = payload.nextCursor;
         this.done = this.cursor === null;
+        this.hasSuccessfulPage = true;
+        this.retryRequired = false;
       } catch (error) {
         if (controller.signal.aborted || generation !== this.generation) return;
-        this.status.textContent = 'Could not load this part of the library.';
-        const retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'k-button k-grid-retry';
-        retry.textContent = 'Retry';
-        retry.addEventListener('click', () => { retry.remove(); this.loadNext(); }, {once: true});
-        this.status.append(retry);
+        const failure = error instanceof LibraryLoadError
+          ? error
+          : new LibraryLoadError('network_failure', {cause: error});
+        this.requestId = failure.requestId || this.requestId;
+        this.retryRequired = true;
+        this.showFailure(failure);
+        this.reportFailure(failure);
       } finally {
         if (generation !== this.generation) return;
         this.loading = false;
         this.requestController = null;
         this.grid?.setAttribute('aria-busy', 'false');
+      }
+    }
+
+    async httpFailure(response, responseRequestId) {
+      const contentType = response.headers.get('content-type') || '';
+      let requestId = responseRequestId;
+      if (/^application\/json(?:\s*;|$)/i.test(contentType)) {
+        try {
+          const body = await response.json();
+          if (body && typeof body === 'object' && body.error && typeof body.error === 'object') {
+            requestId = safeRequestId(body.error.requestId) || requestId;
+          }
+        } catch (error) {
+          this.reportFailure(new LibraryLoadError('invalid_json', {
+            status: response.status,
+            requestId,
+            cause: error
+          }));
+        }
+      }
+      return new LibraryLoadError('http_failure', {status: response.status, requestId});
+    }
+
+    pageStatus(nextCursor) {
+      const invalid = this.invalidPosterCount
+        ? `${this.invalidPosterCount} item${this.invalidPosterCount === 1 ? '' : 's'} could not be displayed.`
+        : '';
+      if (nextCursor !== null) return invalid;
+      return invalid ? `${invalid} End of library.` : 'End of library.';
+    }
+
+    showFailure(failure) {
+      if (!this.status) return;
+      this.status.textContent = 'Could not load this part of the library.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'k-button k-grid-retry';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => {
+        retry.remove();
+        this.loadNext({retry: true});
+      }, {once: true});
+      const diagnostic = document.createElement('details');
+      diagnostic.className = 'k-grid-diagnostic';
+      const summary = document.createElement('summary');
+      summary.textContent = 'Details';
+      const content = document.createElement('div');
+      content.textContent = `Category: ${failure.category}\nHTTP status: ${failure.status ?? '—'}\nRequest ID: ${failure.requestId ?? '—'}`;
+      diagnostic.append(summary, content);
+      this.status.append(retry, diagnostic);
+    }
+
+    reportFailure(failure) {
+      if (this.getAttribute('development-mode') === 'true') {
+        console.error('Kanvas library load failed', {
+          category: failure.category,
+          status: failure.status,
+          requestId: failure.requestId
+        }, failure.cause || failure);
+      }
+    }
+
+    reportInvalidPosters(itemIds) {
+      if (this.getAttribute('development-mode') === 'true') {
+        console.error('Kanvas library posters rejected', {itemIds: itemIds.filter((itemId) => itemId !== null)});
       }
     }
 
@@ -263,17 +407,18 @@
     }
 
     saveState() {
-      if (!this.stateKey || !this.posters.length) {
+      if (!this.stateKey || !this.posters.length || !this.hasSuccessfulPage || this.retryRequired) {
         if (this.stateKey) sessionStorage.removeItem(this.stateKey);
         return;
       }
       sessionStorage.setItem(this.stateKey, JSON.stringify({
-        schema: LIBRARY_GRID_SCHEMA_VERSION,
+        schemaVersion: LIBRARY_GRID_SCHEMA_VERSION,
         asset: libraryAssetVersion(),
         filters: normalisedGridSource(this.getAttribute('source') || ''),
         user: this.getAttribute('state-user') || 'anonymous',
         cursor: this.cursor,
-        done: this.done,
+        completed: this.done,
+        outcome: 'success',
         posters: this.posters,
         scrollY: window.scrollY
       }));
@@ -287,13 +432,14 @@
         const state = JSON.parse(stored);
         const expectedFilters = normalisedGridSource(this.getAttribute('source') || '');
         if (
-          state.schema !== LIBRARY_GRID_SCHEMA_VERSION ||
+          state.schemaVersion !== LIBRARY_GRID_SCHEMA_VERSION ||
           state.asset !== libraryAssetVersion() ||
           state.filters !== expectedFilters ||
           state.user !== (this.getAttribute('state-user') || 'anonymous') ||
           !Array.isArray(state.posters) ||
           !state.posters.length ||
-          typeof state.done !== 'boolean' ||
+          state.outcome !== 'success' ||
+          typeof state.completed !== 'boolean' ||
           (state.cursor != null && typeof state.cursor !== 'string')
         ) throw new TypeError('Incompatible library grid state');
         const posters = state.posters.map(normalisePoster);
@@ -304,7 +450,9 @@
         for (const poster of posters.slice(this.mountedStart)) mounted.append(posterElement(poster));
         this.grid.replaceChildren(mounted);
         this.cursor = state.cursor ?? null;
-        this.done = state.done;
+        this.done = state.completed;
+        this.hasSuccessfulPage = true;
+        this.retryRequired = false;
         this.grid.setAttribute('aria-busy', 'false');
         this.status.textContent = this.done ? 'End of library.' : '';
         if (Number.isFinite(state.scrollY)) requestAnimationFrame(() => window.scrollTo(0, state.scrollY));
@@ -394,8 +542,6 @@
   };
   if (Array.from(navigator.getGamepads?.() || []).some(Boolean)) pollGamepads();
   else window.addEventListener('gamepadconnected', pollGamepads, {once: true});
-
-  const localArtworkUrl = (value) => typeof value === 'string' && /^\/kanvas\/artwork\/\d+\/\d+$/.test(value);
 
   const normaliseCollection = (value) => {
     if (!value || typeof value !== 'object') return null;

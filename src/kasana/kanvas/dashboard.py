@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal, cast
+from uuid import uuid4
 
 from fastapi import HTTPException
 from nicegui import app, ui
@@ -37,7 +39,7 @@ from kasana.kanvas.routes.collections import (
 from kasana.kanvas.routes.home import render_home
 from kasana.kanvas.routes.item import render_item
 from kasana.kanvas.routes.library import render_library
-from kasana.kanvas.services.katalog import KanvasKatalogService
+from kasana.kanvas.services.katalog import KanvasKatalogService, LibraryPosterTransformationError
 from kasana.kanvas.services.playback import KanvasPlaybackService
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.collections import (
@@ -46,7 +48,15 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderCardView,
     WatchOrderRowView,
 )
-from kasana.kanvas.viewmodels.library import LibraryFilters, PosterState, PosterView
+from kasana.kanvas.viewmodels.library import (
+    LibraryDiagnosticCategory,
+    LibraryErrorEnvelope,
+    LibraryErrorView,
+    LibraryFilters,
+    LibraryPageEnvelope,
+    PosterState,
+    PosterView,
+)
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     CollectionRelationship,
@@ -67,6 +77,7 @@ _settings = Kanvas_Settings()
 _assets_registered = False
 _head_registered = False
 _pages_registered = False
+_LOGGER = logging.getLogger(__name__)
 
 # NiceGUI 3.14 stringifies a Python bool straight into its bootstrap JavaScript,
 # producing `const dark = True;`. This lower-case JavaScript literal keeps the
@@ -78,29 +89,110 @@ _JAVASCRIPT_DARK_TRUE = cast(bool, "true")
 async def library_data(request: Request) -> JSONResponse:
     """Return one safe, cursor-bounded serialisable grid page to the browser."""
 
+    request_id = _library_request_id(request)
     try:
         filters = LibraryFilters.from_query(dict(request.query_params))
     except ValidationError:
-        return JSONResponse({"error": "Invalid library filters."}, status_code=422)
+        return _library_error_response(
+            request_id,
+            status_code=422,
+            diagnostic=LibraryDiagnosticCategory.INVALID_FILTERS,
+        )
     cursor = request.query_params.get("cursor")
     try:
         posters, next_cursor = await KanvasKatalogService(_settings).library_page(
             filters, cursor=cursor
         )
     except KatalogClientError as error:
-        status_code = (
-            503
-            if error.kind in {KatalogClientErrorKind.TRANSPORT, KatalogClientErrorKind.UNAVAILABLE}
-            else 502
+        _LOGGER.warning(
+            "Kanvas library Katalog request failed",
+            extra={
+                "request_id": request_id,
+                "katalog_error_kind": error.kind.value,
+                "katalog_status_code": error.status_code,
+            },
+        )
+        return _library_error_response(request_id, status_code=_katalog_status(error))
+    except Exception as error:
+        diagnostic = (
+            LibraryDiagnosticCategory.POSTER_TRANSFORMATION
+            if isinstance(error, LibraryPosterTransformationError)
+            else LibraryDiagnosticCategory.UNEXPECTED_FAILURE
+        )
+        _log_library_unexpected_failure(error, request_id, diagnostic)
+        return _library_error_response(request_id, status_code=500, diagnostic=diagnostic)
+
+    try:
+        envelope = LibraryPageEnvelope(
+            items=posters,
+            nextCursor=next_cursor,
+            requestId=request_id,
+        )
+        validated_envelope = LibraryPageEnvelope.model_validate(
+            envelope.model_dump(by_alias=True, mode="json")
         )
         return JSONResponse(
-            {"error": "Katalog could not load the library."}, status_code=status_code
+            validated_envelope.model_dump(by_alias=True, mode="json"),
+            headers={"X-Request-ID": request_id},
         )
+    except Exception as error:
+        _log_library_unexpected_failure(
+            error,
+            request_id,
+            LibraryDiagnosticCategory.UNEXPECTED_FAILURE,
+        )
+        return _library_error_response(
+            request_id,
+            status_code=500,
+            diagnostic=LibraryDiagnosticCategory.UNEXPECTED_FAILURE,
+        )
+
+
+def _library_request_id(request: Request) -> str:
+    """Return a bounded correlation identifier without reflecting unsafe input."""
+
+    supplied_request_id = request.headers.get("X-Request-ID")
+    if supplied_request_id is not None and 1 <= len(supplied_request_id) <= 100:
+        if all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in supplied_request_id
+        ):
+            return supplied_request_id
+    return uuid4().hex
+
+
+def _library_error_response(
+    request_id: str,
+    *,
+    status_code: int,
+    diagnostic: LibraryDiagnosticCategory | None = None,
+) -> JSONResponse:
+    """Return a validated, non-leaking library error envelope."""
+
+    error = LibraryErrorView(
+        requestId=request_id,
+        diagnostic=diagnostic if _settings.development_mode else None,
+    )
+    envelope = LibraryErrorEnvelope.model_validate({"error": error.model_dump(by_alias=True)})
     return JSONResponse(
-        {
-            "items": [poster.model_dump(by_alias=True, mode="json") for poster in posters],
-            "nextCursor": next_cursor,
-        }
+        envelope.model_dump(by_alias=True, exclude_none=True, mode="json"),
+        status_code=status_code,
+        headers={"X-Request-ID": request_id},
+    )
+
+
+def _log_library_unexpected_failure(
+    error: Exception,
+    request_id: str,
+    diagnostic: LibraryDiagnosticCategory,
+) -> None:
+    """Log a traceback without allowing exception values to expose media secrets."""
+
+    safe_error = RuntimeError("Kanvas library request failed")
+    _LOGGER.error(
+        "Kanvas library data request failed",
+        exc_info=(RuntimeError, safe_error, error.__traceback__),
+        extra={"request_id": request_id, "diagnostic": diagnostic.value},
     )
 
 

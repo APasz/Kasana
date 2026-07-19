@@ -25,7 +25,11 @@ def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
         source = "/kanvas/data/library?" + urlencode(_filter_query(filters))
         grid = mount_browser_component(
             BrowserComponent.POSTER_GRID,
-            {"source": source, "state-user": settings.user_id},
+            {
+                "source": source,
+                "state-user": settings.user_id,
+                "development-mode": settings.development_mode,
+            },
         )
         with grid:
             ui.label("Loading library…").classes("k-grid-status").props('aria-live="polite"')

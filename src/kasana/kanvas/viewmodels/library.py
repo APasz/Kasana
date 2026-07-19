@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -36,6 +37,54 @@ class PosterView(BaseModel):
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     state: PosterState = PosterState.NORMAL
     available: bool
+
+
+class LibraryDiagnosticCategory(StrEnum):
+    """Safe development-only categories for a failed library data request."""
+
+    INVALID_FILTERS = "invalid_filters"
+    POSTER_TRANSFORMATION = "poster_transformation"
+    UNEXPECTED_FAILURE = "unexpected_failure"
+
+
+class LibraryPageEnvelope(BaseModel):
+    """Versioned browser contract for one completed library poster page."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
+    items: tuple[PosterView, ...]
+    next_cursor: str | None = Field(default=None, max_length=500, alias="nextCursor")
+    request_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        alias="requestId",
+    )
+
+
+class LibraryErrorView(BaseModel):
+    """Safe user-facing failure detail for the library browser contract."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    code: Literal["library_unavailable"] = "library_unavailable"
+    message: Literal["Katalog could not load the library."] = "Katalog could not load the library."
+    request_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        alias="requestId",
+    )
+    diagnostic: LibraryDiagnosticCategory | None = None
+
+
+class LibraryErrorEnvelope(BaseModel):
+    """Safe error wrapper returned by the library data endpoint."""
+
+    model_config = ConfigDict(frozen=True)
+
+    error: LibraryErrorView
 
 
 class LibraryFilters(BaseModel):

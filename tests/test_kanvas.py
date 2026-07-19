@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from kasana.kanvas import __main__ as kanvas_main
+from kasana.kanvas import dashboard
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.collections import (
     collection_artwork as render_collection_artwork,
@@ -79,6 +80,7 @@ from kasana.kanvas.routes import item as item_route
 from kasana.kanvas.routes.library import render_library
 from kasana.kanvas.services.katalog import (
     KanvasKatalogService,
+    LibraryPosterTransformationError,
     OptimisticRevisionState,
     collection_artwork,
     group_collection_members,
@@ -113,7 +115,13 @@ from kasana.kanvas.viewmodels.collections import (
 )
 from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.kanvas.viewmodels.item import ItemDetailView
-from kasana.kanvas.viewmodels.library import CursorPager, LibraryFilters, PosterState, PosterView
+from kasana.kanvas.viewmodels.library import (
+    CursorPager,
+    LibraryFilters,
+    LibraryPageEnvelope,
+    PosterState,
+    PosterView,
+)
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     ArtworkKind,
@@ -376,7 +384,10 @@ async def test_library_endpoint_exposes_intentional_katalog_failure_state(
     response = await library_data(request)
 
     assert response.status_code == 503
-    assert b"Katalog could not load the library" in response.body
+    payload = json.loads(bytes(response.body))
+    assert payload["error"]["code"] == "library_unavailable"
+    assert payload["error"]["message"] == "Katalog could not load the library."
+    assert response.headers["x-request-id"] == payload["error"]["requestId"]
 
 
 async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: MonkeyPatch) -> None:
@@ -398,15 +409,180 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
         )
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
-    request = Request({"type": "http", "query_string": b"cursor=later", "headers": []})
+    request = Request(
+        {
+            "type": "http",
+            "query_string": b"cursor=later",
+            "headers": [(b"x-request-id", b"library-request-7")],
+        }
+    )
 
     response = await library_data(request)
 
     assert response.status_code == 200
     payload = json.loads(bytes(response.body))
+    assert payload["schemaVersion"] == 1
+    assert payload["requestId"] == "library-request-7"
+    assert response.headers["x-request-id"] == "library-request-7"
     assert payload["nextCursor"] is None
     assert payload["items"][0]["posterUrl"] == "/kanvas/artwork/7/8"
     assert "playback_url" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (KatalogClientError(KatalogClientErrorKind.VALIDATION, "bad Katalog request"), 422),
+        (
+            KatalogClientError(KatalogClientErrorKind.RESPONSE, "Katalog failed", status_code=500),
+            502,
+        ),
+        (KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "Katalog offline"), 503),
+    ],
+)
+async def test_library_endpoint_preserves_typed_katalog_failure_statuses(
+    monkeypatch: MonkeyPatch,
+    error: KatalogClientError,
+    expected_status: int,
+) -> None:
+    async def failed(
+        _self: object, _filters: LibraryFilters, *, cursor: str | None
+    ) -> tuple[tuple[PosterView, ...], str | None]:
+        raise error
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", failed)
+
+    response = await library_data(
+        Request(
+            {
+                "type": "http",
+                "query_string": b"",
+                "headers": [(b"x-request-id", b"typed-katalog-failure")],
+            }
+        )
+    )
+
+    assert response.status_code == expected_status
+    assert response.headers["x-request-id"] == "typed-katalog-failure"
+    assert json.loads(bytes(response.body)) == {
+        "error": {
+            "code": "library_unavailable",
+            "message": "Katalog could not load the library.",
+            "requestId": "typed-katalog-failure",
+        }
+    }
+
+
+async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
+    monkeypatch: MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    leaking_value = "/media/private/film.mkv?access_token=secret"
+
+    async def broken(
+        _self: object, _filters: LibraryFilters, *, cursor: str | None
+    ) -> tuple[tuple[PosterView, ...], str | None]:
+        raise RuntimeError(leaking_value)
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", broken)
+    response = await library_data(Request({"type": "http", "query_string": b"", "headers": []}))
+
+    assert response.status_code == 500
+    assert json.loads(bytes(response.body))["error"] == {
+        "code": "library_unavailable",
+        "message": "Katalog could not load the library.",
+        "requestId": response.headers["x-request-id"],
+    }
+    assert leaking_value not in caplog.text
+
+    async def page(
+        _self: object, _filters: LibraryFilters, *, cursor: str | None
+    ) -> tuple[tuple[PosterView, ...], str | None]:
+        return (PosterView(id=7, title="Safe", href="/item/7", available=True),), None
+
+    def serialisation_failure(
+        _self: LibraryPageEnvelope, **_arguments: object
+    ) -> dict[str, object]:
+        raise TypeError("serialisation failed")
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
+    monkeypatch.setattr(LibraryPageEnvelope, "model_dump", serialisation_failure)
+    serialisation = await library_data(
+        Request({"type": "http", "query_string": b"", "headers": []})
+    )
+
+    assert serialisation.status_code == 500
+    assert json.loads(bytes(serialisation.body))["error"]["code"] == "library_unavailable"
+
+
+async def test_library_endpoint_development_diagnostic_is_safe_and_opt_in(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def transformation_failure(
+        _self: object, _filters: LibraryFilters, *, cursor: str | None
+    ) -> tuple[tuple[PosterView, ...], str | None]:
+        raise LibraryPosterTransformationError(7, ("artwork", "id", "title"))
+
+    monkeypatch.setattr(
+        "kasana.kanvas.dashboard.KanvasKatalogService.library_page", transformation_failure
+    )
+    monkeypatch.setattr(dashboard, "_settings", Kanvas_Settings(development_mode=True))
+    response = await library_data(Request({"type": "http", "query_string": b"", "headers": []}))
+
+    assert response.status_code == 500
+    assert json.loads(bytes(response.body))["error"]["diagnostic"] == "poster_transformation"
+
+
+async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
+    monkeypatch: MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    item = _item()
+    leaking_value = "/media/private/film.mkv?access_token=secret"
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def list_library_items(
+            self, **_arguments: object
+        ) -> PaginatedResponse[LibraryItemSummary]:
+            return PaginatedResponse(items=(item,), next_cursor=None, limit=48)
+
+    def fake_client(*_arguments: object, **_keyword_arguments: object) -> FakeClient:
+        return FakeClient()
+
+    def transformation_failure(_item: LibraryItemSummary) -> PosterView:
+        raise RuntimeError(leaking_value)
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", fake_client)
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.poster_from_summary", transformation_failure
+    )
+
+    with pytest.raises(LibraryPosterTransformationError) as error:
+        await KanvasKatalogService(Kanvas_Settings()).library_page(LibraryFilters(), cursor=None)
+
+    assert error.value.item_id == 7
+    assert error.value.field_names == (
+        "artwork",
+        "availability",
+        "id",
+        "kind",
+        "parent_id",
+        "tags",
+        "title",
+        "year",
+    )
+    assert leaking_value not in caplog.text
+    assert any(
+        getattr(record, "library_item_id", None) == 7
+        and getattr(record, "library_item_fields", None) == error.value.field_names
+        for record in caplog.records
+    )
 
 
 async def test_collection_index_endpoint_is_cursor_bounded_and_serialises_safe_tiles(
@@ -1517,7 +1693,16 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
             for element in library_client.elements.values()
             if element.tag == "button" and _element_props(element).get("aria-label") == "Apply"
         )
+        poster_grid = next(
+            element
+            for element in library_client.elements.values()
+            if element.tag == BrowserComponent.POSTER_GRID
+        )
         assert _element_props(apply_button)["type"] == "submit"
+        assert _element_props(poster_grid)["state-user"] == "1"
+        assert _element_props(poster_grid)["development-mode"] == "false"
+        assert "search=poster" in cast(str, _element_props(poster_grid)["source"])
+        assert "kind=movie" in cast(str, _element_props(poster_grid)["source"])
 
     with Client(page("")) as search_client:
         await search_page()
