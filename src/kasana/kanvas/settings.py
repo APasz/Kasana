@@ -20,7 +20,7 @@ class Kanvas_Settings(KSettings):
     design_route_enabled: bool = True
     auto_browser_open: bool = False
     development_mode: bool = False
-    accent_color: str = Field(default="#e8e8e8", pattern=r"^#[0-9A-Fa-f]{6}$")
+    accent_colour: str = Field(default="#e8e8e8", pattern=r"^#[0-9A-Fa-f]{6}$")
     katalog_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
 
     @property

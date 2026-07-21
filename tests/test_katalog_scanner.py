@@ -423,12 +423,12 @@ def test_sidecar_video_basename_matching_is_case_insensitive() -> None:
         ("avi", "avi"),
     ),
 )
-def test_ffmpeg_container_aliases_normalize_to_one_family(format_name: str, expected: str) -> None:
+def test_ffmpeg_container_aliases_normalise_to_one_family(format_name: str, expected: str) -> None:
     assert canonical_container(format_name) == expected
 
 
-def test_probe_audits_recognized_legacy_and_unrecognized_formats() -> None:
-    recognized = {
+def test_probe_audits_recognised_legacy_and_unrecognised_formats() -> None:
+    recognised = {
         Path("/library/movie.mp4"): _probe_result(container="mov,mp4,m4a,3gp,3g2,mj2", codec="vc1"),
         Path("/library/movie.mov"): _probe_result(
             container="mj2, 3g2, 3gp, m4a, mp4, mov", codec="mpeg2video"
@@ -436,7 +436,7 @@ def test_probe_audits_recognized_legacy_and_unrecognized_formats() -> None:
         Path("/library/movie.mkv"): _probe_result(container="matroska,webm"),
         Path("/library/movie.avi"): _probe_result(container="avi"),
     }
-    assert probe_audit_findings(recognized) == ()
+    assert probe_audit_findings(recognised) == ()
 
     unknown_codec = probe_audit_findings(
         {Path("/library/unknown-codec.mkv"): _probe_result(codec="made_up_video")}

@@ -21,8 +21,8 @@ from kasana.katalog.api.contracts import (
     WatchOrderKind,
 )
 from kasana.katalog.api.service import (
-    CatalogConflictError,
-    CatalogValidationError,
+    CatalogueConflictError,
+    CatalogueValidationError,
     KatalogQueryService,
 )
 from kasana.katalog.database import KatalogDatabase
@@ -151,7 +151,7 @@ def test_collection_membership_revisions_and_deletion_safety(
         (library["series"], CollectionRelationship.RELATED),
     ]
     assert "library" not in detail.model_dump_json()
-    with pytest.raises(CatalogValidationError, match="already"):
+    with pytest.raises(CatalogueValidationError, match="already"):
         queries.add_collection_membership(
             collection.collection_id,
             CollectionMembershipCreate(
@@ -159,7 +159,7 @@ def test_collection_membership_revisions_and_deletion_safety(
                 library_item_id=library["movie"],
             ),
         )
-    with pytest.raises(CatalogConflictError, match="expected revision"):
+    with pytest.raises(CatalogueConflictError, match="expected revision"):
         queries.add_collection_membership(
             collection.collection_id,
             CollectionMembershipCreate(

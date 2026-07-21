@@ -273,10 +273,10 @@ async def _finish_single_item(server: FakeMpvIpcServer) -> None:
 async def test_player_launches_private_playlist_and_resumes(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    catalog = FakeKatalogClient(_session((_entry(0, resume=12.5),)))
+    catalogue = FakeKatalogClient(_session((_entry(0, resume=12.5),)))
     server = FakeMpvIpcServer()
     _patch_mpv(monkeypatch, server)
-    agent = MpvPlayerAgent(_settings(tmp_path), catalog)
+    agent = MpvPlayerAgent(_settings(tmp_path), catalogue)
 
     task = asyncio.create_task(agent.play(_TOKEN))
     try:
@@ -299,9 +299,9 @@ async def test_player_launches_private_playlist_and_resumes(
         await _close_playback_task(task, server)
 
     assert result.outcome is PlaybackOutcome.COMPLETED
-    assert catalog.launched_tokens == [_TOKEN]
-    assert catalog.completed_positions == [0]
-    assert catalog.closed_session_ids == [catalog.session.id]
+    assert catalogue.launched_tokens == [_TOKEN]
+    assert catalogue.completed_positions == [0]
+    assert catalogue.closed_session_ids == [catalogue.session.id]
     assert list((tmp_path / "runtime").iterdir()) == []
     assert set(server.observed_properties) == {
         "time-pos",
@@ -317,12 +317,12 @@ async def test_player_advances_a_mixed_watch_order_queue(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     context = PlaybackContext(kind=PlaybackContextKind.WATCH_ORDER, watch_order_id=8)
-    catalog = FakeKatalogClient(
+    catalogue = FakeKatalogClient(
         _session((_entry(0, title="Film"), _entry(1, title="Episode")), context=context)
     )
     server = FakeMpvIpcServer()
     _patch_mpv(monkeypatch, server)
-    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalog).play(_TOKEN))
+    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalogue).play(_TOKEN))
     try:
         await _await_connection(server)
         await server.send({"event": "property-change", "name": "time-pos", "data": 100.0})
@@ -335,18 +335,18 @@ async def test_player_advances_a_mixed_watch_order_queue(
         await _close_playback_task(task, server)
 
     assert result.outcome is PlaybackOutcome.COMPLETED
-    assert catalog.advance_count == 1
-    assert catalog.completed_positions == [0, 1]
-    assert catalog.session.context.kind is PlaybackContextKind.WATCH_ORDER
+    assert catalogue.advance_count == 1
+    assert catalogue.completed_positions == [0, 1]
+    assert catalogue.session.context.kind is PlaybackContextKind.WATCH_ORDER
 
 
 async def test_player_reports_pause_and_explicit_backward_seek(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    catalog = FakeKatalogClient(_session((_entry(0),)))
+    catalogue = FakeKatalogClient(_session((_entry(0),)))
     server = FakeMpvIpcServer()
     _patch_mpv(monkeypatch, server)
-    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalog).play(_TOKEN))
+    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalogue).play(_TOKEN))
     try:
         await _await_connection(server)
         await server.send({"event": "property-change", "name": "time-pos", "data": 60.0})
@@ -357,7 +357,7 @@ async def test_player_reports_pause_and_explicit_backward_seek(
         await _wait_until(
             lambda: any(
                 update.position_seconds == 10.0 and update.seek
-                for _, update in catalog.progress_updates
+                for _, update in catalogue.progress_updates
             )
         )
         task.cancel()
@@ -366,11 +366,11 @@ async def test_player_reports_pause_and_explicit_backward_seek(
     finally:
         await _close_playback_task(task, server)
 
-    assert any(update.position_seconds == 60.0 for _, update in catalog.progress_updates)
+    assert any(update.position_seconds == 60.0 for _, update in catalogue.progress_updates)
     assert any(
-        update.position_seconds == 10.0 and update.seek for _, update in catalog.progress_updates
+        update.position_seconds == 10.0 and update.seek for _, update in catalogue.progress_updates
     )
-    assert catalog.completed_positions == []
+    assert catalogue.completed_positions == []
     assert server.process.terminated
     assert list((tmp_path / "runtime").iterdir()) == []
 
@@ -378,10 +378,10 @@ async def test_player_reports_pause_and_explicit_backward_seek(
 async def test_player_does_not_mark_watched_after_an_mpv_crash(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    catalog = FakeKatalogClient(_session((_entry(0),)))
+    catalogue = FakeKatalogClient(_session((_entry(0),)))
     server = FakeMpvIpcServer()
     _patch_mpv(monkeypatch, server)
-    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalog).play(_TOKEN))
+    task = asyncio.create_task(MpvPlayerAgent(_settings(tmp_path), catalogue).play(_TOKEN))
     try:
         await _await_connection(server)
         await server.send({"event": "property-change", "name": "time-pos", "data": 100.0})
@@ -392,14 +392,14 @@ async def test_player_does_not_mark_watched_after_an_mpv_crash(
         await _close_playback_task(task, server)
 
     assert result.outcome is PlaybackOutcome.CRASHED
-    assert catalog.completed_positions == []
-    assert catalog.closed_session_ids == [catalog.session.id]
+    assert catalogue.completed_positions == []
+    assert catalogue.closed_session_ids == [catalogue.session.id]
 
 
 async def test_player_fails_cleanly_when_mpv_never_offers_ipc(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    catalog = FakeKatalogClient(_session((_entry(0),)))
+    catalogue = FakeKatalogClient(_session((_entry(0),)))
     process = FakeMpvProcess()
 
     def fake_discover(_executable: str) -> Path:
@@ -416,23 +416,23 @@ async def test_player_fails_cleanly_when_mpv_never_offers_ipc(
     )
 
     with pytest.raises(KestrelPlaybackError, match="IPC"):
-        await MpvPlayerAgent(_settings(tmp_path, ipc_connect_timeout_seconds=0.05), catalog).play(
+        await MpvPlayerAgent(_settings(tmp_path, ipc_connect_timeout_seconds=0.05), catalogue).play(
             _TOKEN
         )
 
     assert process.terminated
-    assert catalog.closed_session_ids == [catalog.session.id]
+    assert catalogue.closed_session_ids == [catalogue.session.id]
     assert list((tmp_path / "runtime").iterdir()) == []
 
 
 async def test_player_rejects_invalid_tokens_and_hides_catalog_failures(tmp_path: Path) -> None:
-    catalog = FakeKatalogClient(_session((_entry(0),)))
-    agent = MpvPlayerAgent(_settings(tmp_path), catalog)
+    catalogue = FakeKatalogClient(_session((_entry(0),)))
+    agent = MpvPlayerAgent(_settings(tmp_path), catalogue)
 
     with pytest.raises(KestrelUriError):
         await agent.play("not a launch token")
 
-    rejecting_agent = MpvPlayerAgent(_settings(tmp_path), RejectingKatalogClient(catalog.session))
+    rejecting_agent = MpvPlayerAgent(_settings(tmp_path), RejectingKatalogClient(catalogue.session))
     with pytest.raises(KestrelPlaybackError, match="Katalog could not launch") as error:
         await rejecting_agent.play(_TOKEN)
 

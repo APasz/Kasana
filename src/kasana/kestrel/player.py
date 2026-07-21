@@ -32,7 +32,7 @@ _OBSERVED_PROPERTIES = (
 _MEDIA_STREAM_PATH_PATTERN = re.compile(r"^/api/v1/media/[A-Za-z0-9_-]+$")
 
 
-class PlaybackCatalogClient(Protocol):
+class PlaybackCatalogueClient(Protocol):
     async def launch_playback_plan(self, launch_token: str) -> PlaybackSessionResponse: ...
 
     async def update_playback_session_progress(
@@ -101,12 +101,12 @@ class MpvPlayerAgent:
     def __init__(
         self,
         settings: KestrelSettings,
-        catalog: PlaybackCatalogClient,
+        catalogue: PlaybackCatalogueClient,
     ) -> None:
         if settings.player_backend is not PlayerBackend.MPV:
             raise KestrelPlaybackError("Only the mpv backend is implemented.")
         self._settings = settings
-        self._catalog = catalog
+        self._catalogue = catalogue
         self._runtime_directory = settings.runtime_directory.expanduser().resolve(strict=False)
 
     async def play(self, launch_token: str) -> PlaybackResult:
@@ -114,7 +114,7 @@ class MpvPlayerAgent:
 
         validate_launch_token(launch_token)
         try:
-            session = await self._catalog.launch_playback_plan(launch_token)
+            session = await self._catalogue.launch_playback_plan(launch_token)
         except Exception as error:
             raise KestrelPlaybackError("Katalog could not launch the playback session.") from error
         if session.current_item is None:
@@ -328,7 +328,7 @@ class MpvPlayerAgent:
             raise KestrelPlaybackError("mpv moved backwards in the playback queue.")
         await self._report_progress(state, force=True, reason="transition")
         while state.playlist_position < playlist_position:
-            state.session = await self._catalog.advance_playback_session(state.session.id)
+            state.session = await self._catalogue.advance_playback_session(state.session.id)
             state.playlist_position += 1
         current_item = state.session.current_item
         if current_item is None:
@@ -366,7 +366,7 @@ class MpvPlayerAgent:
             return
         if force and unchanged and state.last_forced_reason == reason and not seek:
             return
-        await self._catalog.update_playback_session_progress(
+        await self._catalogue.update_playback_session_progress(
             state.session.id,
             SessionProgressUpdate(position_seconds=position, seek=seek),
         )
@@ -376,7 +376,7 @@ class MpvPlayerAgent:
     async def _complete_current_entry(self, state: _MpvPlaybackState) -> None:
         if state.playlist_position in state.completed_positions:
             return
-        await self._catalog.complete_playback_session(state.session.id)
+        await self._catalogue.complete_playback_session(state.session.id)
         state.completed_positions.add(state.playlist_position)
 
     def _is_complete(self, state: _MpvPlaybackState) -> bool:
@@ -431,7 +431,7 @@ class MpvPlayerAgent:
 
     async def _close_catalog_session(self, session_id: str) -> None:
         try:
-            await self._catalog.close_playback_session(session_id)
+            await self._catalogue.close_playback_session(session_id)
         except Exception:
             return
 

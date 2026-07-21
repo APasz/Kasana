@@ -1,4 +1,4 @@
-"""Pure normalization of FFmpeg format-name alias families."""
+"""Pure normalisation of FFmpeg format-name alias families."""
 
 from __future__ import annotations
 

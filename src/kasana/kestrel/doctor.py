@@ -13,7 +13,7 @@ from kasana.kestrel.settings import KestrelSettings
 from kasana.kestrel.uri import uri_handler_is_registered
 
 
-class HealthCatalogClient(Protocol):
+class HealthCatalogueClient(Protocol):
     async def health(self) -> object: ...
 
     async def close(self) -> None: ...
@@ -42,10 +42,10 @@ class DoctorReport:
         )
 
 
-async def run_doctor(settings: KestrelSettings, catalog: HealthCatalogClient) -> DoctorReport:
+async def run_doctor(settings: KestrelSettings, catalogue: HealthCatalogueClient) -> DoctorReport:
     """Check Katalog, mpv, writable private directories, XDG, and Unix IPC."""
 
-    katalog_connected = await _catalog_is_reachable(catalog)
+    katalog_connected = await _catalogue_is_reachable(catalogue)
     executable = discover_mpv(settings.mpv_executable)
     version = await _mpv_version(executable)
     runtime_directory = settings.runtime_directory.expanduser().resolve(strict=False)
@@ -64,9 +64,9 @@ async def run_doctor(settings: KestrelSettings, catalog: HealthCatalogClient) ->
     )
 
 
-async def _catalog_is_reachable(catalog: HealthCatalogClient) -> bool:
+async def _catalogue_is_reachable(catalogue: HealthCatalogueClient) -> bool:
     try:
-        await catalog.health()
+        await catalogue.health()
     except Exception:
         return False
     return True

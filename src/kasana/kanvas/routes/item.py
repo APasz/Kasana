@@ -21,9 +21,9 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
     """Render useful detail, playback, and compact child navigation for one item."""
 
     with page_shell(settings, "/library", "Item detail"):
-        catalog = KanvasKatalogService(settings)
+        catalogue = KanvasKatalogService(settings)
         try:
-            detail = await catalog.item_detail(item_id)
+            detail = await catalogue.item_detail(item_id)
         except KatalogClientError as error:
             detail_text = "This item is no longer available."
             if error.kind in {KatalogClientErrorKind.TRANSPORT, KatalogClientErrorKind.UNAVAILABLE}:
@@ -57,7 +57,7 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
                 status = ui.label("").classes("k-action-status").props('aria-live="polite"')
                 _item_actions(
                     settings,
-                    catalog,
+                    catalogue,
                     item_id,
                     detail.watched,
                     detail.available,
@@ -75,7 +75,7 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
 
 def _item_actions(
     settings: Kanvas_Settings,
-    catalog: KanvasKatalogService,
+    catalogue: KanvasKatalogService,
     item_id: int,
     initially_watched: bool,
     available: bool,
@@ -106,9 +106,9 @@ def _item_actions(
         status.set_text("Updating watched state…")
         try:
             if watched:
-                await catalog.mark_watched(item_id)
+                await catalogue.mark_watched(item_id)
             else:
-                await catalog.clear_watched(item_id)
+                await catalogue.clear_watched(item_id)
         except KatalogClientError:
             watched = watched_state.rollback()
             watched_button.set_text("Mark unwatched" if watched else "Mark watched")

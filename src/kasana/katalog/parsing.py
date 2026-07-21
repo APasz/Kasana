@@ -284,15 +284,15 @@ def _episode_title(
     episode_number: int,
 ) -> str:
     stripped = _EPISODE_MARKER_PATTERN.sub(" ", filename_stem)
-    normalized = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
-    if normalized and normalized.casefold() != series_title.casefold():
-        return normalized
+    normalised = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
+    if normalised and normalised.casefold() != series_title.casefold():
+        return normalised
     return f"S{season_number:02d}E{episode_number:02d}"
 
 
 def _special_title(filename_stem: str, *, series_title: str) -> str:
     stripped = _EPISODE_MARKER_PATTERN.sub(" ", filename_stem)
-    normalized = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
-    if normalized and normalized.casefold() != series_title.casefold():
-        return normalized
+    normalised = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
+    if normalised and normalised.casefold() != series_title.casefold():
+        return normalised
     return filename_stem

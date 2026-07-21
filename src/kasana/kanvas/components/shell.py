@@ -54,7 +54,7 @@ def add_kanvas_head(settings: Kanvas_Settings, asset_versions: KanvasAssetVersio
     """Attach versioned local assets and small page-level policy metadata once."""
 
     ui.add_head_html(kanvas_head_html(asset_versions), shared=True)
-    ui.add_head_html(f"<style>:root{{--k-accent:{settings.accent_color};}}</style>", shared=True)
+    ui.add_head_html(f"<style>:root{{--k-accent:{settings.accent_colour};}}</style>", shared=True)
 
 
 @contextmanager

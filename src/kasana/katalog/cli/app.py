@@ -18,9 +18,9 @@ from typer.main import Typer
 
 from kasana.katalog.admin import AdminError, KatalogAdmin
 from kasana.katalog.api.service import (
-    CatalogConflictError,
-    CatalogNotFoundError,
-    CatalogValidationError,
+    CatalogueConflictError,
+    CatalogueNotFoundError,
+    CatalogueValidationError,
     KatalogQueryService,
 )
 from kasana.katalog.database import KatalogDatabase
@@ -109,9 +109,9 @@ def with_catalog_queries[Result](
     queries = KatalogQueryService(database, artwork_cache_path=cli.settings.artwork_cache_path)
     try:
         return operation(queries)
-    except CatalogConflictError as error:
+    except CatalogueConflictError as error:
         fail(cli, str(error), 4)
-    except (CatalogNotFoundError, CatalogValidationError) as error:
+    except (CatalogueNotFoundError, CatalogueValidationError) as error:
         fail(cli, str(error), 2)
     except SQLAlchemyError as error:
         fail(cli, str(error), 3)

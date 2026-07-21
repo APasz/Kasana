@@ -88,8 +88,8 @@ def create_library_item(
     availability: AvailabilityState = AvailabilityState.AVAILABLE,
     locked_metadata_fields: frozenset[MetadataField] = frozenset(),
 ) -> Zaisan:
-    normalized_title = title.strip()
-    if not normalized_title:
+    normalised_title = title.strip()
+    if not normalised_title:
         msg = "A library item title cannot be empty."
         raise ValueError(msg)
     if item_kind is ZaisanKind.SEASON and season_number is None:
@@ -104,8 +104,8 @@ def create_library_item(
         library_root_id=library_root_id,
         parent_id=parent_id,
         item_kind=item_kind,
-        title=normalized_title,
-        sort_title=(sort_title or normalized_title).strip(),
+        title=normalised_title,
+        sort_title=(sort_title or normalised_title).strip(),
         release_year=release_year,
         release_date=release_date,
         air_date=air_date,
@@ -332,8 +332,8 @@ def _require_item(session: Session, library_item_id: int) -> Zaisan:
 
 
 def _require_text(value: str, description: str) -> str:
-    normalized = value.strip()
-    if not normalized:
+    normalised = value.strip()
+    if not normalised:
         msg = f"{description} cannot be empty."
         raise ValueError(msg)
-    return normalized
+    return normalised

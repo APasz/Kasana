@@ -1,4 +1,4 @@
-"""HTTP file-transfer policy for token-authorized Katalog media files.
+"""HTTP file-transfer policy for token-authorised Katalog media files.
 
 The policy owns HTTP range semantics, leaving token validation and future delivery
 mechanisms (such as nginx ``X-Accel-Redirect``) independent from API contracts.
@@ -21,7 +21,7 @@ from kasana.shared.concurrency import run_blocking
 
 
 class FileTransferPolicy(Protocol):
-    """Build a file response after Katalog has authorized one media file."""
+    """Build a file response after Katalog has authorised one media file."""
 
     def response(
         self,

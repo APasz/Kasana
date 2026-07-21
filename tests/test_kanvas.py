@@ -637,7 +637,7 @@ async def test_collection_index_endpoint_is_cursor_bounded_and_serialises_safe_t
 async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    class ConflictCatalog:
+    class ConflictCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -651,7 +651,7 @@ async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
         async def json(self) -> object:
             return {"operation": "add", "revision": 7, "itemId": 12}
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalogue)
 
     response = await collection_member_action(4, cast(Request, JsonRequest()))
 
@@ -667,7 +667,7 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
 ) -> None:
     calls: list[tuple[str, object]] = []
 
-    class FakeCatalog:
+    class FakeCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -715,7 +715,7 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
         async def form(self) -> FormData:
             return self._form
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalogue)
 
     created = await create_collection_action(
         cast(Request, FormRequest(name="Stargate", overview="Gate travel"))
@@ -777,7 +777,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
 ) -> None:
     calls: list[str] = []
 
-    class FakeCatalog:
+    class FakeCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -857,7 +857,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
             assert (watch_order_id, start_item_id) == (9, 7)
             return "kasana://play/" + "A" * 32
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalogue)
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasPlaybackService", FakePlayback)
 
     picker_response = await collection_picker_data(
@@ -914,7 +914,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
 async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_states(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    class ArtworkCatalog:
+    class ArtworkCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -931,7 +931,7 @@ async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_stat
         async def json(self) -> object:
             return {"operation": "unknown", "revision": 1}
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ArtworkCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ArtworkCatalogue)
 
     response = await artwork(7, 8)
     invalid = await collection_member_action(4, cast(Request, JsonRequest()))
@@ -949,7 +949,7 @@ async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_stat
 async def test_browser_data_endpoints_return_typed_katalog_failure_states(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    class FailingCatalog:
+    class FailingCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -962,7 +962,7 @@ async def test_browser_data_endpoints_return_typed_katalog_failure_states(
         async def watch_order_page(self, _watch_order_id: int, **_arguments: object) -> object:
             raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingCatalogue)
 
     collections = await collections_data(
         Request({"type": "http", "query_string": b"", "headers": []})
@@ -1030,7 +1030,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         ),
     )
 
-    class AdminCatalog:
+    class AdminCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -1109,7 +1109,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", AdminCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", AdminCatalogue)
     overview_response = await administration_overview_data()
     jobs_response = await administration_jobs_data(
         Request({"type": "http", "query_string": b"", "headers": []})
@@ -1322,7 +1322,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
 async def test_administration_error_states_and_local_section_routes(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    class FailingAdminCatalog:
+    class FailingAdminCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -1345,7 +1345,7 @@ async def test_administration_error_states_and_local_section_routes(
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalog)
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalogue)
     responses = (
         await administration_overview_data(),
         await administration_jobs_data(
@@ -1457,14 +1457,14 @@ def test_native_icon_builder_rejects_unknown_icon() -> None:
 async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPatch) -> None:
     poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
 
-    class HomeCatalog:
+    class HomeCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
         async def home_rails(self) -> tuple[MediaRailView, ...]:
             return (MediaRailView(title="Continue", posters=(poster,)),)
 
-    class ItemCatalog:
+    class ItemCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -1488,9 +1488,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
             pass
 
     with Client(page("")) as client:
-        monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalog)
+        monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalogue)
         await home_route.render_home(Kanvas_Settings())
-        monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalog)
+        monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalogue)
         await item_route.render_item(Kanvas_Settings(), 7)
         render_library(Kanvas_Settings(), LibraryFilters(search="poster"))
         await collections_page(Request({"type": "http", "query_string": b"", "headers": []}))
@@ -1570,7 +1570,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         removedEntryTitles=("Old entry",),
     )
 
-    class RouteCatalog:
+    class RouteCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -1589,7 +1589,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             assert arguments["revision"] == 2
             return preview
 
-    monkeypatch.setattr(collections_route, "KanvasKatalogService", RouteCatalog)
+    monkeypatch.setattr(collections_route, "KanvasKatalogService", RouteCatalogue)
 
     with Client(page("")) as client:
         await collections_route.render_collection_new(Kanvas_Settings())
@@ -1628,7 +1628,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
 
 
 async def test_collection_routes_share_one_unavailable_state(monkeypatch: MonkeyPatch) -> None:
-    class UnavailableCatalog:
+    class UnavailableCatalogue:
         def __init__(self, _settings: Kanvas_Settings) -> None:
             pass
 
@@ -1638,7 +1638,7 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
         async def watch_order_editor(self, _watch_order_id: int) -> WatchOrderEditorView:
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
-    monkeypatch.setattr(collections_route, "KanvasKatalogService", UnavailableCatalog)
+    monkeypatch.setattr(collections_route, "KanvasKatalogService", UnavailableCatalogue)
 
     with Client(page("")) as client:
         await collections_route.render_collection_detail(Kanvas_Settings(), 4)

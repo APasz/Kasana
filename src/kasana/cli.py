@@ -100,8 +100,8 @@ def show_config(
 
 
 async def _doctor(settings: KestrelSettings) -> DoctorReport:
-    async with KatalogClient(settings.katalog_url) as catalog:
-        return await run_doctor(settings, catalog)
+    async with KatalogClient(settings.katalog_url) as catalogue:
+        return await run_doctor(settings, catalogue)
 
 
 def _configuration_table(report: ConfigurationReport) -> Table:

@@ -14,13 +14,16 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from os import stat_result
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.engine.result import Result
+from sqlalchemy.engine.row import Row
 from sqlalchemy.orm import Session, aliased
 
 from kasana.katalog.api.contracts import (
@@ -57,6 +60,7 @@ from kasana.katalog.api.contracts import (
     PlaybackContext,
     PlaybackContextKind,
     PlaybackNextEntry,
+    PlaybackPlanContext,
     PlaybackPlanEntry,
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
@@ -106,6 +110,7 @@ from kasana.katalog.models import (
     MediaFile,
     MetadataCandidate,
     PlaybackLaunchToken,
+    PlaybackSession,
     PlaybackSessionEntry,
     PlaybackState,
     User,
@@ -129,15 +134,15 @@ from kasana.katalog.services import PLAYABLE_ITEM_KINDS, record_playback_progres
 _MAX_PAGE_SIZE = 100
 
 
-class CatalogNotFoundError(LookupError):
+class CatalogueNotFoundError(LookupError):
     """A requested Katalog resource does not exist."""
 
 
-class CatalogValidationError(ValueError):
+class CatalogueValidationError(ValueError):
     """A syntactically valid HTTP request has invalid catalogue semantics."""
 
 
-class CatalogConflictError(RuntimeError):
+class CatalogueConflictError(RuntimeError):
     """A revisioned catalogue mutation was based on stale client state."""
 
 
@@ -162,7 +167,7 @@ class ArtworkFile:
 
 @dataclass(frozen=True)
 class MediaTransferFile:
-    """A token-authorized file descriptor for the HTTP transfer policy only."""
+    """A token-authorised file descriptor for the HTTP transfer policy only."""
 
     path: Path
     size_bytes: int
@@ -286,7 +291,7 @@ class KatalogQueryService:
 
         def create(session: Session) -> LibraryRootSummary:
             if session.scalar(select(Kura.id).where(Kura.path == str(path))) is not None:
-                raise CatalogConflictError("A library root already uses this path.")
+                raise CatalogueConflictError("A library root already uses this path.")
             root = Kura(
                 path=str(path),
                 expected_media_kind=ZaisanKind(request.expected_kind.value),
@@ -310,7 +315,7 @@ class KatalogQueryService:
                     select(Kura.id).where(Kura.path == str(path), Kura.id != root_id)
                 )
                 if duplicate is not None:
-                    raise CatalogConflictError("A library root already uses this path.")
+                    raise CatalogueConflictError("A library root already uses this path.")
                 root.path = str(path)
             if request.expected_kind is not None:
                 root.expected_media_kind = ZaisanKind(request.expected_kind.value)
@@ -337,7 +342,7 @@ class KatalogQueryService:
                 or 0
             )
             if count and not confirm:
-                raise CatalogValidationError(
+                raise CatalogueValidationError(
                     "Deleting a root with catalogued items requires confirm=true."
                 )
             session.delete(root)
@@ -348,27 +353,25 @@ class KatalogQueryService:
     def list_items(
         self, *, filters: LibraryItemFilters, cursor: str | None, limit: int
     ) -> PaginatedResponse[LibraryItemSummary]:
-        normalized_limit = _page_limit(limit)
+        normalised_limit = _page_limit(limit)
         cursor_value = _decode_cursor(cursor, "library-items")
 
         def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
             statement: Select[tuple[Zaisan]] = select(Zaisan).join(Kura)
             statement = _apply_item_filters(statement, filters)
             if cursor_value is not None:
-                sort_title = _cursor_string(cursor_value, "sort_title")
-                item_id = _cursor_int(cursor_value, "id")
+                sort_title: str = _cursor_string(cursor_value, "sort_title")
+                item_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         Zaisan.sort_title > sort_title,
                         and_(Zaisan.sort_title == sort_title, Zaisan.id > item_id),
                     )
                 )
-            rows = tuple(
-                session.scalars(
-                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalized_limit + 1)
-                )
+            rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
+                session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1))
             )
-            return _item_page(session, rows, normalized_limit)
+            return _item_page(session, rows, normalised_limit)
 
         return self._database.run_transaction(load)
 
@@ -377,54 +380,52 @@ class KatalogQueryService:
     ) -> PaginatedResponse[LibraryItemSummary]:
         """Return recent catalogue identities rather than a rail of incidental episodes."""
 
-        normalized_limit = _page_limit(limit)
+        normalised_limit: int = _page_limit(limit)
 
         def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
-            rows = tuple(
+            rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
                 session.scalars(
                     select(Zaisan)
                     .where(Zaisan.availability == AvailabilityState.AVAILABLE)
                     .order_by(Zaisan.added_at.desc(), Zaisan.id.desc())
                 ).all()
             )
-            by_id = {item.id: item for item in rows}
+            by_id: dict[int, Zaisan] = {item.id: item for item in rows}
             selected: list[Zaisan] = []
-            seen_ids: set[int] = set()
+            seen_ids: set[int] = set[int]()
             for item in rows:
-                candidate = _recent_catalogue_identity(item, by_id)
+                candidate: Zaisan | None = _recent_catalogue_identity(item, by_id)
                 if candidate is None or candidate.id in seen_ids:
                     continue
                 selected.append(candidate)
                 seen_ids.add(candidate.id)
-                if len(selected) == normalized_limit:
+                if len(selected) == normalised_limit:
                     break
-            summaries = _summaries_for(session, tuple(selected))
-            return PaginatedResponse(
-                items=tuple(summaries[item.id] for item in selected),
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple[Zaisan, ...](selected))
+            return PaginatedResponse[LibraryItemSummary](
+                items=tuple[LibraryItemSummary, ...](summaries[item.id] for item in selected),
                 next_cursor=None,
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
 
     def get_item(self, item_id: int) -> LibraryItemDetail:
         def load(session: Session) -> LibraryItemDetail:
-            item = _require(session, Zaisan, item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             return _detail(session, item)
 
         return self._database.run_transaction(load)
 
     def item_etag(self, item_id: int) -> str:
         def load(session: Session) -> str:
-            item = _require(session, Zaisan, item_id, "Library item")
-            artworks = tuple(
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
+            artworks: tuple[CachedArtwork, ...] = tuple[CachedArtwork, ...](
                 session.scalars(
-                    select(CachedArtwork)
-                    .where(CachedArtwork.library_item_id == item.id)
-                    .order_by(CachedArtwork.id)
+                    select(CachedArtwork).where(CachedArtwork.library_item_id == item.id).order_by(CachedArtwork.id)
                 )
             )
-            source = "|".join(
+            source: str = "|".join(
                 (
                     str(item.id),
                     item.title,
@@ -441,34 +442,32 @@ class KatalogQueryService:
     def list_children(
         self, item_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[LibraryItemSummary]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "library-items")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "library-items")
 
         def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
             _require(session, Zaisan, item_id, "Library item")
             statement: Select[tuple[Zaisan]] = select(Zaisan).where(Zaisan.parent_id == item_id)
             if cursor_value is not None:
-                sort_title = _cursor_string(cursor_value, "sort_title")
-                child_id = _cursor_int(cursor_value, "id")
+                sort_title: str = _cursor_string(cursor_value, "sort_title")
+                child_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         Zaisan.sort_title > sort_title,
                         and_(Zaisan.sort_title == sort_title, Zaisan.id > child_id),
                     )
                 )
-            rows = tuple(
-                session.scalars(
-                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalized_limit + 1)
-                )
+            rows: tuple[Zaisan, ...] = tuple(
+                session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1))
             )
-            return _item_page(session, rows, normalized_limit)
+            return _item_page(session, rows, normalised_limit)
 
         return self._database.run_transaction(load)
 
     def list_media(
         self, item_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[MediaTechnicalSummary]:
-        normalized_limit = _page_limit(limit)
+        normalised_limit = _page_limit(limit)
         cursor_value = _decode_cursor(cursor, "media")
 
         def load(session: Session) -> PaginatedResponse[MediaTechnicalSummary]:
@@ -478,14 +477,12 @@ class KatalogQueryService:
             )
             if cursor_value is not None:
                 statement = statement.where(MediaFile.id > _cursor_int(cursor_value, "id"))
-            rows = tuple(
-                session.scalars(statement.order_by(MediaFile.id).limit(normalized_limit + 1))
-            )
-            page, has_next = _split_page(rows, normalized_limit)
+            rows = tuple(session.scalars(statement.order_by(MediaFile.id).limit(normalised_limit + 1)))
+            page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse(
                 items=tuple(_media_summary(file) for file in page),
                 next_cursor=(_encode_cursor("media", {"id": page[-1].id}) if has_next else None),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -509,18 +506,18 @@ class KatalogQueryService:
         def load(session: Session) -> ArtworkFile:
             artwork = _require(session, CachedArtwork, artwork_id, "Artwork")
             if artwork.library_item_id != item_id:
-                raise CatalogNotFoundError(
+                raise CatalogueNotFoundError(
                     f"Artwork {artwork_id} does not belong to item {item_id}."
                 )
             target = (self._artwork_cache_path / artwork.cache_relative_path).resolve(strict=False)
             if self._artwork_cache_path not in target.parents:
-                raise CatalogValidationError(
+                raise CatalogueValidationError(
                     "Artwork cache record is outside the configured cache."
                 )
             try:
                 content = target.read_bytes()
             except FileNotFoundError as error:
-                raise CatalogNotFoundError(f"Artwork {artwork_id} is not cached.") from error
+                raise CatalogueNotFoundError(f"Artwork {artwork_id} is not cached.") from error
             return ArtworkFile(
                 content=content,
                 content_type=artwork.content_type,
@@ -532,14 +529,14 @@ class KatalogQueryService:
     def list_collections(
         self, *, cursor: str | None, limit: int, search: str | None = None
     ) -> PaginatedResponse[CollectionSummary]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "collections")
-        normalized_search = search.strip().casefold() if search is not None else ""
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "collections")
+        normalised_search: str = search.strip().casefold() if search is not None else ""
 
         def load(session: Session) -> PaginatedResponse[CollectionSummary]:
             statement: Select[tuple[Collection]] = select(Collection)
-            if normalized_search:
-                statement = statement.where(func.lower(Collection.name).contains(normalized_search))
+            if normalised_search:
+                statement = statement.where(func.lower(Collection.name).contains(normalised_search))
             if cursor_value is not None:
                 name = _cursor_string(cursor_value, "name")
                 collection_id = _cursor_int(cursor_value, "id")
@@ -549,20 +546,16 @@ class KatalogQueryService:
                         and_(Collection.name == name, Collection.id > collection_id),
                     )
                 )
-            rows = tuple(
-                session.scalars(
-                    statement.order_by(Collection.name, Collection.id).limit(normalized_limit + 1)
-                )
+            rows: tuple[Collection, ...] = tuple(
+                session.scalars(statement.order_by(Collection.name, Collection.id).limit(normalised_limit + 1))
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            return PaginatedResponse(
-                items=tuple(_collection_summary(session, collection) for collection in page),
+            page, has_next = _split_page(rows, normalised_limit)
+            return PaginatedResponse[CollectionSummary](
+                items=tuple[CollectionSummary, ...](_collection_summary(session, collection) for collection in page),
                 next_cursor=(
-                    _encode_cursor("collections", {"name": page[-1].name, "id": page[-1].id})
-                    if has_next
-                    else None
+                    _encode_cursor("collections", {"name": page[-1].name, "id": page[-1].id}) if has_next else None
                 ),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -620,8 +613,8 @@ class KatalogQueryService:
     def list_collection_members(
         self, collection_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[CollectionMembership]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "collection-members")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "collection-members")
 
         def load(session: Session) -> PaginatedResponse[CollectionMembership]:
             _require(session, Collection, collection_id, "Collection")
@@ -633,19 +626,17 @@ class KatalogQueryService:
             )
             if cursor_value is not None:
                 statement = statement.where(CollectionKin.id > _cursor_int(cursor_value, "id"))
-            rows = tuple(session.execute(statement.limit(normalized_limit + 1)))
-            page, has_next = _split_page(rows, normalized_limit)
-            summaries = _summaries_for(session, tuple(item for _, item in page))
-            return PaginatedResponse(
-                items=tuple(
+            rows: tuple[Row[tuple[CollectionKin, Zaisan]], ...] = tuple(
+                session.execute(statement.limit(normalised_limit + 1))
+            )
+            page, has_next = _split_page(rows, normalised_limit)
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            return PaginatedResponse[CollectionMembership](
+                items=tuple[CollectionMembership, ...](
                     _membership_detail(membership, summaries[item.id]) for membership, item in page
                 ),
-                next_cursor=(
-                    _encode_cursor("collection-members", {"id": page[-1][0].id})
-                    if has_next
-                    else None
-                ),
-                limit=normalized_limit,
+                next_cursor=(_encode_cursor("collection-members", {"id": page[-1][0].id}) if has_next else None),
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -654,9 +645,9 @@ class KatalogQueryService:
         self, collection_id: int, request: CollectionMembershipCreate
     ) -> CollectionMutationResult:
         def add(session: Session) -> CollectionMutationResult:
-            collection = _require(session, Collection, collection_id, "Collection")
+            collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, request.expected_revision, "Collection")
-            item = _require(session, Zaisan, request.library_item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, request.library_item_id, "Library item")
             if (
                 session.scalar(
                     select(CollectionKin.id).where(
@@ -666,20 +657,16 @@ class KatalogQueryService:
                 )
                 is not None
             ):
-                raise CatalogValidationError("That library item is already in this collection.")
-            membership = CollectionKin(
+                raise CatalogueValidationError("That library item is already in this collection.")
+            membership: CollectionKin = CollectionKin(
                 collection_id=collection_id,
                 library_item_id=item.id,
-                relationship=(
-                    Kinship(request.relationship.value)
-                    if request.relationship is not None
-                    else None
-                ),
+                relationship=(Kinship(request.relationship.value) if request.relationship is not None else None),
             )
             session.add(membership)
             collection.revision += 1
             session.flush()
-            summary = _summaries_for(session, (item,))[item.id]
+            summary: LibraryItemSummary = _summaries_for(session, (item,))[item.id]
             return CollectionMutationResult(
                 collection_id=collection.id,
                 revision=collection.revision,
@@ -695,15 +682,15 @@ class KatalogQueryService:
         request: CollectionMembershipUpdate,
     ) -> CollectionMutationResult:
         def update_membership(session: Session) -> CollectionMutationResult:
-            collection = _require(session, Collection, collection_id, "Collection")
+            collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, request.expected_revision, "Collection")
-            membership = _require_membership(session, collection.id, library_item_id)
+            membership: CollectionKin = _require_membership(session, collection.id, library_item_id)
             membership.relationship = (
                 Kinship(request.relationship.value) if request.relationship is not None else None
             )
             collection.revision += 1
             session.flush()
-            item = _require(session, Zaisan, membership.library_item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, membership.library_item_id, "Library item")
             return CollectionMutationResult(
                 collection_id=collection.id,
                 revision=collection.revision,
@@ -718,10 +705,10 @@ class KatalogQueryService:
         self, collection_id: int, library_item_id: int, *, expected_revision: int
     ) -> CollectionMutationResult:
         def remove(session: Session) -> CollectionMutationResult:
-            collection = _require(session, Collection, collection_id, "Collection")
+            collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, expected_revision, "Collection")
-            membership = _require_membership(session, collection.id, library_item_id)
-            entries_remaining = (
+            membership: CollectionKin = _require_membership(session, collection.id, library_item_id)
+            entries_remaining: int = (
                 session.scalar(
                     select(func.count())
                     .select_from(KeiroEntry)
@@ -736,7 +723,7 @@ class KatalogQueryService:
             session.delete(membership)
             collection.revision += 1
             session.flush()
-            warnings = (
+            warnings: tuple[str] | tuple[()] = (
                 (
                     (
                         f"The item remains in {entries_remaining} watch-order "
@@ -755,8 +742,8 @@ class KatalogQueryService:
     def list_collection_watch_orders(
         self, collection_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[WatchOrderSummary]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "watch-orders")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "watch-orders")
 
         def load(session: Session) -> PaginatedResponse[WatchOrderSummary]:
             _require(session, Collection, collection_id, "Collection")
@@ -764,25 +751,21 @@ class KatalogQueryService:
                 Keiro.collection_id == collection_id
             )
             if cursor_value is not None:
-                name = _cursor_string(cursor_value, "name")
-                order_id = _cursor_int(cursor_value, "id")
+                name: str = _cursor_string(cursor_value, "name")
+                order_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(Keiro.name > name, and_(Keiro.name == name, Keiro.id > order_id))
                 )
-            rows = tuple(
-                session.scalars(
-                    statement.order_by(Keiro.name, Keiro.id).limit(normalized_limit + 1)
-                )
+            rows: tuple[Keiro, ...] = tuple(
+                session.scalars(statement.order_by(Keiro.name, Keiro.id).limit(normalised_limit + 1))
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            return PaginatedResponse(
-                items=tuple(_watch_order_summary(session, order) for order in page),
+            page, has_next = _split_page(rows, normalised_limit)
+            return PaginatedResponse[WatchOrderSummary](
+                items=tuple[WatchOrderSummary, ...](_watch_order_summary(session, order) for order in page),
                 next_cursor=(
-                    _encode_cursor("watch-orders", {"name": page[-1].name, "id": page[-1].id})
-                    if has_next
-                    else None
+                    _encode_cursor("watch-orders", {"name": page[-1].name, "id": page[-1].id}) if has_next else None
                 ),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -791,7 +774,7 @@ class KatalogQueryService:
         self, collection_id: int, request: WatchOrderCreate
     ) -> WatchOrderMutationResult:
         def create(session: Session) -> WatchOrderMutationResult:
-            collection = _require(session, Collection, collection_id, "Collection")
+            collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(
                 collection.revision, request.expected_collection_revision, "Collection"
             )
@@ -804,8 +787,8 @@ class KatalogQueryService:
                 )
                 is not None
             ):
-                raise CatalogValidationError("A watch order with that name already exists.")
-            watch_order = Keiro(
+                raise CatalogueValidationError("A watch order with that name already exists.")
+            watch_order: Keiro = Keiro(
                 collection_id=collection.id,
                 name=request.name,
                 order_kind=KeiroKind(request.kind.value),
@@ -825,11 +808,11 @@ class KatalogQueryService:
         self, watch_order_id: int, request: WatchOrderUpdate
     ) -> WatchOrderMutationResult:
         def update_watch_order(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
             if "name" in request.model_fields_set:
-                name = request.name or ""
-                duplicate = session.scalar(
+                name: str = request.name or ""
+                duplicate: int | None = session.scalar(
                     select(Keiro.id).where(
                         Keiro.collection_id == watch_order.collection_id,
                         Keiro.name == name,
@@ -837,13 +820,13 @@ class KatalogQueryService:
                     )
                 )
                 if duplicate is not None:
-                    raise CatalogValidationError("A watch order with that name already exists.")
+                    raise CatalogueValidationError("A watch order with that name already exists.")
                 watch_order.name = name
             if "kind" in request.model_fields_set and request.kind is not None:
                 watch_order.order_kind = KeiroKind(request.kind.value)
             watch_order.revision += 1
             session.flush()
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -856,11 +839,11 @@ class KatalogQueryService:
         self, watch_order_id: int, *, expected_revision: int
     ) -> WatchOrderMutationResult:
         def delete_watch_order(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, expected_revision, "Watch order")
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             collection.revision += 1
-            collection_revision = collection.revision
+            collection_revision: int = collection.revision
             session.delete(watch_order)
             session.flush()
             return WatchOrderMutationResult(
@@ -875,41 +858,37 @@ class KatalogQueryService:
     def get_watch_order(
         self, watch_order_id: int, *, cursor: str | None, limit: int
     ) -> WatchOrderDetail:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "watch-order-entries")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "watch-order-entries")
 
         def load(session: Session) -> WatchOrderDetail:
-            order = _require(session, Keiro, watch_order_id, "Watch order")
+            order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             statement: Select[tuple[KeiroEntry, Zaisan]] = (
                 select(KeiroEntry, Zaisan)
                 .join(Zaisan, KeiroEntry.library_item_id == Zaisan.id)
                 .where(KeiroEntry.watch_order_id == order.id)
             )
             if cursor_value is not None:
-                position = _cursor_int(cursor_value, "position")
-                entry_id = _cursor_int(cursor_value, "id")
+                position: int = _cursor_int(cursor_value, "position")
+                entry_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         KeiroEntry.position > position,
                         and_(KeiroEntry.position == position, KeiroEntry.id > entry_id),
                     )
                 )
-            rows = tuple(
-                session.execute(
-                    statement.order_by(KeiroEntry.position, KeiroEntry.id).limit(
-                        normalized_limit + 1
-                    )
-                )
+            rows: tuple[Row[tuple[KeiroEntry, Zaisan]], ...] = tuple(
+                session.execute(statement.order_by(KeiroEntry.position, KeiroEntry.id).limit(normalised_limit + 1))
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            summaries = _summaries_for(session, tuple(item for _, item in page))
-            entries = tuple(
+            page, has_next = _split_page(rows, normalised_limit)
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            entries: tuple[WatchOrderEntryDetail, ...] = tuple(
                 WatchOrderEntryDetail(id=entry.id, position=entry.position, item=summaries[item.id])
                 for entry, item in page
             )
             return WatchOrderDetail(
                 watch_order=_watch_order_summary(session, order),
-                entries=PaginatedResponse(
+                entries=PaginatedResponse[WatchOrderEntryDetail](
                     items=entries,
                     next_cursor=(
                         _encode_cursor(
@@ -919,7 +898,7 @@ class KatalogQueryService:
                         if has_next
                         else None
                     ),
-                    limit=normalized_limit,
+                    limit=normalised_limit,
                 ),
             )
 
@@ -929,11 +908,11 @@ class KatalogQueryService:
         self, watch_order_id: int, request: WatchOrderEntryCreate
     ) -> WatchOrderMutationResult:
         def add(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
-            item = _require(session, Zaisan, request.library_item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, request.library_item_id, "Library item")
             if item.item_kind not in PLAYABLE_ITEM_KINDS:
-                raise CatalogValidationError(
+                raise CatalogueValidationError(
                     f"{item.item_kind.value} items cannot appear in a watch order."
                 )
             if (
@@ -945,17 +924,17 @@ class KatalogQueryService:
                 )
                 is not None
             ):
-                raise CatalogValidationError("That library item is already in this watch order.")
-            position = _insertion_position(
+                raise CatalogueValidationError("That library item is already in this watch order.")
+            position: int = _insertion_position(
                 session,
                 watch_order.id,
                 before_entry_id=request.insert_before_entry_id,
                 after_entry_id=request.insert_after_entry_id,
             )
-            highest = _highest_position(session, watch_order.id)
+            highest: int = _highest_position(session, watch_order.id)
             if position <= highest:
                 _shift_positions(session, watch_order.id, position, highest, 1)
-            entry = KeiroEntry(
+            entry: KeiroEntry = KeiroEntry(
                 watch_order_id=watch_order.id,
                 library_item_id=item.id,
                 position=position,
@@ -963,7 +942,7 @@ class KatalogQueryService:
             session.add(entry)
             watch_order.revision += 1
             session.flush()
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -980,25 +959,25 @@ class KatalogQueryService:
         request: WatchOrderEntryMove,
     ) -> WatchOrderMutationResult:
         def move(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
-            entry = _require_watch_order_entry(session, watch_order.id, entry_id)
-            entries = tuple(
+            entry: KeiroEntry = _require_watch_order_entry(session, watch_order.id, entry_id)
+            entries: tuple[KeiroEntry, ...] = tuple(
                 session.scalars(
                     select(KeiroEntry)
                     .where(KeiroEntry.watch_order_id == watch_order.id)
                     .order_by(KeiroEntry.position, KeiroEntry.id)
                 )
             )
-            remaining = tuple(candidate for candidate in entries if candidate.id != entry.id)
-            target_position = _move_target_position(
+            remaining: tuple[KeiroEntry, ...] = tuple(candidate for candidate in entries if candidate.id != entry.id)
+            target_position: int = _move_target_position(
                 session,
                 watch_order.id,
                 remaining,
                 before_entry_id=request.move_before_entry_id,
                 after_entry_id=request.move_after_entry_id,
             )
-            old_position = entry.position
+            old_position: int = entry.position
             if target_position != old_position:
                 entry.position = _highest_position(session, watch_order.id) + 1
                 session.flush()
@@ -1021,8 +1000,8 @@ class KatalogQueryService:
                 entry.position = target_position
             watch_order.revision += 1
             session.flush()
-            item = _require(session, Zaisan, entry.library_item_id, "Library item")
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            item: Zaisan = _require(session, Zaisan, entry.library_item_id, "Library item")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1036,18 +1015,18 @@ class KatalogQueryService:
         self, watch_order_id: int, entry_id: int, *, expected_revision: int
     ) -> WatchOrderMutationResult:
         def remove(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, expected_revision, "Watch order")
-            entry = _require_watch_order_entry(session, watch_order.id, entry_id)
-            position = entry.position
-            highest = _highest_position(session, watch_order.id)
+            entry: KeiroEntry = _require_watch_order_entry(session, watch_order.id, entry_id)
+            position: int = entry.position
+            highest: int = _highest_position(session, watch_order.id)
             session.delete(entry)
             session.flush()
             if position < highest:
                 _shift_positions(session, watch_order.id, position + 1, highest, -1)
             watch_order.revision += 1
             session.flush()
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1060,7 +1039,7 @@ class KatalogQueryService:
         self, watch_order_id: int, request: WatchOrderGenerationRequest
     ) -> WatchOrderGenerationPreview:
         def preview(session: Session) -> WatchOrderGenerationPreview:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
             _require_generation_allowed(watch_order)
             return _generation_preview(session, watch_order, request.mode)
@@ -1071,26 +1050,24 @@ class KatalogQueryService:
         self, watch_order_id: int, request: WatchOrderGenerationRequest
     ) -> WatchOrderMutationResult:
         def apply(session: Session) -> WatchOrderMutationResult:
-            watch_order = _require(session, Keiro, watch_order_id, "Watch order")
+            watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
             _require_generation_allowed(watch_order)
-            generated = _generated_watch_order_items(session, watch_order, request.mode)
-            existing = tuple(
+            generated: _GeneratedWatchOrderItems = _generated_watch_order_items(session, watch_order, request.mode)
+            existing: tuple[KeiroEntry, ...] = tuple(
                 session.scalars(
-                    select(KeiroEntry)
-                    .where(KeiroEntry.watch_order_id == watch_order.id)
-                    .order_by(KeiroEntry.position)
+                    select(KeiroEntry).where(KeiroEntry.watch_order_id == watch_order.id).order_by(KeiroEntry.position)
                 )
             )
             if request.apply_mode.value == "replace":
                 for entry in existing:
                     session.delete(entry)
                 session.flush()
-                existing_item_ids: set[int] = set()
+                existing_item_ids: set[int] = set[int]()
                 next_position = 0
             else:
                 existing_item_ids = {entry.library_item_id for entry in existing}
-                next_position = len(existing)
+                next_position: int = len(existing)
             for item in generated.items:
                 if item.id in existing_item_ids:
                     continue
@@ -1105,7 +1082,7 @@ class KatalogQueryService:
                 next_position += 1
             watch_order.revision += 1
             session.flush()
-            collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1117,8 +1094,8 @@ class KatalogQueryService:
     def continue_watching(
         self, user_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[ContinueWatchingEntry]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "continue-watching")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "continue-watching")
 
         def load(session: Session) -> PaginatedResponse[ContinueWatchingEntry]:
             _require(session, User, user_id, "User")
@@ -1133,8 +1110,8 @@ class KatalogQueryService:
                 )
             )
             if cursor_value is not None:
-                played_at = _cursor_datetime(cursor_value, "last_played_at")
-                state_id = _cursor_int(cursor_value, "id")
+                played_at: datetime = _cursor_datetime(cursor_value, "last_played_at")
+                state_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         PlaybackState.last_played_at < played_at,
@@ -1143,19 +1120,18 @@ class KatalogQueryService:
                         ),
                     )
                 )
-            rows = tuple(
+            rows: tuple[Row[tuple[PlaybackState, Zaisan]], ...] = tuple(
                 session.execute(
                     statement.order_by(PlaybackState.last_played_at.desc(), PlaybackState.id).limit(
-                        normalized_limit + 1
+                        normalised_limit + 1
                     )
                 )
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            summaries = _summaries_for(session, tuple(item for _, item in page))
-            return PaginatedResponse(
-                items=tuple(
-                    ContinueWatchingEntry(item=summaries[item.id], playback=_playback(state))
-                    for state, item in page
+            page, has_next = _split_page(rows, normalised_limit)
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            return PaginatedResponse[ContinueWatchingEntry](
+                items=tuple[ContinueWatchingEntry, ...](
+                    ContinueWatchingEntry(item=summaries[item.id], playback=_playback(state)) for state, item in page
                 ),
                 next_cursor=(
                     _encode_cursor(
@@ -1168,7 +1144,7 @@ class KatalogQueryService:
                     if has_next
                     else None
                 ),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -1176,8 +1152,8 @@ class KatalogQueryService:
     def on_deck(
         self, user_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[OnDeckEntry]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "on-deck")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "on-deck")
 
         def load(session: Session) -> PaginatedResponse[OnDeckEntry]:
             _require(session, User, user_id, "User")
@@ -1194,9 +1170,9 @@ class KatalogQueryService:
                 .where(or_(PlaybackState.id.is_(None), PlaybackState.completed.is_(False)))
             )
             if cursor_value is not None:
-                order_id = _cursor_int(cursor_value, "watch_order_id")
-                position = _cursor_int(cursor_value, "position")
-                entry_id = _cursor_int(cursor_value, "id")
+                order_id: int = _cursor_int(cursor_value, "watch_order_id")
+                position: int = _cursor_int(cursor_value, "position")
+                entry_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         KeiroEntry.watch_order_id > order_id,
@@ -1211,17 +1187,17 @@ class KatalogQueryService:
                         ),
                     )
                 )
-            rows = tuple(
+            rows: tuple[Row[tuple[KeiroEntry, Zaisan]], ...] = tuple(
                 session.execute(
-                    statement.order_by(
-                        KeiroEntry.watch_order_id, KeiroEntry.position, KeiroEntry.id
-                    ).limit(normalized_limit + 1)
+                    statement.order_by(KeiroEntry.watch_order_id, KeiroEntry.position, KeiroEntry.id).limit(
+                        normalised_limit + 1
+                    )
                 )
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            summaries = _summaries_for(session, tuple(item for _, item in page))
-            return PaginatedResponse(
-                items=tuple(
+            page, has_next = _split_page(rows, normalised_limit)
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            return PaginatedResponse[OnDeckEntry](
+                items=tuple[OnDeckEntry, ...](
                     OnDeckEntry(item=summaries[item.id], source_watch_order_id=entry.watch_order_id)
                     for entry, item in page
                 ),
@@ -1237,7 +1213,7 @@ class KatalogQueryService:
                     if has_next
                     else None
                 ),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -1245,14 +1221,14 @@ class KatalogQueryService:
     def metadata_review(
         self, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[MetadataReviewCandidate]:
-        normalized_limit = _page_limit(limit)
-        cursor_value = _decode_cursor(cursor, "metadata-review")
+        normalised_limit: int = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "metadata-review")
 
         def load(session: Session) -> PaginatedResponse[MetadataReviewCandidate]:
             statement: Select[tuple[MetadataCandidate]] = select(MetadataCandidate)
             if cursor_value is not None:
-                confidence = _cursor_float(cursor_value, "confidence")
-                candidate_id = _cursor_int(cursor_value, "id")
+                confidence: float = _cursor_float(cursor_value, "confidence")
+                candidate_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
                         MetadataCandidate.confidence < confidence,
@@ -1262,16 +1238,16 @@ class KatalogQueryService:
                         ),
                     )
                 )
-            rows = tuple(
+            rows: tuple[MetadataCandidate, ...] = tuple(
                 session.scalars(
-                    statement.order_by(
-                        MetadataCandidate.confidence.desc(), MetadataCandidate.id
-                    ).limit(normalized_limit + 1)
+                    statement.order_by(MetadataCandidate.confidence.desc(), MetadataCandidate.id).limit(
+                        normalised_limit + 1
+                    )
                 )
             )
-            page, has_next = _split_page(rows, normalized_limit)
-            return PaginatedResponse(
-                items=tuple(_candidate(candidate) for candidate in page),
+            page, has_next = _split_page(rows, normalised_limit)
+            return PaginatedResponse[MetadataReviewCandidate](
+                items=tuple[MetadataReviewCandidate, ...](_candidate(candidate) for candidate in page),
                 next_cursor=(
                     _encode_cursor(
                         "metadata-review",
@@ -1280,7 +1256,7 @@ class KatalogQueryService:
                     if has_next
                     else None
                 ),
-                limit=normalized_limit,
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -1297,7 +1273,7 @@ class KatalogQueryService:
         def update(session: Session) -> PlaybackStateResponse:
             _require(session, User, user_id, "User")
             try:
-                state = record_playback_progress(
+                state: PlaybackState = record_playback_progress(
                     session,
                     user_id=user_id,
                     library_item_id=item_id,
@@ -1306,9 +1282,9 @@ class KatalogQueryService:
                     completed=completed,
                 )
             except LookupError as error:
-                raise CatalogNotFoundError(str(error)) from error
+                raise CatalogueNotFoundError(str(error)) from error
             except ValueError as error:
-                raise CatalogValidationError(str(error)) from error
+                raise CatalogueValidationError(str(error)) from error
             return _playback(state)
 
         return self._database.run_transaction(update)
@@ -1316,17 +1292,13 @@ class KatalogQueryService:
     def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
             _require(session, User, user_id, "User")
-            item = _require(session, Zaisan, item_id, "Library item")
-            duration = (
-                session.scalar(
-                    select(func.max(MediaFile.duration_seconds)).where(
-                        MediaFile.library_item_id == item.id
-                    )
-                )
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
+            duration: float = (
+                session.scalar(select(func.max(MediaFile.duration_seconds)).where(MediaFile.library_item_id == item.id))
                 or 0.0
             )
             try:
-                state = record_playback_progress(
+                state: PlaybackState = record_playback_progress(
                     session,
                     user_id=user_id,
                     library_item_id=item.id,
@@ -1336,7 +1308,7 @@ class KatalogQueryService:
                     increment_play_count=True,
                 )
             except ValueError as error:
-                raise CatalogValidationError(str(error)) from error
+                raise CatalogueValidationError(str(error)) from error
             return _playback(state)
 
         return self._database.run_transaction(update)
@@ -1345,7 +1317,7 @@ class KatalogQueryService:
         def clear(session: Session) -> None:
             _require(session, User, user_id, "User")
             _require(session, Zaisan, item_id, "Library item")
-            state = session.scalar(
+            state: PlaybackState | None = session.scalar(
                 select(PlaybackState).where(
                     PlaybackState.user_id == user_id,
                     PlaybackState.library_item_id == item_id,
@@ -1362,9 +1334,9 @@ class KatalogQueryService:
         def create(session: Session) -> PlaybackPlanLaunch:
             _require(session, User, request.user_id, "User")
             planned_entries, context = self._plan_entries(session, request)
-            now = datetime.now(UTC)
-            session_id = secrets.token_urlsafe(32)
-            playback_session = ModelPlaybackSession(
+            now: datetime = datetime.now(UTC)
+            session_id: str = secrets.token_urlsafe(32)
+            playback_session: PlaybackSession = ModelPlaybackSession(
                 id=session_id,
                 user_id=request.user_id,
                 context_kind=ModelPlaybackContextKind(context.kind.value),
@@ -1377,7 +1349,7 @@ class KatalogQueryService:
             )
             session.add(playback_session)
             session.flush()
-            for position, planned in enumerate(planned_entries):
+            for position, planned in enumerate[_PlannedPlaybackEntry](planned_entries):
                 session.add(
                     PlaybackSessionEntry(
                         playback_session_id=playback_session.id,
@@ -1387,8 +1359,8 @@ class KatalogQueryService:
                         source_watch_order_position=planned.source_watch_order_position,
                     )
                 )
-            launch_token = secrets.token_urlsafe(32)
-            launch_expires_at = now + self._playback_launch_token_ttl
+            launch_token: str = secrets.token_urlsafe(32)
+            launch_expires_at: datetime = now + self._playback_launch_token_ttl
             session.add(
                 PlaybackLaunchToken(
                     token_hash=_token_hash(launch_token),
@@ -1402,12 +1374,12 @@ class KatalogQueryService:
         return self._database.run_transaction(create)
 
     def launch_playback_plan(self, launch_token: str) -> PlaybackSessionResponse:
-        """Consume a plan launch capability and materialize its media capabilities."""
+        """Consume a plan launch capability and materialise its media capabilities."""
 
         def launch(session: Session) -> PlaybackSessionResponse:
-            now = datetime.now(UTC)
-            token_hash = _token_hash(launch_token)
-            claimed = session.execute(
+            now: datetime = datetime.now(UTC)
+            token_hash: str = _token_hash(launch_token)
+            claimed: Result[Any] = session.execute(
                 sql_update(PlaybackLaunchToken)
                 .where(
                     PlaybackLaunchToken.token_hash == token_hash,
@@ -1419,13 +1391,13 @@ class KatalogQueryService:
             if not isinstance(claimed, CursorResult):
                 raise RuntimeError("Playback launch token update did not produce a cursor result.")
             if claimed.rowcount != 1:
-                raise CatalogNotFoundError("Playback launch token is unavailable.")
-            token = session.scalar(
+                raise CatalogueNotFoundError("Playback launch token is unavailable.")
+            token: PlaybackLaunchToken | None = session.scalar(
                 select(PlaybackLaunchToken).where(PlaybackLaunchToken.token_hash == token_hash)
             )
             if token is None:
-                raise CatalogNotFoundError("Playback launch token is unavailable.")
-            playback_session = _require(
+                raise CatalogueNotFoundError("Playback launch token is unavailable.")
+            playback_session: PlaybackSession = _require(
                 session, ModelPlaybackSession, token.playback_session_id, "Playback session"
             )
             _require_active_session(playback_session, now)
@@ -1435,10 +1407,8 @@ class KatalogQueryService:
 
     def get_playback_session(self, session_id: str) -> PlaybackSessionResponse:
         def load(session: Session) -> PlaybackSessionResponse:
-            now = datetime.now(UTC)
-            playback_session = _require(
-                session, ModelPlaybackSession, session_id, "Playback session"
-            )
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
             _require_active_session(playback_session, now)
             return self._playback_session_response(session, playback_session, now)
 
@@ -1448,14 +1418,12 @@ class KatalogQueryService:
         self, session_id: str, update: SessionProgressUpdate
     ) -> PlaybackProgressResult:
         def record(session: Session) -> PlaybackProgressResult:
-            now = datetime.now(UTC)
-            playback_session = _require(
-                session, ModelPlaybackSession, session_id, "Playback session"
-            )
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
             _require_active_session(playback_session, now)
-            entry = _current_session_entry(session, playback_session)
-            media_file = _require(session, MediaFile, entry.media_file_id, "Media file")
-            existing_state = _playback_state(
+            entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
+            media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
+            existing_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, entry.library_item_id
             )
             if (
@@ -1463,12 +1431,12 @@ class KatalogQueryService:
                 and existing_state is not None
                 and update.position_seconds < existing_state.position_seconds
             ):
-                raise CatalogValidationError(
+                raise CatalogueValidationError(
                     "Playback progress must be monotonic unless seek is true."
                 )
             duration = _progress_duration(media_file, existing_state, update.position_seconds)
             if update.position_seconds > duration:
-                raise CatalogValidationError("Playback position exceeds the media duration.")
+                raise CatalogueValidationError("Playback position exceeds the media duration.")
             try:
                 record_playback_progress(
                     session,
@@ -1480,8 +1448,8 @@ class KatalogQueryService:
                     played_at=now,
                 )
             except ValueError as error:
-                raise CatalogValidationError(str(error)) from error
-            event = _record_session_event(
+                raise CatalogueValidationError(str(error)) from error
+            event: ModelPlaybackSessionEvent = _record_session_event(
                 session,
                 playback_session,
                 entry_position=entry.position,
@@ -1498,22 +1466,20 @@ class KatalogQueryService:
 
     def advance_playback_session(self, session_id: str) -> PlaybackSessionResponse:
         def advance(session: Session) -> PlaybackSessionResponse:
-            now = datetime.now(UTC)
-            playback_session = _require(
-                session, ModelPlaybackSession, session_id, "Playback session"
-            )
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
             _require_active_session(playback_session, now)
-            current_entry = _current_session_entry(session, playback_session)
-            next_entry = session.scalar(
+            current_entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
+            next_entry: PlaybackSessionEntry | None = session.scalar(
                 select(PlaybackSessionEntry).where(
                     PlaybackSessionEntry.playback_session_id == playback_session.id,
                     PlaybackSessionEntry.position == current_entry.position + 1,
                 )
             )
             if next_entry is None:
-                raise CatalogValidationError("Playback session has no subsequent queue entry.")
+                raise CatalogueValidationError("Playback session has no subsequent queue entry.")
             playback_session.current_entry_position = next_entry.position
-            saved_state = _playback_state(
+            saved_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, next_entry.library_item_id
             )
             _record_session_event(
@@ -1530,17 +1496,15 @@ class KatalogQueryService:
 
     def complete_playback_session(self, session_id: str) -> PlaybackCompletionResult:
         def complete(session: Session) -> PlaybackCompletionResult:
-            now = datetime.now(UTC)
-            playback_session = _require(
-                session, ModelPlaybackSession, session_id, "Playback session"
-            )
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
             _require_active_session(playback_session, now)
-            entry = _current_session_entry(session, playback_session)
-            media_file = _require(session, MediaFile, entry.media_file_id, "Media file")
-            existing_state = _playback_state(
+            entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
+            media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
+            existing_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, entry.library_item_id
             )
-            duration = _completion_duration(media_file, existing_state)
+            duration: float = _completion_duration(media_file, existing_state)
             try:
                 record_playback_progress(
                     session,
@@ -1553,8 +1517,8 @@ class KatalogQueryService:
                     played_at=now,
                 )
             except ValueError as error:
-                raise CatalogValidationError(str(error)) from error
-            event = _record_session_event(
+                raise CatalogueValidationError(str(error)) from error
+            event: ModelPlaybackSessionEvent = _record_session_event(
                 session,
                 playback_session,
                 entry_position=entry.position,
@@ -1571,10 +1535,8 @@ class KatalogQueryService:
 
     def close_playback_session(self, session_id: str) -> None:
         def close(session: Session) -> None:
-            now = datetime.now(UTC)
-            playback_session = _require(
-                session, ModelPlaybackSession, session_id, "Playback session"
-            )
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
             _require_active_session(playback_session, now)
             playback_session.closed_at = now
 
@@ -1586,35 +1548,33 @@ class KatalogQueryService:
         """Resolve a scoped opaque token without ever returning its filesystem path."""
 
         def resolve(session: Session) -> MediaTransferFile:
-            now = datetime.now(UTC)
-            token = session.scalar(
-                select(MediaAccessToken).where(
-                    MediaAccessToken.token_hash == _token_hash(access_token)
-                )
+            now: datetime = datetime.now(UTC)
+            token: MediaAccessToken | None = session.scalar(
+                select(MediaAccessToken).where(MediaAccessToken.token_hash == _token_hash(access_token))
             )
             if (
                 token is None
                 or token.operation is not operation
                 or _is_expired(token.expires_at, now)
             ):
-                raise CatalogNotFoundError("Media access token is unavailable.")
-            playback_session = _require(
+                raise CatalogueNotFoundError("Media access token is unavailable.")
+            playback_session: PlaybackSession = _require(
                 session, ModelPlaybackSession, token.playback_session_id, "Playback session"
             )
             try:
                 _require_active_session(playback_session, now)
-            except CatalogNotFoundError as error:
-                raise CatalogNotFoundError("Media access token is unavailable.") from error
-            media_file = _require(session, MediaFile, token.media_file_id, "Media file")
-            item = _require(session, Zaisan, media_file.library_item_id, "Library item")
+            except CatalogueNotFoundError as error:
+                raise CatalogueNotFoundError("Media access token is unavailable.") from error
+            media_file: MediaFile = _require(session, MediaFile, token.media_file_id, "Media file")
+            item: Zaisan = _require(session, Zaisan, media_file.library_item_id, "Library item")
             _require_available_media(item, media_file)
-            path = Path(media_file.absolute_path)
+            path: Path = Path(media_file.absolute_path)
             try:
-                stat = path.stat()
+                stat: stat_result = path.stat()
             except OSError as error:
-                raise CatalogNotFoundError("Media access token is unavailable.") from error
+                raise CatalogueNotFoundError("Media access token is unavailable.") from error
             if not path.is_file():
-                raise CatalogNotFoundError("Media access token is unavailable.")
+                raise CatalogueNotFoundError("Media access token is unavailable.")
             return MediaTransferFile(
                 path=path,
                 size_bytes=stat.st_size,
@@ -1629,9 +1589,9 @@ class KatalogQueryService:
     def _plan_entries(
         self, session: Session, request: PlaybackPlanRequest
     ) -> tuple[tuple[_PlannedPlaybackEntry, ...], PlaybackContext]:
-        context = request.context
+        context: PlaybackPlanContext = request.context
         if isinstance(context, StandalonePlaybackContext):
-            item = _require(session, Zaisan, context.item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, context.item_id, "Library item")
             planned = (self._planned_entry(session, item),)
             response_context = PlaybackContext(kind=PlaybackContextKind.STANDALONE, item_id=item.id)
         elif isinstance(context, SeriesPlaybackContext):
@@ -1651,18 +1611,18 @@ class KatalogQueryService:
             )
             response_context = PlaybackContext(kind=PlaybackContextKind.MANUAL_QUEUE)
         if not planned:
-            raise CatalogValidationError("A playback plan requires at least one available item.")
+            raise CatalogueValidationError("A playback plan requires at least one available item.")
         if len(planned) > self._max_playback_queue_size:
-            raise CatalogValidationError(
+            raise CatalogueValidationError(
                 f"Playback queues cannot contain more than {self._max_playback_queue_size} entries."
             )
         return planned, response_context
 
     def _planned_entry(self, session: Session, item: Zaisan) -> _PlannedPlaybackEntry:
         if item.item_kind not in PLAYABLE_ITEM_KINDS:
-            raise CatalogValidationError(f"{item.item_kind.value} items are not playable.")
+            raise CatalogueValidationError(f"{item.item_kind.value} items are not playable.")
         if item.availability is not AvailabilityState.AVAILABLE:
-            raise CatalogValidationError(f"Library item {item.id} is unavailable.")
+            raise CatalogueValidationError(f"Library item {item.id} is unavailable.")
         media_files = tuple(
             session.scalars(
                 select(MediaFile)
@@ -1678,7 +1638,7 @@ class KatalogQueryService:
                 return _PlannedPlaybackEntry(
                     item=item, media_file=media_file, source_watch_order_position=None
                 )
-        raise CatalogValidationError(f"Library item {item.id} has no available media file.")
+        raise CatalogueValidationError(f"Library item {item.id} has no available media file.")
 
     def _series_entries(
         self, session: Session, user_id: int, context: SeriesPlaybackContext
@@ -1709,7 +1669,7 @@ class KatalogQueryService:
                 -1,
             )
             if start_index < 0:
-                raise CatalogValidationError("The requested item is not in the watch order.")
+                raise CatalogueValidationError("The requested item is not in the watch order.")
         planned: list[_PlannedPlaybackEntry] = []
         for entry, item in rows[start_index:]:
             planned_entry = self._planned_entry(session, item)
@@ -1733,7 +1693,7 @@ class KatalogQueryService:
             )
         )
         if not entries:
-            raise CatalogNotFoundError("Playback session is unavailable.")
+            raise CatalogueNotFoundError("Playback session is unavailable.")
         items = {
             item.id: item
             for item in session.scalars(
@@ -1766,7 +1726,7 @@ class KatalogQueryService:
             item = items.get(entry.library_item_id)
             media_file = media_files.get(entry.media_file_id)
             if item is None or media_file is None:
-                raise CatalogNotFoundError("Playback session is unavailable.")
+                raise CatalogueNotFoundError("Playback session is unavailable.")
             stream_token = self._issue_media_token(
                 session, playback_session, media_file, MediaAccessOperation.STREAM, now
             )
@@ -1805,7 +1765,7 @@ class KatalogQueryService:
             None,
         )
         if current_item is None:
-            raise CatalogNotFoundError("Playback session is unavailable.")
+            raise CatalogueNotFoundError("Playback session is unavailable.")
         last_event = session.scalar(
             select(ModelPlaybackSessionEvent)
             .where(ModelPlaybackSessionEvent.playback_session_id == playback_session.id)
@@ -1861,26 +1821,26 @@ def _token_hash(token: str) -> str:
 
 
 def _is_expired(expires_at: datetime, now: datetime) -> bool:
-    normalized_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
-    return normalized_expiry <= now
+    normalised_expiry: datetime = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+    return normalised_expiry <= now
 
 
 def _require_active_session(playback_session: ModelPlaybackSession, now: datetime) -> None:
     if playback_session.closed_at is not None or _is_expired(playback_session.expires_at, now):
-        raise CatalogNotFoundError("Playback session is unavailable.")
+        raise CatalogueNotFoundError("Playback session is unavailable.")
 
 
 def _current_session_entry(
     session: Session, playback_session: ModelPlaybackSession
 ) -> PlaybackSessionEntry:
-    entry = session.scalar(
+    entry: PlaybackSessionEntry | None = session.scalar(
         select(PlaybackSessionEntry).where(
             PlaybackSessionEntry.playback_session_id == playback_session.id,
             PlaybackSessionEntry.position == playback_session.current_entry_position,
         )
     )
     if entry is None:
-        raise CatalogNotFoundError("Playback session is unavailable.")
+        raise CatalogueNotFoundError("Playback session is unavailable.")
     return entry
 
 
@@ -1946,17 +1906,17 @@ def _series_and_episodes(
     if context.episode_id is not None:
         episode = _require(session, Zaisan, context.episode_id, "Library item")
         if episode.item_kind is not ZaisanKind.EPISODE:
-            raise CatalogValidationError("A series episode_id must identify an episode.")
+            raise CatalogueValidationError("A series episode_id must identify an episode.")
         season = _require_parent(session, episode, ZaisanKind.SEASON)
         series = _require_parent(session, season, ZaisanKind.SERIES)
         if context.series_id is not None and context.series_id != series.id:
-            raise CatalogValidationError("The episode does not belong to the requested series.")
+            raise CatalogueValidationError("The episode does not belong to the requested series.")
     else:
         if context.series_id is None:
-            raise CatalogValidationError("A series context requires series_id.")
+            raise CatalogueValidationError("A series context requires series_id.")
         series = _require(session, Zaisan, context.series_id, "Library item")
         if series.item_kind is not ZaisanKind.SERIES:
-            raise CatalogValidationError("A series context must identify a series item.")
+            raise CatalogueValidationError("A series context must identify a series item.")
     season = aliased(Zaisan)
     episodes = tuple(
         session.scalars(
@@ -1970,7 +1930,7 @@ def _series_and_episodes(
         )
     )
     if not episodes:
-        raise CatalogValidationError("The requested series has no episodes.")
+        raise CatalogueValidationError("The requested series has no episodes.")
     return series, episodes
 
 
@@ -1985,7 +1945,7 @@ def _series_start_index(
         try:
             return episode_ids.index(context.episode_id)
         except ValueError as error:
-            raise CatalogValidationError(
+            raise CatalogueValidationError(
                 "The episode is not part of the requested series."
             ) from error
     if not context.resume:
@@ -2008,10 +1968,10 @@ def _series_start_index(
 
 def _require_parent(session: Session, item: Zaisan, expected_kind: ZaisanKind) -> Zaisan:
     if item.parent_id is None:
-        raise CatalogValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+        raise CatalogueValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
     parent = _require(session, Zaisan, item.parent_id, "Library item")
     if parent.item_kind is not expected_kind:
-        raise CatalogValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+        raise CatalogueValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
     return parent
 
 
@@ -2021,7 +1981,7 @@ def _require_available_media(item: Zaisan, media_file: MediaFile) -> None:
         or item.availability is not AvailabilityState.AVAILABLE
         or media_file.availability is not AvailabilityState.AVAILABLE
     ):
-        raise CatalogNotFoundError("Media access token is unavailable.")
+        raise CatalogueNotFoundError("Media access token is unavailable.")
 
 
 def _playback_plan_entry(
@@ -2067,8 +2027,8 @@ def _series_title(session: Session, item: Zaisan) -> str | None:
 def _download_name(title: str, suffix: str) -> str:
     stem = "".join(character for character in title if character not in {"/", "\\", "\x00"}).strip()
     safe_stem = stem or "media"
-    normalized_suffix = suffix if suffix.startswith(".") and len(suffix) <= 16 else ""
-    return f"{safe_stem}{normalized_suffix}"
+    normalised_suffix = suffix if suffix.startswith(".") and len(suffix) <= 16 else ""
+    return f"{safe_stem}{normalised_suffix}"
 
 
 def _apply_item_filters(
@@ -2087,21 +2047,21 @@ def _apply_item_filters(
             CollectionKin.collection_id == filters.collection_id
         )
     if filters.search is not None:
-        normalized = filters.search.strip()
-        if not normalized:
-            raise CatalogValidationError("Search text must not be blank.")
-        statement = statement.where(Zaisan.title.ilike(f"%{normalized}%"))
+        normalised: str = filters.search.strip()
+        if not normalised:
+            raise CatalogueValidationError("Search text must not be blank.")
+        statement = statement.where(Zaisan.title.ilike(f"%{normalised}%"))
     for tag in filters.tags:
-        normalized_tag = tag.strip()
-        if not normalized_tag:
-            raise CatalogValidationError("Tags must not be blank.")
+        normalised_tag = tag.strip()
+        if not normalised_tag:
+            raise CatalogueValidationError("Tags must not be blank.")
         tag_values = func.json_each(Kura.default_tags).table_valued("value").alias("root_tag")
         statement = statement.where(
-            select(1).select_from(tag_values).where(tag_values.c.value == normalized_tag).exists()
+            select(1).select_from(tag_values).where(tag_values.c.value == normalised_tag).exists()
         )
     if filters.watched is not None:
         if filters.user_id is None:
-            raise CatalogValidationError(
+            raise CatalogueValidationError(
                 "A user_id filter is required with watched state filtering."
             )
         statement = statement.outerjoin(
@@ -2133,15 +2093,13 @@ def _recent_catalogue_identity(item: Zaisan, items_by_id: dict[int, Zaisan]) -> 
     if item.item_kind in {ZaisanKind.MOVIE, ZaisanKind.SERIES}:
         return item
     if item.item_kind is ZaisanKind.EPISODE:
-        season = items_by_id.get(item.parent_id) if item.parent_id is not None else None
-        series = (
-            items_by_id.get(season.parent_id)
-            if season is not None and season.parent_id is not None
-            else None
+        season: Zaisan | None = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        series: Zaisan | None = (
+            items_by_id.get(season.parent_id) if season is not None and season.parent_id is not None else None
         )
         return series if series is not None and series.item_kind is ZaisanKind.SERIES else None
     if item.item_kind is ZaisanKind.SPECIAL:
-        parent = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        parent: Zaisan | None = items_by_id.get(item.parent_id) if item.parent_id is not None else None
         if parent is None:
             return None
         if parent.item_kind is ZaisanKind.SERIES:
@@ -2357,14 +2315,14 @@ def _entry_detail(entry: KeiroEntry, item: LibraryItemSummary) -> WatchOrderEntr
 
 def _require_revision(actual: int, expected: int, label: str) -> None:
     if actual != expected:
-        raise CatalogConflictError(
+        raise CatalogueConflictError(
             f"{label} revision {actual} does not match expected revision {expected}."
         )
 
 
 def _require_generation_allowed(watch_order: Keiro) -> None:
     if watch_order.order_kind in {KeiroKind.CHRONOLOGICAL, KeiroKind.RECOMMENDED}:
-        raise CatalogValidationError(
+        raise CatalogueValidationError(
             "Chronological and recommended watch orders must remain manually curated."
         )
 
@@ -2379,7 +2337,7 @@ def _require_membership(
         )
     )
     if membership is None:
-        raise CatalogNotFoundError(
+        raise CatalogueNotFoundError(
             f"Library item {library_item_id} is not a member of collection {collection_id}."
         )
     return membership
@@ -2393,7 +2351,7 @@ def _require_watch_order_entry(session: Session, watch_order_id: int, entry_id: 
         )
     )
     if entry is None:
-        raise CatalogNotFoundError(f"Watch-order entry {entry_id} does not exist.")
+        raise CatalogueNotFoundError(f"Watch-order entry {entry_id} does not exist.")
     return entry
 
 
@@ -2435,7 +2393,7 @@ def _move_target_position(
     for index, candidate in enumerate(remaining):
         if candidate.id == anchor_id:
             return index if before_entry_id is not None else index + 1
-    raise CatalogValidationError("A watch-order entry cannot be used as its own move anchor.")
+    raise CatalogueValidationError("A watch-order entry cannot be used as its own move anchor.")
 
 
 def _shift_positions(
@@ -2612,7 +2570,7 @@ def _require[Model](
 ) -> Model:
     value = session.get(model, identifier)
     if value is None:
-        raise CatalogNotFoundError(f"{label} {identifier} does not exist.")
+        raise CatalogueNotFoundError(f"{label} {identifier} does not exist.")
     return value
 
 
@@ -2623,7 +2581,7 @@ def _count(session: Session, model: type[object]) -> int:
 def _validated_library_root_path(value: str) -> Path:
     path = Path(value).expanduser().resolve(strict=False)
     if path.is_file():
-        raise CatalogValidationError("A library root path must not be a file.")
+        raise CatalogueValidationError("A library root path must not be a file.")
     return path
 
 
@@ -2659,7 +2617,7 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
 
 def _page_limit(limit: int) -> int:
     if not 1 <= limit <= _MAX_PAGE_SIZE:
-        raise CatalogValidationError(f"The page limit must be between 1 and {_MAX_PAGE_SIZE}.")
+        raise CatalogueValidationError(f"The page limit must be between 1 and {_MAX_PAGE_SIZE}.")
     return limit
 
 
@@ -2680,36 +2638,36 @@ def _decode_cursor(cursor: str | None, expected_scope: str) -> dict[str, object]
         decoded = base64.urlsafe_b64decode(padded.encode()).decode()
         payload = cast(object, json.loads(decoded))
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-        raise CatalogValidationError("The cursor is invalid.") from error
+        raise CatalogueValidationError("The cursor is invalid.") from error
     if not isinstance(payload, dict):
-        raise CatalogValidationError("The cursor does not belong to this endpoint.")
+        raise CatalogueValidationError("The cursor does not belong to this endpoint.")
     payload_dict = cast(dict[str, object], payload)
     if payload_dict.get("scope") != expected_scope:
-        raise CatalogValidationError("The cursor does not belong to this endpoint.")
+        raise CatalogueValidationError("The cursor does not belong to this endpoint.")
     values = payload_dict.get("values")
     if not isinstance(values, dict):
-        raise CatalogValidationError("The cursor is invalid.")
+        raise CatalogueValidationError("The cursor is invalid.")
     return cast(dict[str, object], values)
 
 
 def _cursor_string(cursor: dict[str, object], field: str) -> str:
     value = cursor.get(field)
     if not isinstance(value, str):
-        raise CatalogValidationError("The cursor is invalid.")
+        raise CatalogueValidationError("The cursor is invalid.")
     return value
 
 
 def _cursor_int(cursor: dict[str, object], field: str) -> int:
     value = cursor.get(field)
     if not isinstance(value, int) or isinstance(value, bool):
-        raise CatalogValidationError("The cursor is invalid.")
+        raise CatalogueValidationError("The cursor is invalid.")
     return value
 
 
 def _cursor_float(cursor: dict[str, object], field: str) -> float:
     value = cursor.get(field)
     if not isinstance(value, (float, int)) or isinstance(value, bool):
-        raise CatalogValidationError("The cursor is invalid.")
+        raise CatalogueValidationError("The cursor is invalid.")
     return float(value)
 
 
@@ -2718,7 +2676,7 @@ def _cursor_datetime(cursor: dict[str, object], field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise CatalogValidationError("The cursor is invalid.") from error
+        raise CatalogueValidationError("The cursor is invalid.") from error
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed

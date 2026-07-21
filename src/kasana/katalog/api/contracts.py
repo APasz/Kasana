@@ -241,11 +241,11 @@ class CollectionCreate(APIModel):
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
+    def normalise_name(cls, value: str) -> str:
+        normalised = value.strip()
+        if not normalised:
             raise ValueError("Collection name must not be blank.")
-        return normalized
+        return normalised
 
 
 class CollectionUpdate(APIModel):
@@ -255,13 +255,13 @@ class CollectionUpdate(APIModel):
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str | None) -> str | None:
+    def normalise_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
-        if not normalized:
+        normalised = value.strip()
+        if not normalised:
             raise ValueError("Collection name must not be blank.")
-        return normalized
+        return normalised
 
     @model_validator(mode="after")
     def require_change(self) -> Self:
@@ -312,11 +312,11 @@ class WatchOrderCreate(APIModel):
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
+    def normalise_name(cls, value: str) -> str:
+        normalised = value.strip()
+        if not normalised:
             raise ValueError("Watch-order name must not be blank.")
-        return normalized
+        return normalised
 
 
 class WatchOrderUpdate(APIModel):
@@ -326,13 +326,13 @@ class WatchOrderUpdate(APIModel):
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str | None) -> str | None:
+    def normalise_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
-        if not normalized:
+        normalised = value.strip()
+        if not normalised:
             raise ValueError("Watch-order name must not be blank.")
-        return normalized
+        return normalised
 
     @model_validator(mode="after")
     def require_change(self) -> Self:

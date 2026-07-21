@@ -10,7 +10,7 @@ from kasana.katalog.metadata.scoring import (
     MatchThresholds,
     ScoredSearchResult,
     ScorePart,
-    normalize_title,
+    normalise_title,
     score_search_result,
     title_similarity,
 )
@@ -27,7 +27,7 @@ __all__ = [
     "ScorePart",
     "ScoredSearchResult",
     "SearchOutcome",
-    "normalize_title",
+    "normalise_title",
     "score_search_result",
     "title_similarity",
 ]

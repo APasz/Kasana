@@ -16,7 +16,7 @@ from kasana.kestrel.launch import create_launch_token, resolve_user_id
 from kasana.kestrel.player import KestrelPlaybackError
 
 
-class FakePlaybackPlanCatalog:
+class FakePlaybackPlanCatalogue:
     def __init__(self) -> None:
         self.request: PlaybackPlanRequest | None = None
 
@@ -32,16 +32,16 @@ class FakePlaybackPlanCatalog:
 
 
 async def test_create_launch_token_resolves_usernames_and_keeps_context_typed() -> None:
-    catalog = FakePlaybackPlanCatalog()
+    catalogue = FakePlaybackPlanCatalogue()
     context = StandalonePlaybackContext(item_id=42)
 
-    token = await create_launch_token(catalog, user="owner", context=context)
+    token = await create_launch_token(catalogue, user="owner", context=context)
 
     assert token == "l" * 43
-    assert catalog.request == PlaybackPlanRequest(user_id=3, context=context)
-    assert await resolve_user_id(catalog, "7") == 7
+    assert catalogue.request == PlaybackPlanRequest(user_id=3, context=context)
+    assert await resolve_user_id(catalogue, "7") == 7
 
 
 async def test_user_resolution_rejects_unknown_names() -> None:
     with pytest.raises(KestrelPlaybackError, match="does not exist"):
-        await resolve_user_id(FakePlaybackPlanCatalog(), "missing")
+        await resolve_user_id(FakePlaybackPlanCatalogue(), "missing")

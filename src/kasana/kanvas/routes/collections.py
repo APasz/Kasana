@@ -215,9 +215,9 @@ async def render_watch_order(
     """Render a virtualised order detail/editor with optional explicit generation review."""
 
     with page_shell(settings, "/collections", "Watch order"):
-        catalog = KanvasKatalogService(settings)
+        catalogue = KanvasKatalogService(settings)
         try:
-            editor = await catalog.watch_order_editor(watch_order_id)
+            editor = await catalogue.watch_order_editor(watch_order_id)
         except KatalogClientError as error:
             _collection_error(error)
             return
@@ -242,7 +242,7 @@ async def render_watch_order(
         if editable:
             _generation_controls(editor.id, editor.revision, preview_mode, apply_mode)
             preview = await _generation_preview(
-                catalog, editor.id, editor.revision, preview_mode, apply_mode
+                catalogue, editor.id, editor.revision, preview_mode, apply_mode
             )
             if preview is not None:
                 generation_preview(
@@ -295,13 +295,13 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
 def _watch_order_playback_actions(settings: Kanvas_Settings, watch_order_id: int) -> None:
     status = ui.label("").classes("k-action-status").props('aria-live="polite"')
     playback = KanvasPlaybackService(settings)
-    catalog = KanvasKatalogService(settings)
+    catalogue = KanvasKatalogService(settings)
 
     async def launch(*, resume: bool) -> None:
         status.set_text("Opening player…")
         try:
             start_item_id = (
-                await catalog.watch_order_resume_item_id(watch_order_id) if resume else None
+                await catalogue.watch_order_resume_item_id(watch_order_id) if resume else None
             )
             uri = await playback.create_watch_order_launch_uri(
                 watch_order_id, start_item_id=start_item_id
@@ -368,7 +368,7 @@ def _generation_controls(
 
 
 async def _generation_preview(
-    catalog: KanvasKatalogService,
+    catalogue: KanvasKatalogService,
     watch_order_id: int,
     revision: int,
     preview_mode: str | None,
@@ -382,7 +382,7 @@ async def _generation_preview(
     except ValueError:
         return None
     try:
-        return await catalog.generation_preview(
+        return await catalogue.generation_preview(
             watch_order_id, revision=revision, mode=mode, apply_mode=target
         )
     except KatalogClientError:

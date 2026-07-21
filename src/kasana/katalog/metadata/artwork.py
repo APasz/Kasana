@@ -320,9 +320,9 @@ def artwork_view(record: CachedArtwork, cache_path: Path) -> ArtworkCacheView:
 
 
 def validated_image_type(content_type: str | None, content: bytes) -> str:
-    normalized = (content_type or "").split(";", 1)[0].strip().casefold()
-    if normalized in _IMAGE_SIGNATURES and content.startswith(_IMAGE_SIGNATURES[normalized]):
-        return normalized
+    normalised: str = (content_type or "").split(";", 1)[0].strip().casefold()
+    if normalised in _IMAGE_SIGNATURES and content.startswith(_IMAGE_SIGNATURES[normalised]):
+        return normalised
     for image_type, signature in _IMAGE_SIGNATURES.items():
         if content.startswith(signature):
             return image_type

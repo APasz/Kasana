@@ -199,23 +199,23 @@ def _run_context_playback(
 
 
 async def _play(settings: KestrelSettings, launch_token: str) -> PlaybackResult:
-    async with KatalogClient(settings.katalog_url) as catalog:
-        agent = MpvPlayerAgent(settings, catalog)
+    async with KatalogClient(settings.katalog_url) as catalogue:
+        agent = MpvPlayerAgent(settings, catalogue)
         return await agent.play(launch_token)
 
 
 async def _plan_and_play(
     settings: KestrelSettings, user: str, playback_context: PlaybackPlanContext
 ) -> PlaybackResult:
-    async with KatalogClient(settings.katalog_url) as catalog:
-        launch_token = await create_launch_token(catalog, user=user, context=playback_context)
-        agent = MpvPlayerAgent(settings, catalog)
+    async with KatalogClient(settings.katalog_url) as catalogue:
+        launch_token = await create_launch_token(catalogue, user=user, context=playback_context)
+        agent = MpvPlayerAgent(settings, catalogue)
         return await agent.play(launch_token)
 
 
 async def _doctor(settings: KestrelSettings) -> DoctorReport:
-    async with KatalogClient(settings.katalog_url) as catalog:
-        return await run_doctor(settings, catalog)
+    async with KatalogClient(settings.katalog_url) as catalogue:
+        return await run_doctor(settings, catalogue)
 
 
 def main(arguments: Sequence[str] = ()) -> None:

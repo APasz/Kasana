@@ -79,18 +79,18 @@ class ScoredSearchResult:
         return self.has_external_identifier or (self.has_exact_title and self.has_year_confirmation)
 
 
-def normalize_title(value: str) -> str:
+def normalise_title(value: str) -> str:
     """Normalise human titles into stable tokens for deterministic comparison."""
 
     return " ".join(token for token in _TOKEN_PATTERN.sub(" ", value.casefold()).split() if token)
 
 
 def title_similarity(left: str, right: str) -> float:
-    normalized_left = normalize_title(left)
-    normalized_right = normalize_title(right)
-    if not normalized_left or not normalized_right:
+    normalised_left: str = normalise_title(left)
+    normalised_right: str = normalise_title(right)
+    if not normalised_left or not normalised_right:
         return 0.0
-    return SequenceMatcher[str](None, normalized_left, normalized_right, autojunk=False).ratio()
+    return SequenceMatcher[str](None, normalised_left, normalised_right, autojunk=False).ratio()
 
 
 def score_search_result(context: ItemMatchContext, result: SearchResult) -> ScoredSearchResult:
@@ -104,8 +104,8 @@ def score_search_result(context: ItemMatchContext, result: SearchResult) -> Scor
         )
         return ScoredSearchResult(result, 0.0, tuple(parts), False, False, False)
 
-    primary_similarity = title_similarity(context.title, result.title)
-    primary_contribution = 0.65 * primary_similarity
+    primary_similarity: float = title_similarity(context.title, result.title)
+    primary_contribution: float = 0.65 * primary_similarity
     parts.append(
         ScorePart(
             "title_similarity",
@@ -113,7 +113,7 @@ def score_search_result(context: ItemMatchContext, result: SearchResult) -> Scor
             f"Normalised title similarity is {primary_similarity:.3f}.",
         )
     )
-    exact_title = normalize_title(context.title) == normalize_title(result.title)
+    exact_title = normalise_title(context.title) == normalise_title(result.title)
 
     if result.original_title is not None:
         original_similarity = title_similarity(context.title, result.original_title)

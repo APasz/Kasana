@@ -49,15 +49,13 @@ def apply_scan(
 ) -> None:
     """Apply all successful root changes in one transaction."""
 
-    existing_by_id = {
+    existing_by_id: dict[int, MediaFile] = {
         file.id: file
         for file in session.scalars(
             select(MediaFile).where(MediaFile.id.in_([record.id for record in existing_files]))
         ).all()
     }
-    cache = item_cache(
-        session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all()
-    )
+    cache: ItemCache = item_cache(session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all())
     for plan in plans:
         if plan.action is PlanAction.MOVE:
             assert plan.existing_file_id is not None
@@ -65,16 +63,16 @@ def apply_scan(
                 existing_by_id[plan.existing_file_id], plan.snapshot, sidecars[plan.snapshot.path]
             )
             continue
-        probe_result = probe_results[plan.snapshot.path]
+        probe_result: ProbeResult = probe_results[plan.snapshot.path]
         if plan.action is PlanAction.CHANGE:
             assert plan.existing_file_id is not None
-            file = existing_by_id[plan.existing_file_id]
+            file: MediaFile = existing_by_id[plan.existing_file_id]
             if plan.parsed is not None:
-                file.library_item = materialize_item(session, root.id, cache, plan.parsed)
+                file.library_item = materialise_item(session, root.id, cache, plan.parsed)
             update_file_details(file, plan.snapshot, probe_result, sidecars[plan.snapshot.path])
             continue
         assert plan.parsed is not None
-        item = materialize_item(session, root.id, cache, plan.parsed)
+        item: Zaisan = materialise_item(session, root.id, cache, plan.parsed)
         session.add(media_file(item, plan.snapshot, probe_result, sidecars[plan.snapshot.path]))
     for file in existing_by_id.values():
         attachment = sidecars.get(Path(file.absolute_path))
@@ -84,9 +82,9 @@ def apply_scan(
         existing_by_id[file_id].availability = AvailabilityState.UNAVAILABLE
     for file_id in restored_ids:
         existing_by_id[file_id].availability = AvailabilityState.AVAILABLE
-    root_record = session.get(Kura, root.id)
+    root_record: Kura | None = session.get(Kura, root.id)
     if root_record is None:
-        msg = f"Library root {root.id} does not exist."
+        msg: str = f"Library root {root.id} does not exist."
         raise LookupError(msg)
     session.execute(delete(AuditIssue).where(AuditIssue.library_root_id == root.id))
     session.add_all(
@@ -139,9 +137,7 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
     return cache
 
 
-def materialize_item(
-    session: Session, root_id: int, cache: ItemCache, parsed: ParsedMedia
-) -> Zaisan:
+def materialise_item(session: Session, root_id: int, cache: ItemCache, parsed: ParsedMedia) -> Zaisan:
     match parsed.kind:
         case ParsedMediaKind.MOVIE:
             return get_movie(session, root_id, cache, parsed.title, parsed.release_year)

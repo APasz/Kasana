@@ -48,12 +48,12 @@ class KuraInput(BaseModel):
 
     @field_validator("path")
     @classmethod
-    def normalize_path(cls, value: Path) -> Path:
+    def normalise_path(cls, value: Path) -> Path:
         return value.expanduser().resolve(strict=False)
 
     @field_validator("default_tags")
     @classmethod
-    def normalize_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def normalise_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         tags = tuple(sorted({tag.strip() for tag in value if tag.strip()}))
         if len(tags) != len(value):
             msg = "Default tags must be non-empty after trimming."
@@ -72,12 +72,12 @@ class KuraUpdate(BaseModel):
 
     @field_validator("path")
     @classmethod
-    def normalize_path(cls, value: Path | None) -> Path | None:
+    def normalise_path(cls, value: Path | None) -> Path | None:
         return value.expanduser().resolve(strict=False) if value is not None else None
 
     @field_validator("default_tags")
     @classmethod
-    def normalize_tags(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    def normalise_tags(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
         if value is None:
             return None
         tags = tuple(sorted({tag.strip() for tag in value if tag.strip()}))
@@ -107,15 +107,15 @@ class UserInput(BaseModel):
 
     @field_validator("username")
     @classmethod
-    def normalize_username(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
+    def normalise_username(cls, value: str) -> str:
+        normalised = value.strip()
+        if not normalised:
             raise ValueError("Username must not be blank.")
-        return normalized
+        return normalised
 
     @field_validator("display_name")
     @classmethod
-    def normalize_display_name(cls, value: str | None) -> str | None:
+    def normalise_display_name(cls, value: str | None) -> str | None:
         return value.strip() or None if value is not None else None
 
 
@@ -255,14 +255,14 @@ class KatalogAdmin:
         year: int | None = None,
         kind: ZaisanKind | None = None,
     ) -> tuple[ItemView, ...]:
-        normalized_query = query.strip()
-        if not normalized_query:
+        normalised_query = query.strip()
+        if not normalised_query:
             raise AdminError("Item search text must not be blank.")
         if not 1 <= limit <= 100:
             raise AdminError("Item search limit must be between 1 and 100.")
         if year is not None and not 1 <= year <= 9999:
             raise AdminError("Item search year must be between 1 and 9999.")
-        needle = normalized_query.casefold()
+        needle = normalised_query.casefold()
 
         def load(session: Session) -> tuple[ItemView, ...]:
             statement = select(Zaisan).where(func.lower(Zaisan.title).contains(needle))

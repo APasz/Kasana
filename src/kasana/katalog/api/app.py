@@ -75,9 +75,9 @@ from kasana.katalog.api.contracts import (
 from kasana.katalog.api.jobs import JobConflictError, JobNotFoundError, JobRegistryFullError
 from kasana.katalog.api.runtime import KatalogApiRuntime, MetadataProviderConfigurationError
 from kasana.katalog.api.service import (
-    CatalogConflictError,
-    CatalogNotFoundError,
-    CatalogValidationError,
+    CatalogueConflictError,
+    CatalogueNotFoundError,
+    CatalogueValidationError,
     LibraryItemFilters,
 )
 from kasana.katalog.database import KatalogDatabase
@@ -1105,7 +1105,7 @@ async def optional_bearer_token(
         return None
     scheme, _, token = authorization.partition(" ")
     if scheme.casefold() != "bearer" or not token:
-        raise CatalogValidationError("Authorization must use a bearer token.")
+        raise CatalogueValidationError("Authorization must use a bearer token.")
     return token
 
 
@@ -1124,19 +1124,19 @@ async def _request_context(
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
-    @app.exception_handler(CatalogNotFoundError)
+    @app.exception_handler(CatalogueNotFoundError)
     @app.exception_handler(JobNotFoundError)
     async def not_found(request: Request, error: Exception) -> JSONResponse:
         return _error_response(request, status.HTTP_404_NOT_FOUND, "not_found", str(error))
 
-    @app.exception_handler(CatalogConflictError)
+    @app.exception_handler(CatalogueConflictError)
     @app.exception_handler(JobConflictError)
     async def conflict(
-        request: Request, error: CatalogConflictError | JobConflictError
+        request: Request, error: CatalogueConflictError | JobConflictError
     ) -> JSONResponse:
         return _error_response(request, status.HTTP_409_CONFLICT, "revision_conflict", str(error))
 
-    @app.exception_handler(CatalogValidationError)
+    @app.exception_handler(CatalogueValidationError)
     @app.exception_handler(ValueError)
     async def validation_error(request: Request, error: Exception) -> JSONResponse:
         return _error_response(

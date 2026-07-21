@@ -210,24 +210,24 @@ def add_totals(target: ScanTotals, source: ScanTotals) -> None:
 
 
 def sidecar_matches_video(sidecar: Path, video_stems: set[str]) -> bool:
-    stem = sidecar.stem.casefold()
-    normalized_video_stems = {video_stem.casefold() for video_stem in video_stems}
-    if stem in normalized_video_stems:
+    stem: str = sidecar.stem.casefold()
+    normalised_video_stems: set[str] = {video_stem.casefold() for video_stem in video_stems}
+    if stem in normalised_video_stems:
         return True
     if _LANGUAGE_SIDECAR_STEM_PATTERN.fullmatch(stem) is not None:
-        return len(normalized_video_stems) == 1
+        return len(normalised_video_stems) == 1
     prefix, separator, suffix = stem.rpartition(".")
-    return bool(separator and len(suffix) in {2, 3} and prefix in normalized_video_stems)
+    return bool(separator and len(suffix) in {2, 3} and prefix in normalised_video_stems)
 
 
 def _subtitle_candidates(sidecar: Path, files: Sequence[FileSnapshot]) -> tuple[FileSnapshot, ...]:
     """Return the exact media file(s) a subtitle filename can describe."""
 
-    normalized_stem = sidecar.stem.casefold()
-    exact = tuple(file for file in files if file.path.stem.casefold() == normalized_stem)
+    normalised_stem = sidecar.stem.casefold()
+    exact = tuple(file for file in files if file.path.stem.casefold() == normalised_stem)
     if exact:
         return exact
-    prefix, separator, suffix = normalized_stem.rpartition(".")
+    prefix, separator, suffix = normalised_stem.rpartition(".")
     language_match = tuple(
         file
         for file in files
@@ -235,7 +235,7 @@ def _subtitle_candidates(sidecar: Path, files: Sequence[FileSnapshot]) -> tuple[
     )
     if language_match:
         return language_match
-    if _LANGUAGE_SIDECAR_STEM_PATTERN.fullmatch(normalized_stem) is not None and len(files) == 1:
+    if _LANGUAGE_SIDECAR_STEM_PATTERN.fullmatch(normalised_stem) is not None and len(files) == 1:
         return tuple(files)
     return ()
 
