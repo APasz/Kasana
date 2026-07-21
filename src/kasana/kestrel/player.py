@@ -158,7 +158,7 @@ class MpvPlayerAgent:
                 await ipc.close()
             if process is not None:
                 await _stop_process(process)
-            await self._close_catalog_session(session.id)
+            await self._close_catalogue_session(session.id)
             if session_files is not None:
                 self._remove_session_files(session_files)
 
@@ -429,7 +429,7 @@ class MpvPlayerAgent:
             playlist.write("\n".join(lines))
             playlist.write("\n")
 
-    async def _close_catalog_session(self, session_id: str) -> None:
+    async def _close_catalogue_session(self, session_id: str) -> None:
         try:
             await self._catalogue.close_playback_session(session_id)
         except Exception:

@@ -29,7 +29,7 @@ from kasana.katalog.cli.app import (
     context_from,
     fail,
     watch_order_app,
-    with_catalog_queries,
+    with_catalogue_queries,
 )
 from kasana.katalog.cli.rendering import emit_model, emit_models
 
@@ -46,7 +46,7 @@ def list_collections(context: typer.Context) -> None:
     """List local collections."""
 
     cli = context_from(context)
-    collections = with_catalog_queries(
+    collections = with_catalogue_queries(
         cli, lambda queries: queries.list_collections(cursor=None, limit=100).items
     )
     emit_models(
@@ -66,7 +66,7 @@ def create_collection(
 
     cli = context_from(context)
     request = _validated(cli, lambda: CollectionCreate(name=name, overview=overview))
-    result = with_catalog_queries(cli, lambda queries: queries.create_collection(request))
+    result = with_catalogue_queries(cli, lambda queries: queries.create_collection(request))
     emit_model(
         cli, result, [f"Created collection {result.collection_id} at revision {result.revision}."]
     )
@@ -79,7 +79,7 @@ def show_collection(
     """Show collection details, bounded members, and watch orders."""
 
     cli = context_from(context)
-    result = with_catalog_queries(cli, lambda queries: queries.get_collection(collection_id))
+    result = with_catalogue_queries(cli, lambda queries: queries.get_collection(collection_id))
     emit_model(cli, result, [f"{result.id} r{result.revision} {result.name}"])
 
 
@@ -101,7 +101,7 @@ def update_collection(
     if overview is not None or clear_overview:
         values["overview"] = None if clear_overview else overview
     request = _validated(cli, lambda: CollectionUpdate(expected_revision=revision, **values))
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.update_collection(collection_id, request)
     )
     emit_model(
@@ -120,7 +120,7 @@ def delete_collection(
 
     cli = context_from(context)
     confirm(cli, f"Delete collection {collection_id}?", yes)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli,
         lambda queries: queries.delete_collection(collection_id, expected_revision=revision),
     )
@@ -146,7 +146,7 @@ def add_collection_item(
             relationship=relationship,
         ),
     )
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.add_collection_membership(collection_id, request)
     )
     emit_model(
@@ -164,7 +164,7 @@ def remove_collection_item(
     """Remove a collection member without changing existing watch orders."""
 
     cli = context_from(context)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli,
         lambda queries: queries.remove_collection_membership(
             collection_id, library_item_id, expected_revision=revision
@@ -182,7 +182,7 @@ def list_watch_orders(
     """List watch orders in one collection."""
 
     cli = context_from(context)
-    orders = with_catalog_queries(
+    orders = with_catalogue_queries(
         cli,
         lambda queries: (
             queries.list_collection_watch_orders(collection_id, cursor=None, limit=100).items
@@ -208,7 +208,7 @@ def create_watch_order(
             expected_collection_revision=collection_revision, name=name, kind=kind
         ),
     )
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.create_watch_order(collection_id, request)
     )
     emit_model(
@@ -223,7 +223,7 @@ def show_watch_order(
     """Show ordered playable entries."""
 
     cli = context_from(context)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.get_watch_order(watch_order_id, cursor=None, limit=100)
     )
     emit_model(
@@ -255,7 +255,7 @@ def update_watch_order(
         request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision, kind=kind))
     else:
         request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision))
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.update_watch_order(watch_order_id, request)
     )
     emit_model(
@@ -274,7 +274,7 @@ def delete_watch_order(
 
     cli = context_from(context)
     confirm(cli, f"Delete watch order {watch_order_id}?", yes)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli,
         lambda queries: queries.delete_watch_order(watch_order_id, expected_revision=revision),
     )
@@ -302,7 +302,7 @@ def add_watch_order_entry(
             insert_after_entry_id=after,
         ),
     )
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.add_watch_order_entry(watch_order_id, request)
     )
     emit_model(
@@ -330,7 +330,7 @@ def move_watch_order_entry(
             move_after_entry_id=after,
         ),
     )
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.move_watch_order_entry(watch_order_id, entry_id, request)
     )
     emit_model(cli, result, [f"Moved entry {entry_id} in watch order {watch_order_id}."])
@@ -346,7 +346,7 @@ def remove_watch_order_entry(
     """Remove one watch-order entry."""
 
     cli = context_from(context)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli,
         lambda queries: queries.remove_watch_order_entry(
             watch_order_id, entry_id, expected_revision=revision
@@ -380,7 +380,7 @@ def preview_generation(
 
     cli = context_from(context)
     request = _generation_request(cli, revision, mode, WatchOrderGenerationApplyMode.REPLACE)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.preview_watch_order_generation(watch_order_id, request)
     )
     emit_model(cli, result, [f"Generated {len(result.entries)} preview entries."])
@@ -400,7 +400,7 @@ def apply_generation(
 
     cli = context_from(context)
     request = _generation_request(cli, revision, mode, apply_mode)
-    result = with_catalog_queries(
+    result = with_catalogue_queries(
         cli, lambda queries: queries.apply_watch_order_generation(watch_order_id, request)
     )
     emit_model(cli, result, [f"Applied generation to watch order {result.watch_order_id}."])

@@ -94,7 +94,7 @@ class FakeHealthClient:
         return None
 
 
-async def test_doctor_reports_fake_catalog_mpv_and_ipc_capability(
+async def test_doctor_reports_fake_catalogue_mpv_and_ipc_capability(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
     executable = tmp_path / "mpv"

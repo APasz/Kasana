@@ -101,7 +101,7 @@ def with_administration[Result](
         database.close()
 
 
-def with_catalog_queries[Result](
+def with_catalogue_queries[Result](
     cli: CLIContext, operation: Callable[[KatalogQueryService], Result]
 ) -> Result:
     """Run revisioned collection commands against the local Katalog database."""

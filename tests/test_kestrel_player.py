@@ -425,7 +425,7 @@ async def test_player_fails_cleanly_when_mpv_never_offers_ipc(
     assert list((tmp_path / "runtime").iterdir()) == []
 
 
-async def test_player_rejects_invalid_tokens_and_hides_catalog_failures(tmp_path: Path) -> None:
+async def test_player_rejects_invalid_tokens_and_hides_catalogue_failures(tmp_path: Path) -> None:
     catalogue = FakeKatalogClient(_session((_entry(0),)))
     agent = MpvPlayerAgent(_settings(tmp_path), catalogue)
 
