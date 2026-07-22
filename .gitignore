@@ -22,3 +22,4 @@ configs/users/*
 !configs/users/.gitkeep
 .cache/*
 configs/*
+.local/*

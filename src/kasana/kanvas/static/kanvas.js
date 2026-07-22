@@ -3,6 +3,9 @@
 
   const MAX_MOUNTED_POSTERS = 144;
   const GRID_ROW_TOP_TOLERANCE_PX = 1;
+  const PROFILE_ACCENT_DEFAULT = '#e8e8e8';
+  const PROFILE_PIN_MIN_LENGTH = 2;
+  const PROFILE_PIN_MAX_LENGTH = 16;
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
@@ -17,6 +20,146 @@
   const jobDetail = (job, counters) => (job.status === 'failed' || job.status === 'interrupted')
     ? (job.failure || job.message || counters || '—')
     : (counters || job.message || job.failure || '—');
+  const normalisePlaceholder = (value, title) => {
+    const lines = value && typeof value === 'object' && Array.isArray(value.lines)
+      ? value.lines
+      : [title];
+    const footer = value && typeof value === 'object' && typeof value.footer === 'string'
+      ? value.footer.trim().slice(0, 80)
+      : null;
+    const safeLines = lines
+      .filter((line) => typeof line === 'string' && line.trim())
+      .slice(0, 3)
+      .map((line) => line.trim().slice(0, 160));
+    return {lines: safeLines.length ? safeLines : [title], footer: footer || null};
+  };
+  const normaliseHexColour = (value) => (
+    typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) ? value : null
+  );
+  const profileMenuMarkup = (name, accentColour) => `
+    <button type="button" class="k-profile-switcher" aria-haspopup="dialog" aria-label="Open profile settings" title="Profile settings">${escapeHtml(name)}</button>
+    <dialog class="k-kanvas-dialog k-profile-dialog">
+      <div class="k-picker k-profile-form" role="document">
+        <div class="k-picker__header">
+          <strong>Profile</strong>
+          <button type="button" class="k-button" data-profile-close>Close</button>
+        </div>
+        <form data-profile-form>
+          <label class="k-control-shell k-input-shell">
+            <span class="k-sr-only">Profile name</span>
+            <input class="k-input" name="displayName" value="${escapeHtml(name)}" aria-label="Profile name" placeholder="Profile name">
+          </label>
+          <label class="k-control-shell k-input-shell">
+            <span class="k-sr-only">New PIN</span>
+            <input class="k-input" name="pin" type="text" autocomplete="off" inputmode="numeric" minlength="${PROFILE_PIN_MIN_LENGTH}" maxlength="${PROFILE_PIN_MAX_LENGTH}" aria-label="New PIN" placeholder="New PIN">
+          </label>
+          <label class="k-colour-field">
+            <span>Accent colour</span>
+            <input name="accentColour" type="color" value="${escapeHtml(accentColour)}" aria-label="Accent colour">
+          </label>
+          <div class="k-picker__status" data-profile-status aria-live="polite"></div>
+          <div class="k-action-row">
+            <button type="submit" class="k-button k-button--primary" data-profile-save>Save changes</button>
+            <button type="button" class="k-button" data-profile-cancel>Cancel</button>
+          </div>
+        </form>
+        <form action="/profiles/sign-out" method="post" class="k-profile-logout">
+          <button type="submit" class="k-button">Log out</button>
+        </form>
+      </div>
+    </dialog>`;
+
+  class KanvasProfileMenu extends HTMLElement {
+    constructor() {
+      super();
+      this.dialog = null;
+      this.status = null;
+      this.saveButton = null;
+    }
+
+    connectedCallback() {
+      const name = this.profileName();
+      const accentColour = normaliseHexColour(this.getAttribute('data-accent-colour')) || PROFILE_ACCENT_DEFAULT;
+      this.innerHTML = profileMenuMarkup(name, accentColour);
+      this.dialog = this.querySelector('dialog');
+      this.status = this.querySelector('[data-profile-status]');
+      this.saveButton = this.querySelector('[data-profile-save]');
+      const closeDialog = () => this.dialog?.close();
+      this.querySelector('.k-profile-switcher')?.addEventListener('click', () => this.open());
+      this.querySelector('[data-profile-close]')?.addEventListener('click', closeDialog);
+      this.querySelector('[data-profile-cancel]')?.addEventListener('click', closeDialog);
+      this.querySelector('[data-profile-form]')?.addEventListener('submit', (event) => this.save(event));
+    }
+
+    profileName() {
+      const name = this.getAttribute('data-name');
+      return typeof name === 'string' && name.trim() ? name.trim() : 'Profile';
+    }
+
+    open() {
+      if (!this.dialog) return;
+      if (!this.dialog.open) this.dialog.showModal();
+      this.querySelector('input[name="displayName"]')?.focus();
+    }
+
+    setStatus(message, error = false) {
+      if (!this.status) return;
+      this.status.textContent = message;
+      this.status.classList.toggle('k-picker__status--error', error);
+    }
+
+    async save(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      if (!(form instanceof HTMLFormElement)) return;
+      const data = new FormData(form);
+      const accentColour = normaliseHexColour(String(data.get('accentColour') || ''));
+      const pin = String(data.get('pin') || '').trim();
+      if (!accentColour) {
+        this.setStatus('Choose a valid accent colour.', true);
+        return;
+      }
+      if (pin && (pin.length < PROFILE_PIN_MIN_LENGTH || pin.length > PROFILE_PIN_MAX_LENGTH)) {
+        this.setStatus(`PIN must be ${PROFILE_PIN_MIN_LENGTH}-${PROFILE_PIN_MAX_LENGTH} characters.`, true);
+        return;
+      }
+      const profilePayload = {displayName: String(data.get('displayName') || '').trim(), accent_colour: accentColour};
+      if (pin) profilePayload.pin = pin;
+      this.saveButton?.setAttribute('disabled', 'disabled');
+      this.setStatus('Saving...');
+      try {
+        const profile = await this.patchJson('/profiles/current', profilePayload);
+        const nextName = profile.display_name || profile.username || profilePayload.displayName || this.profileName();
+        this.setAttribute('data-name', nextName);
+        const button = this.querySelector('.k-profile-switcher');
+        if (button instanceof HTMLButtonElement) button.textContent = nextName;
+        const savedColour = normaliseHexColour(profile.accent_colour) || accentColour;
+        this.setAttribute('data-accent-colour', savedColour);
+        document.documentElement.style.setProperty('--k-accent', savedColour);
+        const pinInput = form.elements.namedItem('pin');
+        if (pinInput instanceof HTMLInputElement) pinInput.value = '';
+        this.setStatus('Saved.');
+      } catch (error) {
+        this.setStatus(error?.message || 'Changes could not be saved.', true);
+      } finally {
+        this.saveButton?.removeAttribute('disabled');
+      }
+    }
+
+    async patchJson(url, payload) {
+      const response = await fetch(url, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'Changes could not be saved.');
+      return body;
+    }
+  }
+
+  if (!customElements.get('kanvas-profile-menu')) customElements.define('kanvas-profile-menu', KanvasProfileMenu);
 
   class LibraryLoadError extends Error {
     constructor(category, {status = null, requestId = null, cause = null} = {}) {
@@ -36,6 +179,7 @@
     if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
+    const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
     if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
@@ -44,6 +188,7 @@
       title: poster.title,
       href: poster.href,
       posterUrl: poster.posterUrl ?? null,
+      placeholder,
       subtitle: poster.subtitle ?? null,
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
@@ -51,22 +196,18 @@
     };
   };
 
-  const fallbackGrapheme = (title) => {
-    const graphemes = typeof Intl.Segmenter === 'function'
-      ? Array.from(new Intl.Segmenter(undefined, {granularity: 'grapheme'}).segment(title), ({segment}) => segment)
-      : Array.from(title);
-    const useful = graphemes.find((grapheme) => /[\p{L}\p{N}]/u.test(grapheme));
-    return useful ? useful.toLocaleUpperCase() : '•';
-  };
-
-  const fallbackPattern = (id) => ((id * 2654435761) >>> 0) % 4;
-
   const posterMarkup = (poster) => {
     const progress = poster.progressPercent == null ? '' :
       `<span class="k-progress" aria-label="Playback progress"><span class="k-progress__value" style="--k-progress:${poster.progressPercent}%"></span></span>`;
+    const placeholderLines = poster.placeholder.lines
+      .map((line) => `<span class="k-poster__fallback-line">${escapeHtml(line)}</span>`)
+      .join('');
+    const placeholderFooter = poster.placeholder.footer
+      ? `<span class="k-poster__fallback-footer">${escapeHtml(poster.placeholder.footer)}</span>`
+      : '';
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
-      : `<span class="k-poster__fallback k-poster__fallback--${fallbackPattern(poster.id)}" aria-hidden="true">${escapeHtml(fallbackGrapheme(poster.title))}</span>`;
+      : `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
     const watched = poster.state === 'watched' ? '<span class="k-poster__watched">Watched</span>' : '';
     const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
@@ -1031,12 +1172,46 @@
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
   if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
 
+  const ITEM_EDITOR_KINDS = ['movie', 'series', 'season', 'episode', 'special', 'extra'];
+  const ITEM_EDITOR_KIND_LABELS = {
+    movie: 'Movie',
+    series: 'Series',
+    season: 'Season',
+    episode: 'Episode',
+    special: 'Special',
+    extra: 'Extra'
+  };
+  const ITEM_EDITOR_LOCK_FIELDS = [
+    {value: 'title', label: 'Title', kinds: ITEM_EDITOR_KINDS},
+    {value: 'sort_title', label: 'Sort title', kinds: ITEM_EDITOR_KINDS},
+    {value: 'release_date', label: 'Release date', kinds: ['movie', 'series', 'season', 'episode']},
+    {value: 'overview', label: 'Overview', kinds: ITEM_EDITOR_KINDS},
+    {value: 'season_number', label: 'Season number', kinds: ['season', 'episode']},
+    {value: 'episode_number', label: 'Episode number', kinds: ['episode']}
+  ];
+  const ITEM_EDITOR_NUMBER_FIELDS = {
+    season: [{name: 'seasonNumber', value: 'season_number', placeholder: 'Season', label: 'Season number'}],
+    episode: [
+      {name: 'seasonNumber', value: 'season_number', placeholder: 'Season', label: 'Season number'},
+      {name: 'episodeNumber', value: 'episode_number', placeholder: 'Episode', label: 'Episode number'}
+    ]
+  };
+  const ITEM_EDITOR_PARENT_KINDS = new Set(['season', 'episode', 'special', 'extra']);
+
+  const itemEditorKind = (value) => ITEM_EDITOR_KINDS.includes(value) ? value : 'movie';
+  const itemEditorRelevantLocks = (kind) => ITEM_EDITOR_LOCK_FIELDS.filter((field) => field.kinds.includes(kind));
+  const itemEditorNumberFields = (kind) => ITEM_EDITOR_NUMBER_FIELDS[kind] || [];
+  const itemEditorItemValue = (item, value) => item?.[value] ?? '';
+
   class KanvasItemEditor extends HTMLElement {
     constructor() {
       super();
       this.dialog = null;
       this.status = null;
       this.controller = null;
+      this.initialLocks = new Set();
+      this.initialSelectedArtwork = new Map();
+      this.currentItem = null;
     }
 
     connectedCallback() {
@@ -1071,11 +1246,41 @@
     render(item, audit) {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
+      this.currentItem = item;
       const selected = new Map((Array.isArray(item.selected_artwork) ? item.selected_artwork : []).map((entry) => [entry.kind, entry.artwork_id]));
+      this.initialSelectedArtwork = selected;
       const locks = new Set(Array.isArray(item.locked_metadata_fields) ? item.locked_metadata_fields : []);
+      this.initialLocks = locks;
       const artworks = Array.isArray(item.artwork) ? item.artwork : [];
       const artworkKinds = [...new Set(artworks.map((artwork) => artwork.kind))];
-      const artworkRows = artworks.length ? artworkKinds.map((kind) => {
+      const artworkRows = this.renderArtworkRows(artworks, artworkKinds, selected);
+      const auditRows = audit.length ? audit.map((entry) => `<li>${escapeHtml(entry.actor || 'administrator')} · ${escapeHtml((entry.changed_fields || []).join(', ') || 'updated')} · ${escapeHtml(entry.occurred_at || '')}</li>`).join('') : '<li>No local edits have been recorded.</li>';
+      const kind = itemEditorKind(item.kind);
+      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit details</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><div class="k-item-editor__summary"><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span><span>${escapeHtml(item.title || `Item ${item.id || ''}`)}</span></div><section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><details><summary>Metadata locks</summary><div class="k-item-editor__checks" data-item-editor-locks>${this.renderLockRows(kind, locks)}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></details><details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
+      this.status = content.querySelector('[data-item-editor-status]');
+      content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
+      content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
+      content.querySelector('[data-item-editor-kind]')?.addEventListener('change', (event) => this.updateKindFields(event.currentTarget?.value));
+    }
+
+    renderKindFields(kind, item) {
+      const fields = itemEditorNumberFields(kind);
+      if (!fields.length) return '';
+      return `<div class="k-item-editor__grid">${fields.map((field) => `<label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="${field.name}" value="${itemEditorItemValue(item, field.value)}" placeholder="${field.placeholder}" aria-label="${field.label}"></label>`).join('')}</div>`;
+    }
+
+    renderHierarchyFields(kind, item) {
+      if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) return '<span class="k-item-editor__muted">Top-level item</span>';
+      return `<label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" name="parentId" value="${item.parent_id || ''}" placeholder="Parent ID" aria-label="Parent item ID"></label>`;
+    }
+
+    renderLockRows(kind, locks) {
+      return itemEditorRelevantLocks(kind).map((field) => `<label class="k-check"><input type="checkbox" name="lock" value="${field.value}"${locks.has(field.value) ? ' checked' : ''}> ${field.label}</label>`).join('');
+    }
+
+    renderArtworkRows(artworks, artworkKinds, selected) {
+      if (!artworks.length) return '<p class="k-quiet-copy">No cached artwork is available to select.</p>';
+      return artworkKinds.map((kind) => {
         const automatic = `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(kind)}" value="" data-artwork-kind="${escapeHtml(kind)}"${selected.has(kind) ? '' : ' checked'}><span>Automatic ${escapeHtml(kind)}</span></label>`;
         const choices = artworks.filter((artwork) => artwork.kind === kind).map((artwork) => {
           const artworkUrl = typeof artwork.url === 'string'
@@ -1085,15 +1290,19 @@
           return `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(artwork.kind)}" value="${artwork.id}" data-artwork-kind="${escapeHtml(artwork.kind)}"${selected.get(artwork.kind) === artwork.id ? ' checked' : ''}><span>${image}${escapeHtml(artwork.kind)} #${artwork.id}</span></label>`;
         }).join('');
         return automatic + choices;
-      }).join('') : '<p class="k-quiet-copy">No cached artwork is available to select.</p>';
-      const metadataFields = [['title', 'Title'], ['sort_title', 'Sort title'], ['release_date', 'Release date'], ['overview', 'Overview'], ['season_number', 'Season number'], ['episode_number', 'Episode number']];
-      const lockRows = metadataFields.map(([value, label]) => `<label class="k-check"><input type="checkbox" name="lock" value="${value}"${locks.has(value) ? ' checked' : ''}> ${label}</label>`).join('');
-      const auditRows = audit.length ? audit.map((entry) => `<li>${escapeHtml(entry.actor || 'administrator')} · ${escapeHtml((entry.changed_fields || []).join(', ') || 'updated')} · ${escapeHtml(entry.occurred_at || '')}</li>`).join('') : '<li>No local edits have been recorded.</li>';
-      const kinds = ['movie', 'series', 'season', 'episode', 'special', 'extra'];
-      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit catalogue metadata</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><p class="k-quiet-copy">Edits affect catalogue metadata only. They never rename, move, or delete media files.</p><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label><div class="k-action-row"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label><div class="k-action-row"><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="seasonNumber" value="${item.season_number ?? ''}" placeholder="Season" aria-label="Season number"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="episodeNumber" value="${item.episode_number ?? ''}" placeholder="Episode" aria-label="Episode number"></label></div><details><summary>Metadata locks</summary><div class="k-item-editor__checks">${lockRows}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><p class="k-quiet-copy">Changing kind or parent is validated before it is saved. Existing media files are preserved.</p><div class="k-action-row"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind">${kinds.map((kind) => `<option value="${kind}"${kind === item.kind ? ' selected' : ''}>${kind}</option>`).join('')}</select></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" name="parentId" value="${item.parent_id || ''}" placeholder="Parent ID" aria-label="Parent item ID"></label></div></details><details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
-      this.status = content.querySelector('[data-item-editor-status]');
-      content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
-      content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
+      }).join('');
+    }
+
+    updateKindFields(value) {
+      const kind = itemEditorKind(value);
+      const content = this.querySelector('[data-item-editor-content]');
+      const item = this.currentItem || {};
+      const fields = content?.querySelector('[data-item-editor-kind-fields]');
+      const locks = content?.querySelector('[data-item-editor-locks]');
+      const hierarchy = content?.querySelector('[data-item-editor-hierarchy-fields]');
+      if (fields) fields.innerHTML = this.renderKindFields(kind, item);
+      if (locks) locks.innerHTML = this.renderLockRows(kind, this.initialLocks);
+      if (hierarchy) hierarchy.innerHTML = this.renderHierarchyFields(kind, item);
     }
 
     async submit(event) {
@@ -1101,27 +1310,7 @@
       const form = event.currentTarget;
       if (!(form instanceof HTMLFormElement) || !this.status) return;
       const values = new FormData(form);
-      const toNullableNumber = (name) => {
-        const raw = String(values.get(name) || '').trim();
-        return raw ? Number(raw) : null;
-      };
-      const selectedArtwork = Array.from(form.querySelectorAll('[data-artwork-kind]:checked'))
-        .filter((input) => input.value)
-        .map((input) => ({kind: input.dataset.artworkKind, artworkId: Number(input.value)}));
-      const payload = {
-        title: String(values.get('title') || ''),
-        sortTitle: String(values.get('sortTitle') || ''),
-        overview: String(values.get('overview') || '').trim() || null,
-        releaseDate: String(values.get('releaseDate') || '').trim() || null,
-        releaseYear: toNullableNumber('releaseYear'),
-        tags: String(values.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean),
-        seasonNumber: toNullableNumber('seasonNumber'),
-        episodeNumber: toNullableNumber('episodeNumber'),
-        lockedMetadataFields: Array.from(form.querySelectorAll('input[name="lock"]:checked')).map((input) => input.value),
-        selectedArtwork,
-        kind: String(values.get('kind') || ''),
-        parentId: toNullableNumber('parentId')
-      };
+      const payload = this.payloadFromForm(form, values);
       const button = form.querySelector('button[type="submit"]');
       if (button) button.disabled = true;
       this.status.textContent = 'Saving metadata…';
@@ -1137,6 +1326,47 @@
         this.status.textContent = error?.message || 'Item edit could not be applied.';
         if (button) button.disabled = false;
       }
+    }
+
+    payloadFromForm(form, values) {
+      const toNullableNumber = (name) => {
+        if (!values.has(name)) return undefined;
+        const raw = String(values.get(name) || '').trim();
+        return raw ? Number(raw) : null;
+      };
+      const selectedArtwork = Array.from(form.querySelectorAll('[data-artwork-kind]:checked'))
+        .filter((input) => input.value)
+        .map((input) => ({kind: input.dataset.artworkKind, artworkId: Number(input.value)}));
+      const visibleArtworkKinds = new Set(Array.from(form.querySelectorAll('[data-artwork-kind]')).map((input) => input.dataset.artworkKind));
+      for (const [kind, artworkId] of this.initialSelectedArtwork.entries()) {
+        if (!visibleArtworkKinds.has(kind)) selectedArtwork.push({kind, artworkId});
+      }
+      const visibleLockValues = new Set(Array.from(form.querySelectorAll('input[name="lock"]')).map((input) => input.value));
+      const lockedMetadataFields = Array.from(form.querySelectorAll('input[name="lock"]:checked')).map((input) => input.value);
+      for (const lock of this.initialLocks) {
+        if (!visibleLockValues.has(lock)) lockedMetadataFields.push(lock);
+      }
+      const payload = {
+        title: String(values.get('title') || ''),
+        sortTitle: String(values.get('sortTitle') || ''),
+        overview: String(values.get('overview') || '').trim() || null,
+        releaseDate: String(values.get('releaseDate') || '').trim() || null,
+        releaseYear: toNullableNumber('releaseYear'),
+        tags: String(values.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean),
+        lockedMetadataFields,
+        kind: String(values.get('kind') || '')
+      };
+      const kind = itemEditorKind(payload.kind);
+      const current = this.currentItem || {};
+      const numberNames = new Set(itemEditorNumberFields(kind).map((field) => field.name));
+      if (values.has('seasonNumber')) payload.seasonNumber = toNullableNumber('seasonNumber');
+      else if (!numberNames.has('seasonNumber') && current.season_number !== null && current.season_number !== undefined) payload.seasonNumber = null;
+      if (values.has('episodeNumber')) payload.episodeNumber = toNullableNumber('episodeNumber');
+      else if (!numberNames.has('episodeNumber') && current.episode_number !== null && current.episode_number !== undefined) payload.episodeNumber = null;
+      if (values.has('parentId')) payload.parentId = toNullableNumber('parentId');
+      else if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) payload.parentId = null;
+      if (visibleArtworkKinds.size) payload.selectedArtwork = selectedArtwork;
+      return payload;
     }
   }
 

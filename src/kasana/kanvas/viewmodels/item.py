@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from kasana.kanvas.viewmodels.library import PosterView
+from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterView
 
 
 class ItemDetailView(BaseModel):
@@ -18,9 +20,13 @@ class ItemDetailView(BaseModel):
     year: int | None = Field(default=None, ge=1, le=9999)
     overview: str | None = Field(default=None, max_length=20_000)
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    poster_placeholder: PlaceholderArtView = Field(alias="posterPlaceholder")
     backdrop_url: str | None = Field(default=None, alias="backdropUrl")
     runtime_label: str | None = Field(default=None, max_length=100, alias="runtimeLabel")
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     watched: bool = False
     available: bool
+    child_section_title: Literal["Episodes", "Seasons"] = Field(
+        default="Episodes", alias="childSectionTitle"
+    )
     children: tuple[PosterView, ...] = ()

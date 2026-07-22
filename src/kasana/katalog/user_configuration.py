@@ -12,6 +12,12 @@ from sqlalchemy.orm import Session
 
 from kasana.configuration import user_configuration_directory
 from kasana.katalog.models import User, UserRole
+from kasana.shared.profile_rules import (
+    PROFILE_ACCENT_COLOUR_DEFAULT,
+    PROFILE_ACCENT_COLOUR_PATTERN,
+    PROFILE_PIN_MAX_LENGTH,
+    PROFILE_PIN_MIN_LENGTH,
+)
 
 _CONFIGURATION_FILENAME = "configuration.json"
 
@@ -32,7 +38,12 @@ class UserConfiguration(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     level: UserRole = UserRole.USER
     state: UserConfigurationState = UserConfigurationState.ACTIVE
-    pin_hash: str | None = Field(default=None, min_length=1)
+    pin: str | None = Field(
+        default=None, min_length=PROFILE_PIN_MIN_LENGTH, max_length=PROFILE_PIN_MAX_LENGTH
+    )
+    accent_colour: str = Field(
+        default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
+    )
 
     @field_validator("username", "name")
     @classmethod
@@ -80,7 +91,7 @@ class UserConfigurationStore:
                 if user.is_disabled
                 else UserConfigurationState.ACTIVE
             ),
-            pin_hash=user.pin_hash,
+            pin=user.pin,
         )
         self.save(user.id, configuration)
         return configuration
@@ -131,7 +142,7 @@ class UserConfigurationStore:
             user.display_name = configuration.name
             user.role = UserRole(configuration.level.value)
             user.is_disabled = configuration.state is UserConfigurationState.DISABLED
-            user.pin_hash = configuration.pin_hash
+            user.pin = configuration.pin
         session.flush()
 
     def _configuration_path(self, user_id: int) -> Path:

@@ -43,10 +43,10 @@ def _profile_form(user: UserSummary) -> None:
         if user.pin_required:
             text_input(
                 name="pin",
-                input_type="password",
+                input_type="text",
                 placeholder="PIN",
                 aria_label=f"PIN for {profile_display_name(user)}",
-            )
+            ).props("minlength='2' maxlength='16' autocomplete='off' inputmode='numeric'")
         action_button("Select", button_type=ButtonType.SUBMIT, primary=True)
 
 
@@ -73,8 +73,8 @@ def _bootstrap_form() -> None:
         )
         text_input(
             name="pin",
-            input_type="password",
+            input_type="text",
             placeholder="PIN (optional)",
             aria_label="Optional PIN",
-        )
+        ).props("minlength='2' maxlength='16' autocomplete='off' inputmode='numeric'")
         action_button("Create owner profile", button_type=ButtonType.SUBMIT, primary=True)

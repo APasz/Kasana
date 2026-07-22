@@ -47,6 +47,7 @@ def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
               content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';
                        script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self';">
         <link rel="stylesheet" href="/_kanvas/kanvas.css?v={asset_versions.css}">
+        <link rel="stylesheet" href="/_kanvas/theme.css">
         <script defer src="/_kanvas/kanvas.js?v={asset_versions.javascript}"></script>
         """
 
@@ -55,7 +56,6 @@ def add_kanvas_head(settings: Kanvas_Settings, asset_versions: KanvasAssetVersio
     """Attach versioned local assets and small page-level policy metadata once."""
 
     ui.add_head_html(kanvas_head_html(asset_versions), shared=True)
-    ui.add_head_html(f"<style>:root{{--k-accent:{settings.accent_colour};}}</style>", shared=True)
 
 
 @contextmanager
@@ -68,6 +68,6 @@ def page_shell(
     """Create the same native shell for every first-pass Kanvas page."""
 
     with ui.element("div").classes("k-app"):
-        primary_navigation(active_route, profile)
+        primary_navigation(active_route, profile, settings)
         with ui.element("main").classes("k-main").props(f'aria-label="{title}"'):
             yield

@@ -1,16 +1,26 @@
 :root {
-    --k-bg: #000000;
-    --k-surface-1: #080808;
-    --k-surface-2: #101010;
-    --k-surface-active: #181818;
-    --k-border-subtle: #1d1d1d;
-    --k-border-strong: #383838;
-    --k-text: #f1f1f1;
-    --k-text-muted: #b3b3b3;
-    --k-text-faint: #666666;
+    --k-bg: #030303;
+    --k-surface-1: #0b0c0c;
+    --k-surface-2: #121414;
+    --k-surface-active: #1b1d1c;
+    --k-border-subtle: #242626;
+    --k-border-strong: #414442;
+    --k-text: #f2f4f3;
+    --k-text-muted: #b6beba;
+    --k-text-faint: #737a76;
     --k-accent: #e8e8e8;
-    --k-danger: #d85f5f;
-    --k-success: #68a875;
+    --k-accent-contrast: #050505;
+    --k-danger: #e46d6d;
+    --k-success: #76b985;
+    --k-scrim-soft: rgb(0 0 0 / 52%);
+    --k-scrim: rgb(0 0 0 / 64%);
+    --k-scrim-strong: rgb(0 0 0 / 78%);
+    --k-nav-backdrop: rgb(3 3 3 / 94%);
+    --k-highlight-soft: rgb(255 255 255 / 7%);
+    --k-poster-placeholder-bg: #151817;
+    --k-poster-placeholder-highlight: rgb(255 255 255 / 5%);
+    --k-poster-placeholder-border: rgb(255 255 255 / 5%);
+    --k-poster-placeholder-footer-bg: rgb(3 3 3 / 68%);
     --k-radius: 2px;
     --k-motion-fast: 120ms;
     --k-motion-normal: 180ms;
@@ -196,25 +206,68 @@ kanvas-poster {
     transition: filter var(--k-motion-fast), opacity var(--k-motion-fast);
 }
 
-.k-poster__fallback,
-.k-item__fallback {
+.k-poster__fallback {
+    position: relative;
     display: grid;
     width: 100%;
     height: 100%;
-    place-items: center;
-    color: var(--k-text-faint);
-    font-size: 2rem;
-    font-weight: 650;
+    align-content: center;
+    justify-items: center;
+    gap: 0.24rem;
+    padding: 13% 13% calc(13% + 1.4rem);
+    overflow: hidden;
+    background:
+            linear-gradient(180deg, var(--k-poster-placeholder-highlight), transparent 36%),
+            var(--k-poster-placeholder-bg);
+    color: var(--k-text);
+    font-size: 0.86rem;
+    font-weight: 720;
+    line-height: 1.08;
+    text-align: center;
 }
 
-.k-poster__fallback {
-    background-color: var(--k-surface-2);
-    background-image: linear-gradient(135deg, transparent 42%, rgb(255 255 255 / 3%) 42%, rgb(255 255 255 / 3%) 58%, transparent 58%);
+.k-poster__fallback::before {
+    position: absolute;
+    inset: 10px;
+    border: 1px solid var(--k-poster-placeholder-border);
+    content: "";
+    pointer-events: none;
 }
 
-.k-poster__fallback--1 { background-image: linear-gradient(45deg, transparent 42%, rgb(255 255 255 / 3%) 42%, rgb(255 255 255 / 3%) 58%, transparent 58%); }
-.k-poster__fallback--2 { background-image: radial-gradient(circle at 22% 24%, rgb(255 255 255 / 4%) 0 1px, transparent 2px), radial-gradient(circle at 78% 76%, rgb(255 255 255 / 3%) 0 1px, transparent 2px); }
-.k-poster__fallback--3 { background-image: linear-gradient(0deg, transparent 49%, rgb(255 255 255 / 3%) 50%, transparent 51%), linear-gradient(90deg, transparent 49%, rgb(255 255 255 / 3%) 50%, transparent 51%); }
+.k-poster__fallback-line {
+    display: -webkit-box;
+    max-width: 100%;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+}
+
+.k-poster__fallback-line + .k-poster__fallback-line {
+    color: var(--k-text-muted);
+    font-size: 0.76rem;
+    font-weight: 620;
+}
+
+.k-poster__fallback-footer {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: block;
+    min-height: 1.35rem;
+    overflow: hidden;
+    padding: 0.28rem 0.5rem;
+    background: var(--k-poster-placeholder-footer-bg);
+    color: var(--k-text-muted);
+    font-size: 0.64rem;
+    font-weight: 720;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
 
 .k-poster__meta {
     display: block;
@@ -252,7 +305,7 @@ kanvas-poster {
     bottom: 0;
     left: 0;
     height: 2px;
-    background: rgb(0 0 0 / 64%);
+    background: var(--k-scrim);
 }
 
 .k-progress__value {
@@ -384,10 +437,10 @@ kanvas-poster {
 .k-button { padding: 0 11px; }
 .k-icon-action { width: 34px; padding: 0; }
 .k-button__label { font-size: 0.76rem; font-weight: 650; }
-.k-button--primary { border-color: var(--k-accent); background: var(--k-accent); color: #000; }
+.k-button--primary { border-color: var(--k-accent); background: var(--k-accent); color: var(--k-accent-contrast); }
 .k-button:hover:not(:disabled),
 .k-icon-action:hover:not(:disabled) { border-color: var(--k-text-muted); background: var(--k-surface-active); }
-.k-button--primary:hover:not(:disabled) { background: var(--k-text); color: #000; }
+.k-button--primary:hover:not(:disabled) { background: var(--k-text); color: var(--k-accent-contrast); }
 .k-button:disabled { cursor: not-allowed; opacity: 0.35; }
 
 :where(a, button, input, select, [tabindex]):focus-visible {
@@ -442,7 +495,7 @@ kanvas-poster {
 .k-grid-retry { margin-top: 10px; }
 .k-grid-diagnostic {
     margin-top: 8px;
-    color: var(--k-muted);
+    color: var(--k-text-muted);
     font-size: 0.72rem;
 }
 .k-grid-diagnostic > div { padding-top: 4px; white-space: pre-line; }
@@ -491,6 +544,9 @@ kanvas-poster {
 }
 
 .k-item__poster { display: block; width: 100%; height: 100%; object-fit: cover; }
+.k-item__art .k-poster__fallback { font-size: 1.18rem; }
+.k-item__art .k-poster__fallback-line + .k-poster__fallback-line { font-size: 0.94rem; }
+.k-item__art .k-poster__fallback-footer { min-height: 1.6rem; font-size: 0.72rem; }
 .k-item__title { margin-bottom: 6px; }
 .k-item__facts { display: block; font-size: 0.8rem; }
 .k-item__overview { display: block; max-width: 70ch; margin: 18px 0; font-size: 0.88rem; line-height: 1.55; white-space: pre-line; }
@@ -554,7 +610,7 @@ kanvas-poster {
 .k-watch-order-header__collection { color: var(--k-text-muted); font-size: 0.78rem; }
 
 .k-kanvas-dialog { width: min(760px, calc(100vw - 28px)); max-width: none; border: 1px solid var(--k-border-strong); border-radius: var(--k-radius); background: var(--k-surface-1); color: var(--k-text); padding: 0; }
-.k-kanvas-dialog::backdrop { background: rgb(0 0 0 / 78%); }
+.k-kanvas-dialog::backdrop { background: var(--k-scrim-strong); }
 .k-picker { display: grid; max-height: min(76vh, 700px); gap: 10px; padding: 14px; overflow: auto; }
 .k-picker__header { display: flex; align-items: center; gap: 8px; }
 .k-picker__header .k-input-shell { flex: 1; }
@@ -577,6 +633,11 @@ kanvas-poster {
 .k-picker-row__facts { grid-column: 1; }
 .k-item-editor { width: min(760px, calc(100vw - 28px)); }
 .k-item-editor__form { display: grid; gap: 10px; }
+.k-item-editor__section { display: grid; gap: 8px; }
+.k-item-editor__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: center; }
+.k-item-editor__summary { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: var(--k-text-muted); font-size: 0.76rem; }
+.k-item-editor__summary span:first-child { color: var(--k-text); font-weight: 700; text-transform: uppercase; }
+.k-item-editor__muted { color: var(--k-text-faint); font-size: 0.74rem; }
 .k-item-editor__form details { padding: 8px; border: 1px solid var(--k-border-subtle); color: var(--k-text-muted); font-size: 0.76rem; }
 .k-item-editor__form summary { cursor: pointer; color: var(--k-text); font-weight: 650; }
 .k-item-editor__checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
@@ -657,9 +718,16 @@ kanvas-administration { display: block; max-width: 980px; }
 .k-token__swatch { width: 17px; height: 17px; border: 1px solid var(--k-border-strong); }
 .k-token__name { color: var(--k-text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.7rem; }
 .k-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-.k-profile-controls { position: fixed; z-index: 25; top: 14px; right: 16px; display: flex; gap: 6px; }
-.k-profile-switcher { padding: 6px 9px; border: 1px solid var(--k-border-subtle); color: var(--k-text-muted); background: #000; font-size: 0.72rem; text-decoration: none; }
+kanvas-profile-menu { position: relative; display: block; width: 100%; min-height: 126px; margin-top: auto; margin-bottom: 34px; }
+.k-profile-switcher { position: absolute; top: 50%; left: 50%; display: block; width: 108px; height: 30px; overflow: hidden; padding: 0 9px; transform: translate(-50%, -50%) rotate(-90deg); transform-origin: center; border: 1px solid var(--k-border-subtle); border-radius: var(--k-radius); outline: none; background: var(--k-bg); color: var(--k-text-muted); cursor: pointer; font: inherit; font-size: 0.72rem; line-height: 28px; text-align: center; text-overflow: ellipsis; text-decoration: none; white-space: nowrap; }
 .k-profile-switcher:hover, .k-profile-switcher:focus-visible { border-color: var(--k-border-strong); color: var(--k-text); }
+.k-profile-dialog { width: min(430px, calc(100vw - 28px)); }
+.k-profile-form form { display: grid; gap: 10px; }
+.k-profile-form .k-input-shell { width: 100%; }
+.k-colour-field { display: flex; min-height: 34px; width: fit-content; align-items: center; gap: 10px; padding: 0 8px; border: 1px solid var(--k-border-subtle); color: var(--k-text-muted); font-size: 0.78rem; }
+.k-colour-field input { width: 34px; height: 24px; padding: 0; border: 1px solid var(--k-border-strong); background: transparent; cursor: pointer; }
+.k-picker__status--error { color: var(--k-danger); }
+.k-profile-logout { padding-top: 10px; border-top: 1px solid var(--k-border-subtle); }
 .k-profile-screen { display: grid; width: min(100% - 32px, 620px); min-height: 100vh; place-content: center; gap: 18px; margin: auto; }
 .k-profile-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .k-profile-card, .k-profile-bootstrap { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
@@ -668,7 +736,6 @@ kanvas-administration { display: block; max-width: 980px; }
 
 @media (max-width: 700px) {
     .k-main { width: 100%; margin: 0; padding: 18px 14px calc(74px + env(safe-area-inset-bottom)); }
-    .k-profile-controls { top: 8px; right: 8px; }
     .k-side-nav { display: none; }
     .k-bottom-nav {
         position: fixed;
@@ -682,11 +749,15 @@ kanvas-administration { display: block; max-width: 980px; }
         justify-content: space-around;
         padding: 7px 8px env(safe-area-inset-bottom);
         border-top: 1px solid var(--k-border-subtle);
-        background: rgb(0 0 0 / 94%);
+        background: var(--k-nav-backdrop);
     }
     .k-bottom-nav .k-nav-link { width: 44px; height: 42px; }
     .k-bottom-nav .k-nav-link::before { top: -8px; left: 12px; width: 20px; height: 2px; }
     .k-bottom-nav .k-nav-link--active::before { height: 2px; }
+    .k-bottom-nav kanvas-profile-menu { width: 44px; min-height: 42px; margin: 0; }
+    .k-bottom-nav .k-profile-switcher { position: relative; top: auto; left: auto; display: grid; width: 44px; height: 42px; place-items: center; overflow: visible; padding: 0; transform: none; border-color: transparent; background: transparent; color: var(--k-text-faint); font-size: 0; line-height: 1; }
+    .k-bottom-nav .k-profile-switcher::after { width: 18px; height: 18px; border: 1px solid currentColor; border-radius: 999px; content: ""; background: var(--k-accent); box-shadow: inset 0 0 0 5px var(--k-bg); }
+    .k-bottom-nav .k-profile-switcher:hover, .k-bottom-nav .k-profile-switcher:focus-visible { border-color: transparent; background: var(--k-surface-1); color: var(--k-text); }
     .k-rail { margin-bottom: 24px; }
     .k-rail__viewport { min-height: 190px; }
     kanvas-poster { width: 116px; }

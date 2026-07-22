@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from nicegui.client import Client
+from nicegui.element import Element
 from nicegui.page import page
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
@@ -14,8 +17,8 @@ from kasana.kanvas import dashboard
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile
 from kasana.kanvas.routes.profiles import render_profile_selection
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.katalog.api.contracts import UserAuthentication, UserRole, UserSummary
-from kasana.katalog.security import hash_profile_pin, verify_profile_pin
+from kasana.katalog.api.contracts import UserAuthentication, UserRole, UserSummary, UserUpdate
+from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
 
 async def _asgi_app(_scope: Any, _receive: Any, _send: Any) -> None:
@@ -54,17 +57,6 @@ def _profile(
         role=role,
         is_disabled=disabled,
     )
-
-
-def test_profile_pin_hash_is_salted_and_verifiable() -> None:
-    first = hash_profile_pin("2468")
-    second = hash_profile_pin("2468")
-
-    assert first != second
-    assert "2468" not in first
-    assert verify_profile_pin(first, "2468")
-    assert not verify_profile_pin(first, "0000")
-    assert not verify_profile_pin(first, None)
 
 
 def test_profile_roles_are_explicit_finite_values() -> None:
@@ -142,11 +134,19 @@ def test_profile_selection_renders_bootstrap_and_pin_controls() -> None:
             (_profile(1), UserSummary(id=2, username="pinned", pin_required=True)),
             error="Try again.",
         )
+        pin_input = next(
+            element
+            for element in selection_client.elements.values()
+            if element.tag == "input" and _element_props(element).get("name") == "pin"
+        )
         assert sum(element.tag == "input" for element in selection_client.elements.values()) >= 2
+        assert _element_props(pin_input)["type"] == "text"
+        assert _element_props(pin_input)["minlength"] == "2"
+        assert _element_props(pin_input)["maxlength"] == "16"
 
 
 async def test_profile_dashboard_session_and_administration_actions(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     owner = SessionProfile(_profile(1, role=UserRole.OWNER))
 
@@ -162,7 +162,12 @@ async def test_profile_dashboard_session_and_administration_actions(
         def clear(self, request: Request) -> None:
             request.scope["cleared"] = True
 
+    update_requests: list[tuple[int, UserUpdate]] = []
+
     class FakeKatalogClient:
+        def __init__(self) -> None:
+            pass
+
         async def __aenter__(self) -> FakeKatalogClient:
             return self
 
@@ -172,8 +177,14 @@ async def test_profile_dashboard_session_and_administration_actions(
         async def create_user(self, _request: object) -> UserSummary:
             return _profile(2)
 
-        async def update_user(self, _user_id: int, _request: object) -> UserSummary:
-            return _profile(2, role=UserRole.ADMIN)
+        async def update_user(self, user_id: int, request: UserUpdate) -> UserSummary:
+            update_requests.append((user_id, request))
+            return UserSummary(
+                id=user_id,
+                username=f"profile-{user_id}",
+                role=UserRole.ADMIN,
+                accent_colour=request.accent_colour or PROFILE_ACCENT_COLOUR_DEFAULT,
+            )
 
         async def disable_user(self, _user_id: int) -> UserSummary:
             return _profile(2, disabled=True)
@@ -202,6 +213,8 @@ async def test_profile_dashboard_session_and_administration_actions(
 
     monkeypatch.setattr(dashboard, "ProfileSessions", profile_sessions)
     monkeypatch.setattr(dashboard, "KatalogClient", katalog_client)
+    monkeypatch.setattr(dashboard, "_settings", Kanvas_Settings())
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(tmp_path / "configs"))
 
     selected = FormRequest({"user_id": "2", "pin": "2468"})
     assert (await dashboard.select_profile(cast(Request, selected))).status_code == 303
@@ -213,7 +226,14 @@ async def test_profile_dashboard_session_and_administration_actions(
     assert signed_out.scope["cleared"] is True
 
     async def current_profile(_request: Request) -> SessionProfile:
-        return owner
+        return SessionProfile(
+            UserSummary(
+                id=owner.user.id,
+                username=owner.user.username,
+                role=owner.user.role,
+                accent_colour="#224466",
+            )
+        )
 
     monkeypatch.setattr(dashboard, "_data_profile", current_profile)
     assert (
@@ -225,5 +245,39 @@ async def test_profile_dashboard_session_and_administration_actions(
         )
     ).status_code == 200
     assert (
+        await dashboard.update_current_profile(
+            cast(
+                Request,
+                JsonRequest(
+                    {
+                        "displayName": "Owner",
+                        "pin": "1357",
+                        "accent_colour": "#336699",
+                    }
+                ),
+            )
+        )
+    ).status_code == 200
+    current_profile_update = update_requests[-1][1]
+    assert update_requests[-1][0] == 1
+    assert current_profile_update.display_name == "Owner"
+    assert current_profile_update.pin == "1357"
+    assert current_profile_update.accent_colour == "#336699"
+    preference_response = await dashboard.update_kanvas_preferences(
+        cast(Request, JsonRequest({"accent_colour": "#336699"}))
+    )
+    assert preference_response.status_code == 200
+    assert json.loads(bytes(preference_response.body))["accentColour"] == "#336699"
+    assert not (tmp_path / "configs" / "config.kanvas.json").exists()
+    assert (await dashboard.kanvas_theme_stylesheet(_request({}))).body == (
+        b":root{--k-accent:#224466;}\n"
+    )
+    assert (
         await dashboard.disable_profile_user(2, cast(Request, JsonRequest({})))
     ).status_code == 200
+
+
+def _element_props(element: Element) -> dict[str, object]:
+    """Expose NiceGUI's internal test-only rendered attributes."""
+
+    return cast(dict[str, object], element._props)  # pyright: ignore[reportPrivateUsage]

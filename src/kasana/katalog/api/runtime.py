@@ -20,6 +20,7 @@ from kasana.katalog.api.contracts import (
 from kasana.katalog.api.jobs import JobContext, JobOutcome, JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTransferPolicy
+from kasana.katalog.backup import JsonBackupScheduler
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MatchThresholds, MetadataProvider, MetadataWorkflow
 from kasana.katalog.repair import (
@@ -58,14 +59,30 @@ class KatalogApiRuntime:
             chunk_size=settings.media_transfer_chunk_size
         )
         self.jobs = JobRegistry(database, maximum_jobs=settings.maintenance_max_active_jobs)
+        self._backup_scheduler = (
+            JsonBackupScheduler(
+                database.database_path,
+                settings.effective_json_backup_path.expanduser().resolve(strict=False),
+                user_configuration_directory=settings.user_configuration_directory.expanduser().resolve(
+                    strict=False
+                ),
+                interval=timedelta(hours=settings.json_backup_interval_hours),
+            )
+            if settings.json_backup_enabled
+            else None
+        )
 
     async def start(self) -> None:
         """Recover work that could not survive a prior process shutdown."""
 
         await self.jobs.recover_interrupted()
+        if self._backup_scheduler is not None:
+            await self._backup_scheduler.start()
 
     async def close(self) -> None:
         await self.jobs.close()
+        if self._backup_scheduler is not None:
+            await self._backup_scheduler.close()
 
     async def browse_directories(self, path: str | None, *, limit: int = 500) -> DirectoryListing:
         return await run_blocking(_directory_listing, path, limit)

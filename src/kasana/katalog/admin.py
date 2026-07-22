@@ -174,20 +174,24 @@ class DatabaseAdmin:
     database_path: Path
 
     def initialise(self) -> str:
-        try:
-            self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            msg = f"Unable to create database directory: {error}"
-            raise AdminError(msg) from error
+        self._ensure_database_directory()
         return self.upgrade()
 
     def upgrade(self) -> str:
+        self._ensure_database_directory()
         try:
             command.upgrade(self._alembic_config(), "head")
         except Exception as error:
             msg = f"Database migration failed: {error}"
             raise AdminError(msg) from error
         return self.current()
+
+    def _ensure_database_directory(self) -> None:
+        try:
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            msg = f"Unable to create database directory: {error}"
+            raise AdminError(msg) from error
 
     def current(self) -> str:
         if not self.database_path.exists():

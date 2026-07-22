@@ -12,6 +12,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
 
 
+class PlaceholderArtView(BaseModel):
+    """Text payload used by generated missing-poster artwork."""
+
+    model_config = ConfigDict(frozen=True)
+
+    lines: tuple[str, ...] = Field(min_length=1, max_length=3)
+    footer: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("lines")
+    @classmethod
+    def normalise_lines(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        lines = tuple(value.strip() for value in values if value.strip())
+        if len(lines) != len(values):
+            raise ValueError("Placeholder lines must not be blank.")
+        return lines
+
+    @field_validator("footer")
+    @classmethod
+    def normalise_footer(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Placeholder footer must not be blank.")
+        return stripped
+
+
 class PosterState(StrEnum):
     """Visual state rendered by a Kanvas poster."""
 
@@ -34,6 +61,9 @@ class PosterView(BaseModel):
     subtitle: str | None = Field(default=None, max_length=200)
     href: str = Field(pattern=r"^/item/\d+$")
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    placeholder: PlaceholderArtView = Field(
+        default_factory=lambda: PlaceholderArtView(lines=("Untitled",))
+    )
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     state: PosterState = PosterState.NORMAL
     available: bool

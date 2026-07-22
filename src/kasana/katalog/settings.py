@@ -22,6 +22,9 @@ class KatalogSettings(KSettings):
 
     library_root: Path = Field(default=Path("media"))
     database_path: Path = Field(default=Path("kasana.sqlite3"))
+    json_backup_path: Path | None = None
+    json_backup_interval_hours: int = Field(default=24, ge=1, le=24 * 365)
+    json_backup_enabled: bool = True
     user_configuration_directory: Path = Field(default_factory=user_configuration_directory)
     api_host: str = DEFAULT_KATALOG_API_HOST
     api_port: int = Field(default=DEFAULT_KATALOG_API_PORT, ge=1, le=65535)
@@ -47,3 +50,9 @@ class KatalogSettings(KSettings):
         """Return the canonical HTTP endpoint derived from Katalog's bind settings."""
 
         return katalog_api_url(self.api_host, self.api_port)
+
+    @property
+    def effective_json_backup_path(self) -> Path:
+        """Return the configured snapshot path or a sibling of the SQLite database."""
+
+        return self.json_backup_path or self.database_path.with_suffix(".backup.json")

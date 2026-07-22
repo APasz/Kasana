@@ -173,6 +173,55 @@ async def sign_out_profile(request: Request) -> RedirectResponse:
     return RedirectResponse("/profiles", status_code=303)
 
 
+@app.patch("/profiles/current", include_in_schema=False)
+async def update_current_profile(request: Request) -> JSONResponse:
+    """Allow a selected profile to update its own display name and PIN."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    payload = await _json_object(request)
+    values: dict[str, object] = {}
+    if "displayName" in payload:
+        values["display_name"] = _optional_string(payload["displayName"], maximum_length=200)
+    if "pin" in payload:
+        pin = _optional_string(payload["pin"], maximum_length=16)
+        if pin is not None:
+            values["pin"] = pin
+    if "accent_colour" in payload:
+        values["accent_colour"] = _optional_string(
+            payload["accent_colour"], maximum_length=7
+        )
+    try:
+        update = UserUpdate.model_validate(values)
+        async with KatalogClient(
+            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+        ) as client:
+            user = await client.update_user(profile.user.id, update)
+    except (KatalogClientError, ValueError) as error:
+        return _invalid_action(str(error))
+    return JSONResponse(user.model_dump(mode="json"))
+
+
+@app.patch("/kanvas/preferences", include_in_schema=False)
+async def update_kanvas_preferences(request: Request) -> JSONResponse:
+    """Persist the selected user's non-secret Kanvas UI preferences."""
+
+    profile = await _require_profile(request)
+    payload = await _json_object(request)
+    try:
+        update = UserUpdate.model_validate(payload)
+        async with KatalogClient(
+            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+        ) as client:
+            user = await client.update_user(profile.user.id, update)
+    except ValidationError as error:
+        return _invalid_action(str(error))
+    except (KatalogClientError, ValueError) as error:
+        return _invalid_action(str(error))
+    return JSONResponse({"accentColour": user.accent_colour})
+
+
 @app.post("/profiles/users", include_in_schema=False)
 async def create_profile_user(request: Request) -> JSONResponse:
     """Allow an owner or admin to create a selectable local profile."""
@@ -192,7 +241,7 @@ async def create_profile_user(request: Request) -> JSONResponse:
                     username=_string(payload, "username", maximum_length=200),
                     display_name=_optional_string(payload.get("displayName"), maximum_length=200),
                     role=role,
-                    pin=_optional_string(payload.get("pin"), maximum_length=200),
+                    pin=_optional_string(payload.get("pin"), maximum_length=16),
                 )
             )
     except (KatalogClientError, ValueError) as error:
@@ -235,7 +284,10 @@ def _profile_update_payload(payload: dict[str, object]) -> dict[str, object]:
             raw_role = _optional_string(payload[browser_name], maximum_length=20)
             update[contract_name] = UserRole(raw_role) if raw_role is not None else None
         else:
-            update[contract_name] = _optional_string(payload[browser_name], maximum_length=200)
+            maximum_length = 16 if browser_name == "pin" else 200
+            update[contract_name] = _optional_string(
+                payload[browser_name], maximum_length=maximum_length
+            )
     return update
 
 
@@ -976,6 +1028,22 @@ async def artwork(item_id: int, artwork_id: int) -> Response:
     return Response(content=content, media_type=content_type, headers=headers)
 
 
+@app.get("/_kanvas/theme.css", include_in_schema=False)
+async def kanvas_theme_stylesheet(request: Request) -> Response:
+    """Expose mutable CSS variables separately from cacheable static assets."""
+
+    try:
+        profile = await _data_profile(request)
+    except KatalogClientError:
+        profile = None
+    accent_colour = profile.user.accent_colour if profile is not None else _settings.accent_colour
+    return Response(
+        content=f":root{{--k-accent:{accent_colour};}}\n",
+        media_type="text/css",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _query_text(request: Request, name: str, *, maximum_length: int) -> str | None:
     """Read a bounded optional query value once for all Kanvas data endpoints."""
 
@@ -1504,12 +1572,24 @@ async def design_page() -> None:
                 "--k-bg",
                 "--k-surface-1",
                 "--k-surface-2",
+                "--k-surface-active",
                 "--k-border-subtle",
+                "--k-border-strong",
                 "--k-text",
                 "--k-text-muted",
+                "--k-text-faint",
                 "--k-accent",
+                "--k-accent-contrast",
                 "--k-danger",
                 "--k-success",
+                "--k-scrim-soft",
+                "--k-scrim",
+                "--k-scrim-strong",
+                "--k-nav-backdrop",
+                "--k-poster-placeholder-bg",
+                "--k-poster-placeholder-highlight",
+                "--k-poster-placeholder-border",
+                "--k-poster-placeholder-footer-bg",
             ):
                 with ui.element("div").classes("k-token"):
                     ui.element("span").classes("k-token__swatch").style(f"background: var({token})")

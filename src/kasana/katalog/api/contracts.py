@@ -8,6 +8,13 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kasana.shared.profile_rules import (
+    PROFILE_ACCENT_COLOUR_DEFAULT,
+    PROFILE_ACCENT_COLOUR_PATTERN,
+    PROFILE_PIN_MAX_LENGTH,
+    PROFILE_PIN_MIN_LENGTH,
+)
+
 
 class LibraryItemKind(StrEnum):
     MOVIE = "movie"
@@ -127,13 +134,21 @@ class UserSummary(APIModel):
     role: UserRole = UserRole.USER
     is_disabled: bool = False
     pin_required: bool = False
+    accent_colour: str = Field(
+        default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
+    )
 
 
 class UserCreate(APIModel):
     username: str = Field(min_length=1, max_length=200)
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     role: UserRole = UserRole.USER
-    pin: str | None = Field(default=None, min_length=4, max_length=200)
+    pin: str | None = Field(
+        default=None, min_length=PROFILE_PIN_MIN_LENGTH, max_length=PROFILE_PIN_MAX_LENGTH
+    )
+    accent_colour: str = Field(
+        default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
+    )
 
     @field_validator("username", "display_name")
     @classmethod
@@ -145,7 +160,10 @@ class UserUpdate(APIModel):
     username: str | None = Field(default=None, min_length=1, max_length=200)
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     role: UserRole | None = None
-    pin: str | None = Field(default=None, min_length=4, max_length=200)
+    pin: str | None = Field(
+        default=None, min_length=PROFILE_PIN_MIN_LENGTH, max_length=PROFILE_PIN_MAX_LENGTH
+    )
+    accent_colour: str | None = Field(default=None, pattern=PROFILE_ACCENT_COLOUR_PATTERN)
 
     @field_validator("username", "display_name")
     @classmethod
@@ -154,7 +172,9 @@ class UserUpdate(APIModel):
 
 
 class UserAuthentication(APIModel):
-    pin: str | None = Field(default=None, max_length=200)
+    pin: str | None = Field(
+        default=None, min_length=PROFILE_PIN_MIN_LENGTH, max_length=PROFILE_PIN_MAX_LENGTH
+    )
 
 
 class StatusResponse(APIModel):
@@ -199,6 +219,10 @@ class LibraryItemSummary(APIModel):
     kind: LibraryItemKind
     year: int | None = Field(default=None, ge=1, le=9999)
     parent_id: int | None = Field(default=None, gt=0)
+    season_number: int | None = Field(default=None, ge=0)
+    episode_number: int | None = Field(default=None, ge=0)
+    series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
+    context_label: str | None = Field(default=None, min_length=1, max_length=80)
     availability: Availability
     tags: tuple[str, ...] = Field(default=(), max_length=50)
     artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=10)

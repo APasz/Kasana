@@ -70,7 +70,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260722_0012"}
+    assert json.loads(current.output) == {"revision": "20260722_0013"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -115,6 +115,18 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
     removed = runner.invoke(katalog_cli.app, ["--json", "library", "remove", "1"], env=environment)
     assert removed.exit_code == 0, removed.output
     assert json.loads(removed.output) == {"removed_root_id": 1}
+
+
+def test_database_upgrade_creates_configured_database_parent_directory(tmp_path: Path) -> None:
+    runner = CliRunner()
+    database_path = tmp_path / "missing" / "nested" / "catalogue.sqlite3"
+
+    result = runner.invoke(
+        katalog_cli.app, ["database", "upgrade"], env=_environment(database_path)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert database_path.is_file()
 
 
 def test_item_discovery_commands_emit_playback_ids(tmp_path: Path) -> None:

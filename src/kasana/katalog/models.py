@@ -764,7 +764,7 @@ class User(Base):
         server_default=UserRole.USER.value,
     )
     is_disabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default=false())
-    pin_hash: Mapped[str | None] = mapped_column(String)
+    pin: Mapped[str | None] = mapped_column(String)
 
     playback_states: Mapped[list[PlaybackState]] = orm_relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True

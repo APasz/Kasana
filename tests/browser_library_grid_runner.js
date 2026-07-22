@@ -159,6 +159,9 @@ const exposed = source.replace(
 ).replace(
   "if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);",
   "globalThis.__administrationTest = {KanvasAdministration};\n  if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);"
+).replace(
+  "if (!customElements.get('kanvas-item-editor')) customElements.define('kanvas-item-editor', KanvasItemEditor);",
+  "globalThis.__itemEditorTest = {KanvasItemEditor};\n  if (!customElements.get('kanvas-item-editor')) customElements.define('kanvas-item-editor', KanvasItemEditor);"
 );
 vm.runInThisContext(exposed, {filename: 'kanvas.js'});
 
@@ -213,6 +216,22 @@ async function testValidPageRetainsAvailable() {
   assert.equal(instance.grid.children.length, 1);
   assert.equal(instance.requestId, 'request-123');
   assert.equal(instance.status.textContent, 'End of library.');
+}
+
+function testPosterPlaceholderNormalisation() {
+  const poster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(11),
+    posterUrl: null,
+    placeholder: {lines: [' Main title ', '', 'Subtitle'], footer: ' S01 E02 '}
+  });
+
+  assert.equal(poster.posterUrl, null);
+  assert.deepEqual(poster.placeholder.lines, ['Main title', 'Subtitle']);
+  assert.equal(poster.placeholder.footer, 'S01 E02');
+  assert.deepEqual(
+    globalThis.__libraryTest.normalisePoster(validPoster(12)).placeholder.lines,
+    ['Poster 12']
+  );
 }
 
 async function testCategorisedFailureAndRetry() {
@@ -356,14 +375,92 @@ async function testAdministrationPollingWaitsForOpenDialog() {
   assert.equal(instance.inFlight, false);
 }
 
+function fakeFormValues(values) {
+  return {
+    get(name) {
+      return Object.hasOwn(values, name) ? values[name] : null;
+    },
+    has(name) {
+      return Object.hasOwn(values, name);
+    }
+  };
+}
+
+function testItemEditorShowsOnlyRelevantKindFields() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+  const item = {season_number: 1, episode_number: 2, parent_id: 8};
+
+  assert.equal(editor.renderKindFields('movie', item), '');
+  assert.match(editor.renderKindFields('season', item), /name="seasonNumber"/);
+  assert.doesNotMatch(editor.renderKindFields('season', item), /name="episodeNumber"/);
+  assert.match(editor.renderKindFields('episode', item), /name="seasonNumber"/);
+  assert.match(editor.renderKindFields('episode', item), /name="episodeNumber"/);
+  assert.match(editor.renderHierarchyFields('movie', item), /Top-level item/);
+  assert.match(editor.renderHierarchyFields('episode', item), /name="parentId"/);
+  assert.doesNotMatch(editor.renderLockRows('movie', new Set()), /Episode number/);
+  assert.match(editor.renderLockRows('episode', new Set(['episode_number'])), /Episode number/);
+}
+
+function testItemEditorPayloadPreservesHiddenState() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+  editor.currentItem = {kind: 'episode', season_number: 1, episode_number: 2, parent_id: 8};
+  editor.initialLocks = new Set(['overview', 'episode_number']);
+  editor.initialSelectedArtwork = new Map([['poster', 8], ['still', 10]]);
+  const form = {
+    querySelectorAll(selector) {
+      if (selector === '[data-artwork-kind]:checked') {
+        return [
+          {value: '', dataset: {artworkKind: 'poster'}},
+          {value: '12', dataset: {artworkKind: 'backdrop'}}
+        ];
+      }
+      if (selector === '[data-artwork-kind]') {
+        return [
+          {dataset: {artworkKind: 'poster'}},
+          {dataset: {artworkKind: 'backdrop'}}
+        ];
+      }
+      if (selector === 'input[name="lock"]') {
+        return [{value: 'title'}, {value: 'overview'}];
+      }
+      if (selector === 'input[name="lock"]:checked') {
+        return [{value: 'title'}];
+      }
+      return [];
+    }
+  };
+
+  const payload = editor.payloadFromForm(form, fakeFormValues({
+    title: 'Movie',
+    sortTitle: 'Movie',
+    overview: '',
+    releaseDate: '',
+    releaseYear: '',
+    tags: 'anime, favourite',
+    kind: 'movie'
+  }));
+
+  assert.equal(payload.parentId, null);
+  assert.equal(payload.seasonNumber, null);
+  assert.equal(payload.episodeNumber, null);
+  assert.deepEqual(payload.lockedMetadataFields.sort(), ['episode_number', 'title']);
+  assert.deepEqual(payload.selectedArtwork.sort((left, right) => left.kind.localeCompare(right.kind)), [
+    {kind: 'backdrop', artworkId: 12},
+    {kind: 'still', artworkId: 10}
+  ]);
+}
+
 async function main() {
   await testValidPageRetainsAvailable();
+  testPosterPlaceholderNormalisation();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();
   await testCancellationStateAndDevelopmentDiagnostics();
   await testStateInvalidationAndRenderingFailure();
   await testRowAwareTrimPreservesScrollAnchor();
   await testAdministrationPollingWaitsForOpenDialog();
+  testItemEditorShowsOnlyRelevantKindFields();
+  testItemEditorPayloadPreservesHiddenState();
   process.stdout.write('browser library grid checks passed\n');
 }
 

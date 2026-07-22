@@ -339,14 +339,13 @@ def test_transaction_rolls_back_on_error(database: KatalogDatabase, tmp_path: Pa
     )
 
 
-def test_episode_child_identity_migration_upgrades_current_schema(tmp_path: Path) -> None:
+def test_folded_migration_creates_current_child_identity_indexes(tmp_path: Path) -> None:
     database_path = tmp_path / "katalog.sqlite3"
     repository_root = Path(__file__).parents[1]
     config = Config(str(repository_root / "alembic.ini"))
     config.set_main_option("script_location", str(repository_root / "alembic"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
 
-    command.upgrade(config, "20260718_0004")
     command.upgrade(config, "head")
 
     database = KatalogDatabase(database_path)

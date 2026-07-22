@@ -30,7 +30,7 @@ Non-secret application preferences live in one domain file per component:
 `config.kestrel.json`, `config.kourier.json`, and `config.tmdb.json`. Each
 created profile is stored independently at `configs/users/<user-id>/configuration.json`;
 the numeric directory is its user ID and contains the profile name, level, state,
-and PIN verifier. User documents are deliberately ignored by Git. Kestrel,
+optional local PIN, and UI accent colour. User documents are deliberately ignored by Git. Kestrel,
 Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
 `api_host` and `api_port`. Keep only secrets (for example
 `KASANA_KOURIER_TMDB_API_TOKEN`) in `.env`; environment variables can still
@@ -40,6 +40,10 @@ Start the API with `uv run kasana-katalog-api`; its documentation is at
 <http://127.0.0.1:5373/api/v1/docs>. Change its bind address in
 `configs/config.katalog.json` (or temporarily set `KASANA_KATALOG_API_HOST` or
 `KASANA_KATALOG_API_PORT`).
+The API also writes a portable JSON backup when the configured backup file is
+missing, then every 24 hours by default. Configure that in
+`configs/config.katalog.json` with `json_backup_enabled`, `json_backup_path`,
+and `json_backup_interval_hours`.
 Kanvas is configured to use `127.0.0.1:5370` when its web server is enabled.
 All Kasana entry points write application logs to `logs/kasana.log` by default.
 Set `log_file` in `configs/config.shared.json` or temporarily set
@@ -101,6 +105,8 @@ uv run kasana-katalog scan --root 1 --probe-concurrency 4
 uv run kasana-katalog scan --dry-run
 uv run kasana-katalog audit --category orphaned_subtitle
 uv run kasana-katalog database upgrade
+uv run kasana-katalog database backup
+uv run kasana-katalog database restore .local/share/kasana/kasana.backup.json --yes
 uv run kasana-katalog --json status
 uv run kasana-katalog user list
 uv run kasana-katalog item search Cars --year 2006 --kind movie
@@ -119,6 +125,11 @@ their files marked unavailable; scans do not delete catalogue records.
 Container and codec audit findings mean Katalog does not recognise the reported
 FFmpeg format or codec family; they do not claim that the installed mpv/FFmpeg
 stack cannot play the file.
+
+Database backups include the SQLite schema, catalogue data, and local profile
+configuration from `configs/users`. They intentionally exclude media files and
+the artwork cache. Stop `kasana-katalog-api` before running `database restore`,
+because restore replaces the local SQLite database and profile configuration.
 
 ## Metadata and artwork
 

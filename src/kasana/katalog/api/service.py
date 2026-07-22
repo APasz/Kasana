@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -147,7 +148,6 @@ from kasana.katalog.models import (
 from kasana.katalog.models import (
     UserRole as ModelUserRole,
 )
-from kasana.katalog.security import hash_profile_pin, verify_profile_pin
 from kasana.katalog.services import (
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
@@ -162,6 +162,27 @@ from kasana.katalog.user_configuration import (
 )
 
 _MAX_PAGE_SIZE = 100
+_SEASON_DIRECTORY = re.compile(r"^(?:season|volume)\s*(?P<number>\d{1,3})$", re.IGNORECASE)
+_SEASON_EPISODE_MARKER = re.compile(
+    r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})(?:$|[. _-])",
+    re.IGNORECASE,
+)
+_EXTRA_SEQUENCE_MARKER = re.compile(
+    r"(?:^|[. _-])(?:x|extra|special)[. _-]*(?P<number>\d{1,3})(?:$|[. _-])",
+    re.IGNORECASE,
+)
+_MOVIE_EDITION_LABELS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bdirector(?:'s|s)?\s+cut\b", re.IGNORECASE), "Director's Cut"),
+    (re.compile(r"\bextended(?:\s+edition|\s+cut)?\b", re.IGNORECASE), "Extended"),
+    (re.compile(r"\btheatrical(?:\s+cut|\s+edition)?\b", re.IGNORECASE), "Theatrical"),
+    (re.compile(r"\bunrated(?:\s+cut|\s+edition)?\b", re.IGNORECASE), "Unrated"),
+    (re.compile(r"\bspecial\s+edition\b", re.IGNORECASE), "Special Edition"),
+    (re.compile(r"\bcollector(?:'s|s)?\s+edition\b", re.IGNORECASE), "Collector's Edition"),
+    (re.compile(r"\bultimate\s+(?:cut|edition)\b", re.IGNORECASE), "Ultimate Cut"),
+    (re.compile(r"\bfinal\s+cut\b", re.IGNORECASE), "Final Cut"),
+    (re.compile(r"\bremaster(?:ed)?\b", re.IGNORECASE), "Remastered"),
+    (re.compile(r"\bimax\b", re.IGNORECASE), "IMAX"),
+)
 
 
 class CatalogueNotFoundError(LookupError):
@@ -311,7 +332,7 @@ class KatalogQueryService:
         return self._database.run_transaction(load)
 
     def create_user(self, request: UserCreate) -> UserSummary:
-        """Create a profile without ever returning its PIN verifier."""
+        """Create a profile without returning its optional PIN."""
 
         def create(session: Session) -> UserSummary:
             self._synchronise_configured_users(session)
@@ -322,13 +343,12 @@ class KatalogQueryService:
                 select(func.count()).select_from(User)
             ):
                 raise CatalogueConflictError("Only the initial profile can be an owner.")
-            pin_hash = hash_profile_pin(request.pin) if request.pin is not None else None
             user = User(
                 username=request.username.strip(),
                 display_name=request.display_name,
                 role=ModelUserRole(request.role.value),
                 is_disabled=False,
-                pin_hash=pin_hash,
+                pin=request.pin,
             )
             session.add(user)
             session.flush()
@@ -337,7 +357,8 @@ class KatalogQueryService:
                 name=request.display_name,
                 level=ModelUserRole(request.role.value),
                 state=UserConfigurationState.ACTIVE,
-                pin_hash=pin_hash,
+                pin=request.pin,
+                accent_colour=request.accent_colour,
             )
             self._user_configurations.save(user.id, configuration)
             return _profile_summary(user.id, configuration)
@@ -370,8 +391,12 @@ class KatalogQueryService:
                     update={"level": ModelUserRole(request.role.value)}
                 )
             if "pin" in values:
-                user.pin_hash = hash_profile_pin(request.pin) if request.pin is not None else None
-                configuration = configuration.model_copy(update={"pin_hash": user.pin_hash})
+                user.pin = request.pin
+                configuration = configuration.model_copy(update={"pin": user.pin})
+            if request.accent_colour is not None:
+                configuration = configuration.model_copy(
+                    update={"accent_colour": request.accent_colour}
+                )
             self._user_configurations.save(user.id, configuration)
             session.flush()
             return _profile_summary(user.id, configuration)
@@ -401,9 +426,7 @@ class KatalogQueryService:
             configuration = self._profile_configuration(user)
             if configuration.state is UserConfigurationState.DISABLED:
                 raise CatalogueValidationError("Disabled users cannot start sessions.")
-            if configuration.pin_hash is not None and not verify_profile_pin(
-                configuration.pin_hash, request.pin
-            ):
+            if configuration.pin is not None and configuration.pin != request.pin:
                 raise CatalogueValidationError("Invalid profile PIN.")
             return _profile_summary(user.id, configuration)
 
@@ -2178,7 +2201,8 @@ def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSumm
         display_name=configuration.name,
         role=UserRole(configuration.level.value),
         is_disabled=configuration.state is UserConfigurationState.DISABLED,
-        pin_required=configuration.pin_hash is not None,
+        pin_required=configuration.pin is not None,
+        accent_colour=configuration.accent_colour,
     )
 
 
@@ -2643,6 +2667,8 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
         root.id: _root_effective_tags(root)
         for root in session.scalars(select(Kura).where(Kura.id.in_(root_ids)))
     }
+    first_media_paths = _first_media_paths_for(session, item_ids)
+    parent_items, grandparent_items = _summary_ancestors(session, items)
     artworks: dict[int, list[ArtworkSelection]] = {item_id: [] for item_id in item_ids}
     for artwork in session.scalars(
         select(CachedArtwork)
@@ -2673,12 +2699,131 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             kind=LibraryItemKind(item.item_kind.value),
             year=item.release_year,
             parent_id=item.parent_id,
+            season_number=item.season_number,
+            episode_number=item.episode_number,
+            series_title=_series_title_for_summary(item, parent_items, grandparent_items),
+            context_label=_context_label_for_summary(item, first_media_paths.get(item.id)),
             availability=Availability(item.availability.value),
             tags=tuple(sorted(root_tags[item.library_root_id] | frozenset(item.tags))),
             artwork=tuple(artworks[item.id]),
         )
         for item in items
     }
+
+
+def _first_media_paths_for(session: Session, item_ids: tuple[int, ...]) -> dict[int, Path]:
+    paths: dict[int, Path] = {}
+    rows = session.execute(
+        select(MediaFile.library_item_id, MediaFile.absolute_path)
+        .where(MediaFile.library_item_id.in_(item_ids))
+        .order_by(MediaFile.library_item_id, MediaFile.id)
+    )
+    for item_id, absolute_path in rows:
+        paths.setdefault(item_id, Path(absolute_path))
+    return paths
+
+
+def _summary_ancestors(
+    session: Session, items: tuple[Zaisan, ...]
+) -> tuple[dict[int, Zaisan], dict[int, Zaisan]]:
+    parent_ids = tuple({item.parent_id for item in items if item.parent_id is not None})
+    if not parent_ids:
+        return {}, {}
+    parent_items = {
+        item.id: item for item in session.scalars(select(Zaisan).where(Zaisan.id.in_(parent_ids)))
+    }
+    grandparent_ids = tuple(
+        {item.parent_id for item in parent_items.values() if item.parent_id is not None}
+    )
+    if not grandparent_ids:
+        return parent_items, {}
+    grandparent_items = {
+        item.id: item
+        for item in session.scalars(select(Zaisan).where(Zaisan.id.in_(grandparent_ids)))
+    }
+    return parent_items, grandparent_items
+
+
+def _series_title_for_summary(
+    item: Zaisan, parent_items: dict[int, Zaisan], grandparent_items: dict[int, Zaisan]
+) -> str | None:
+    if item.item_kind is ZaisanKind.SERIES:
+        return item.title
+    if item.parent_id is None:
+        return None
+    parent = parent_items.get(item.parent_id)
+    if parent is None:
+        return None
+    if parent.item_kind is ZaisanKind.SERIES:
+        return parent.title
+    if parent.item_kind is ZaisanKind.SEASON and parent.parent_id is not None:
+        grandparent = grandparent_items.get(parent.parent_id)
+        if grandparent is not None and grandparent.item_kind is ZaisanKind.SERIES:
+            return grandparent.title
+    return None
+
+
+def _context_label_for_summary(item: Zaisan, media_path: Path | None) -> str | None:
+    match item.item_kind:
+        case ZaisanKind.EPISODE:
+            if item.season_number is not None and item.episode_number is not None:
+                return f"S{item.season_number:02d} E{item.episode_number:02d}"
+        case ZaisanKind.SPECIAL | ZaisanKind.EXTRA:
+            return _special_extra_context_label(item, media_path)
+        case ZaisanKind.MOVIE:
+            return _movie_edition_label(media_path)
+        case _:
+            return None
+    return None
+
+
+def _special_extra_context_label(item: Zaisan, media_path: Path | None) -> str | None:
+    if media_path is None:
+        return "S00" if item.season_number == 0 else None
+
+    marker = _season_episode_marker(media_path.stem)
+    if item.season_number == 0 or (marker is not None and marker[0] == 0):
+        episode = marker[1] if marker is not None else item.episode_number
+        return f"S00 E{episode:02d}" if episode is not None else "S00"
+
+    season = item.season_number if item.season_number not in (None, 0) else _path_season_number(
+        media_path
+    )
+    if season is None:
+        return None
+    sequence = item.episode_number or _extra_sequence_number(media_path.stem)
+    return f"S{season:02d} X{sequence:02d}" if sequence is not None else f"S{season:02d} X"
+
+
+def _movie_edition_label(media_path: Path | None) -> str | None:
+    if media_path is None:
+        return None
+    stem = media_path.stem.replace("\u2019", "'")
+    searchable = " ".join(stem.replace(".", " ").replace("_", " ").replace("-", " ").split())
+    for pattern, label in _MOVIE_EDITION_LABELS:
+        if pattern.search(searchable):
+            return label
+    return None
+
+
+def _season_episode_marker(filename_stem: str) -> tuple[int, int] | None:
+    match = _SEASON_EPISODE_MARKER.search(filename_stem)
+    if match is None:
+        return None
+    return int(match["season"]), int(match["episode"])
+
+
+def _path_season_number(media_path: Path) -> int | None:
+    for parent in media_path.parents:
+        match = _SEASON_DIRECTORY.fullmatch(parent.name.strip())
+        if match is not None:
+            return int(match["number"])
+    return None
+
+
+def _extra_sequence_number(filename_stem: str) -> int | None:
+    match = _EXTRA_SEQUENCE_MARKER.search(filename_stem)
+    return int(match["number"]) if match is not None else None
 
 
 def _root_effective_tags(root: Kura) -> frozenset[str]:

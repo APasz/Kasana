@@ -48,6 +48,7 @@ from kasana.katalog.services import (
     record_playback_progress,
 )
 from kasana.katalog.settings import KatalogSettings
+from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
         attach_media_file(
             session,
             library_item_id=alpha.id,
-            absolute_path=library_path / "alpha.mkv",
+            absolute_path=library_path / "alpha [Extended].mkv",
             size_bytes=123,
             mtime_ns=456,
             container="matroska,webm",
@@ -195,6 +196,7 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
     assert first.status_code == 200
     first_payload = first.json()
     assert [item["title"] for item in first_payload["items"]] == ["Alpha", "Beta"]
+    assert first_payload["items"][0]["context_label"] == "Extended"
     assert first_payload["next_cursor"]
 
     second = await api_fixture.client.get(
@@ -227,6 +229,80 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
             await api_fixture.client.get("/api/v1/library/items", params={"tag": "movies"})
         ).json()["items"]
     ] == ["Alpha", "Beta", "Gamma"]
+
+
+async def test_library_summaries_include_safe_context_labels(api_fixture: ApiFixture) -> None:
+    created_ids: dict[str, int] = {}
+    with api_fixture.database.transaction() as session:
+        series = create_library_item(
+            session,
+            library_root_id=1,
+            item_kind=ZaisanKind.SERIES,
+            title="Context Show",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=1,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        episode = create_library_item(
+            session,
+            library_root_id=1,
+            parent_id=season.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="Context Show",
+            season_number=1,
+            episode_number=3,
+        )
+        special = create_library_item(
+            session,
+            library_root_id=1,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SPECIAL,
+            title="Special Two",
+            season_number=0,
+        )
+        extra = create_library_item(
+            session,
+            library_root_id=1,
+            parent_id=series.id,
+            item_kind=ZaisanKind.EXTRA,
+            title="Interview",
+        )
+        for item, relative_path in (
+            (episode, Path("Context Show") / "Season 01" / "Context Show S01E03.mkv"),
+            (special, Path("Context Show") / "Season 00" / "Context Show S00E02.mkv"),
+            (extra, Path("Context Show") / "Season 01" / "Extras" / "Interview X02.mkv"),
+        ):
+            attach_media_file(
+                session,
+                library_item_id=item.id,
+                absolute_path=api_fixture.settings.database_path.parent / relative_path,
+                size_bytes=123,
+                mtime_ns=456,
+                container="matroska,webm",
+            )
+        created_ids = {
+            "episode": episode.id,
+            "special": special.id,
+            "extra": extra.id,
+        }
+
+    response = await api_fixture.client.get("/api/v1/library/items", params={"limit": 20})
+    items = response.json()["items"]
+    by_id = {item["id"]: item for item in items}
+    episode_item = by_id[created_ids["episode"]]
+    special_item = by_id[created_ids["special"]]
+    extra_item = by_id[created_ids["extra"]]
+
+    assert episode_item["series_title"] == "Context Show"
+    assert episode_item["context_label"] == "S01 E03"
+    assert special_item["context_label"] == "S00 E02"
+    assert extra_item["context_label"] == "S01 X02"
+    assert str(api_fixture.settings.database_path.parent) not in json.dumps(response.json())
 
 
 async def test_library_item_edit_is_audited_and_never_changes_media_files(
@@ -647,27 +723,35 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     user = created.json()
     assert user["role"] == "admin"
     assert user["pin_required"] is True
-    assert "pin_hash" not in user
+    assert "pin" not in user
     configuration_path = (
         api_fixture.settings.user_configuration_directory / str(user["id"]) / "configuration.json"
     )
     configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
-    assert set(configuration) == {"level", "name", "pin_hash", "state", "username"}
+    assert set(configuration) == {
+        "accent_colour",
+        "level",
+        "name",
+        "pin",
+        "state",
+        "username",
+    }
+    assert configuration["accent_colour"] == PROFILE_ACCENT_COLOUR_DEFAULT
     assert configuration["level"] == "admin"
     assert configuration["name"] is None
     assert configuration["state"] == "active"
     assert configuration["username"] == "profile"
-    assert isinstance(configuration["pin_hash"], str)
+    assert configuration["pin"] == "2468"
     configuration["level"] = "user"
+    configuration["accent_colour"] = "#336699"
     configuration_path.write_text(json.dumps(configuration), encoding="utf-8")
-    assert (
-        next(
-            entry
-            for entry in (await api_fixture.client.get("/api/v1/users")).json()
-            if entry["id"] == user["id"]
-        )["role"]
-        == "user"
+    refreshed_user = next(
+        entry
+        for entry in (await api_fixture.client.get("/api/v1/users")).json()
+        if entry["id"] == user["id"]
     )
+    assert refreshed_user["role"] == "user"
+    assert refreshed_user["accent_colour"] == "#336699"
 
     configured_user_path = (
         api_fixture.settings.user_configuration_directory / "73" / "configuration.json"
@@ -680,7 +764,7 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
                 "name": "Filesystem profile",
                 "level": "user",
                 "state": "active",
-                "pin_hash": None,
+                "pin": None,
             }
         ),
         encoding="utf-8",
@@ -696,6 +780,7 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "role": "user",
         "is_disabled": False,
         "pin_required": False,
+        "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
     }
 
     assert (
@@ -705,10 +790,13 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     ).status_code == 422
     assert (
         await api_fixture.client.patch(
-            f"/api/v1/users/{user['id']}", json={"display_name": "Profile"}
+            f"/api/v1/users/{user['id']}",
+            json={"display_name": "Profile", "accent_colour": "#445566"},
         )
     ).json()["display_name"] == "Profile"
-    assert json.loads(configuration_path.read_text(encoding="utf-8"))["name"] == "Profile"
+    saved_configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    assert saved_configuration["name"] == "Profile"
+    assert saved_configuration["accent_colour"] == "#445566"
     assert (await api_fixture.client.post(f"/api/v1/users/{user['id']}/disable")).json()[
         "is_disabled"
     ] is True

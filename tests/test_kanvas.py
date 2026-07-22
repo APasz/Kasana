@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +36,7 @@ from kasana.kanvas.components.feedback import feedback_state, skeleton_posters
 from kasana.kanvas.components.inputs import textarea_input
 from kasana.kanvas.components.media_rail import media_rail
 from kasana.kanvas.components.navigation import primary_navigation
-from kasana.kanvas.components.poster import poster_card
+from kasana.kanvas.components.poster import poster_card, poster_placeholder_art
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import (
     kanvas_asset_versions,
@@ -90,6 +91,7 @@ from kasana.kanvas.services.katalog import (
     OptimisticRevisionState,
     collection_artwork,
     group_collection_members,
+    placeholder_art_for_summary,
     poster_from_summary,
     poster_state,
 )
@@ -126,6 +128,7 @@ from kasana.kanvas.viewmodels.library import (
     CursorPager,
     LibraryFilters,
     LibraryPageEnvelope,
+    PlaceholderArtView,
     PosterState,
     PosterView,
 )
@@ -167,6 +170,7 @@ from kasana.katalog.public import (
     WatchedFilter,
     WatchOrderPlaybackContext,
 )
+from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
 _EDITABLE_ITEM_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDetail)
 
@@ -199,6 +203,28 @@ def _item(*, artwork: tuple[ArtworkSelection, ...] = ()) -> LibraryItemSummary:
     )
 
 
+def _summary_with_title(
+    title: str,
+    *,
+    kind: LibraryItemKind = LibraryItemKind.MOVIE,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+    series_title: str | None = None,
+    context_label: str | None = None,
+) -> LibraryItemSummary:
+    return LibraryItemSummary(
+        id=9,
+        title=title,
+        kind=kind,
+        year=2004,
+        season_number=season_number,
+        episode_number=episode_number,
+        series_title=series_title,
+        context_label=context_label,
+        availability=Availability.AVAILABLE,
+    )
+
+
 def _editable_item(*, title: str = "A title") -> LibraryItemDetail:
     """Build the public item-detail union exactly as Katalog returns it."""
 
@@ -227,6 +253,103 @@ def _editable_item(*, title: str = "A title") -> LibraryItemDetail:
             "playback_url": "/api/v1/playback/items/7",
         }
     )
+
+
+def _library_detail(
+    *,
+    item_id: int,
+    title: str,
+    kind: LibraryItemKind,
+    parent_id: int | None = None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> LibraryItemDetail:
+    """Build a public item detail for route and service contracts."""
+
+    return _EDITABLE_ITEM_ADAPTER.validate_python(
+        {
+            "id": item_id,
+            "title": title,
+            "sort_title": title,
+            "kind": kind,
+            "year": 2004,
+            "parent_id": parent_id,
+            "availability": Availability.AVAILABLE,
+            "tags": (),
+            "artwork": (),
+            "season_number": season_number,
+            "episode_number": episode_number,
+            "playback_url": f"/api/v1/playback/items/{item_id}",
+        }
+    )
+
+
+def _library_summary(
+    *,
+    item_id: int,
+    title: str,
+    kind: LibraryItemKind,
+    parent_id: int | None = None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+    series_title: str | None = None,
+    context_label: str | None = None,
+) -> LibraryItemSummary:
+    return LibraryItemSummary(
+        id=item_id,
+        title=title,
+        kind=kind,
+        year=2004,
+        parent_id=parent_id,
+        season_number=season_number,
+        episode_number=episode_number,
+        series_title=series_title,
+        context_label=context_label,
+        availability=Availability.AVAILABLE,
+    )
+
+
+def _item_detail_client(
+    item: LibraryItemDetail,
+    child_responses: Mapping[int, tuple[LibraryItemSummary, ...]],
+    child_requests: list[int],
+) -> type[object]:
+    class FakeClient:
+        def __init__(self, *_arguments: object, **_keywords: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def get_library_item(self, item_id: int) -> SimpleNamespace:
+            assert item_id == item.id
+            return SimpleNamespace(item=item)
+
+        async def list_library_item_media(self, item_id: int, *, limit: int) -> SimpleNamespace:
+            assert item_id == item.id
+            assert limit == 1
+            return SimpleNamespace(items=())
+
+        async def list_library_item_children(
+            self, item_id: int, *, limit: int
+        ) -> PaginatedResponse[LibraryItemSummary]:
+            assert limit == 50
+            child_requests.append(item_id)
+            if item_id not in child_responses:
+                raise AssertionError(f"Unexpected child request for item {item_id}.")
+            return PaginatedResponse(
+                items=child_responses[item_id], next_cursor=None, limit=limit
+            )
+
+        async def continue_watching(self, user_id: int, *, limit: int) -> SimpleNamespace:
+            assert user_id == 1
+            assert limit == 100
+            return SimpleNamespace(items=())
+
+    return FakeClient
 
 
 def _playback(*, completed: bool = False) -> PlaybackStateResponse:
@@ -296,6 +419,33 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert poster.state is PosterState.IN_PROGRESS
     assert "playback_url" not in json.dumps(poster.model_dump(mode="json"))
     assert "/tmp/" not in json.dumps(poster.model_dump(mode="json"))
+
+
+def test_missing_poster_placeholder_lines_split_titles_and_generic_episodes() -> None:
+    titled = _summary_with_title("Mobile Suit Gundam: The Witch from Mercury")
+    episode = _summary_with_title(
+        "Aldnoah Zero",
+        kind=LibraryItemKind.EPISODE,
+        season_number=1,
+        episode_number=2,
+        series_title="Aldnoah Zero",
+        context_label="S01 E02",
+    )
+    named_episode = _summary_with_title(
+        "The Door to Summer",
+        kind=LibraryItemKind.EPISODE,
+        season_number=1,
+        episode_number=2,
+    )
+
+    assert placeholder_art_for_summary(titled).lines == (
+        "Mobile Suit Gundam",
+        "The Witch from Mercury",
+    )
+    assert placeholder_art_for_summary(episode) == PlaceholderArtView(
+        lines=("Episode 2",), footer="S01 E02"
+    )
+    assert placeholder_art_for_summary(named_episode).lines == ("The Door to Summer",)
 
 
 def test_poster_state_precedence_covers_missing_and_unavailable_artwork() -> None:
@@ -517,6 +667,47 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
     assert "playback_url" not in json.dumps(payload)
 
 
+async def test_item_detail_flattens_a_single_series_season(monkeypatch: MonkeyPatch) -> None:
+    series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
+    season = _library_summary(
+        item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7
+    )
+    episodes = (
+        _library_summary(item_id=9, title="Pilot", kind=LibraryItemKind.EPISODE, parent_id=8),
+        _library_summary(item_id=10, title="Finale", kind=LibraryItemKind.EPISODE, parent_id=8),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(series, {7: (season,), 8: episodes}, child_requests),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.child_section_title == "Episodes"
+    assert [child.title for child in detail.children] == ["Pilot", "Finale"]
+    assert child_requests == [7, 8]
+
+
+async def test_item_detail_keeps_multiple_series_seasons(monkeypatch: MonkeyPatch) -> None:
+    series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
+    seasons = (
+        _library_summary(item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7),
+        _library_summary(item_id=9, title="Season 2", kind=LibraryItemKind.SEASON, parent_id=7),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(series, {7: seasons}, child_requests),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.child_section_title == "Seasons"
+    assert [child.title for child in detail.children] == ["Season 1", "Season 2"]
+    assert child_requests == [7]
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status"),
     [
@@ -658,9 +849,13 @@ async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
     assert error.value.field_names == (
         "artwork",
         "availability",
+        "context_label",
+        "episode_number",
         "id",
         "kind",
         "parent_id",
+        "season_number",
+        "series_title",
         "tags",
         "title",
         "year",
@@ -1795,6 +1990,7 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
                 title="Poster",
                 kind="movie",
                 posterUrl="/kanvas/artwork/7/8",
+                posterPlaceholder=PlaceholderArtView(lines=("Poster",)),
                 runtimeLabel="90m",
                 progressPercent=30,
                 available=True,
@@ -2084,14 +2280,16 @@ async def test_library_tag_filter_reports_katalog_failure_without_losing_active_
         await render_library(
             Kanvas_Settings(), _selected_profile(), LibraryFilters(tags=("anime",))
         )
-        tags = _select_named(client, "tag")
+        tag = _input_named(client, "tag")
         feedback_titles = [
             element
             for element in client.elements.values()
             if "k-feedback__title" in _element_classes(element)
         ]
 
-    assert _element_props(tags)["multiple"] is True
+    assert _element_props(tag)["type"] == "checkbox"
+    assert _element_props(tag)["value"] == "anime"
+    assert _element_props(tag)["checked"] is True
     assert len(feedback_titles) == 1
 
 
@@ -2112,6 +2310,19 @@ def test_poster_component_passes_one_safe_payload_to_the_browser_renderer() -> N
 
     payload = json.loads(cast(str, _element_props(element)["poster"]))
     assert payload == poster.model_dump(by_alias=True, mode="json")
+
+
+def test_server_placeholder_poster_uses_standardised_art_treatment() -> None:
+    with Client(page("")) as client:
+        poster_placeholder_art(7, PlaceholderArtView(lines=("Title",), footer="S01 E02"))
+        element = next(
+            element for element in client.elements.values() if element.tag == "nicegui-html"
+        )
+
+    markup = cast(str, _element_props(element)["innerHTML"])
+    assert 'class="k-poster__fallback"' in markup
+    assert "k-poster__fallback--" not in markup
+    assert "S01 E02" in markup
 
 
 def _input_named(client: Client, name: str) -> Element:
@@ -2148,15 +2359,29 @@ def _element_props(element: Element) -> dict[str, object]:
 
 
 def test_profile_controls_do_not_duplicate_the_administration_navigation() -> None:
-    owner = _selected_profile()
+    owner = SessionProfile(
+        UserSummary(
+            id=1,
+            username="tester",
+            role=UserRole.OWNER,
+            accent_colour="#123456",
+        )
+    )
     member = SessionProfile(UserSummary(id=2, username="member", role=UserRole.USER))
 
     with Client(page("")) as owner_client:
-        primary_navigation("/library", owner)
+        primary_navigation(
+            "/library", owner, Kanvas_Settings(accent_colour=PROFILE_ACCENT_COLOUR_DEFAULT)
+        )
         owner_shortcuts = [
             element
             for element in owner_client.elements.values()
             if "k-administration-shortcut" in _element_classes(element)
+        ]
+        owner_profile_menus = [
+            element
+            for element in owner_client.elements.values()
+            if element.tag == "kanvas-profile-menu"
         ]
 
     with Client(page("")) as member_client:
@@ -2168,6 +2393,14 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
         ]
 
     assert owner_shortcuts == []
+    assert len(owner_profile_menus) == 2
+    assert {
+        _element_props(profile_menu)["data-name"] for profile_menu in owner_profile_menus
+    } == {"tester"}
+    assert {
+        _element_props(profile_menu)["data-accent-colour"]
+        for profile_menu in owner_profile_menus
+    } == {"#123456"}
     assert member_shortcuts == []
 
 
@@ -2181,6 +2414,7 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     head = kanvas_head_html(initial_versions)
     assert initial_versions == kanvas_asset_versions(tmp_path)
     assert f"/_kanvas/kanvas.css?v={initial_versions.css}" in head
+    assert "/_kanvas/theme.css" in head
     assert f"/_kanvas/kanvas.js?v={initial_versions.javascript}" in head
 
     css_path.write_text(".k-app { color: black; }", encoding="utf-8")
@@ -2362,6 +2596,17 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert ".k-admin-root-path-row" in css
     assert ".k-directory-picker__entry" in css
     assert "background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%" in css
+    css_tokens = set(re.findall(r"^\s*(--k-[a-z0-9-]+):", css, flags=re.MULTILINE))
+    css_token_references = set(re.findall(r"var\((--k-[a-z0-9-]+)", css))
+    assert css_token_references <= css_tokens | {"--k-progress"}
+    assert "--k-accent-contrast" in css_tokens
+    assert "--k-scrim-soft" in css_tokens
+    assert "--k-poster-placeholder-bg" in css_tokens
+    assert "--k-poster-placeholder-footer-bg" in css_tokens
+    assert "k-poster__fallback--" not in css
+    assert "fallbackPattern" not in javascript
+    assert "k-poster__fallback--" not in javascript
+    assert "var(--k-muted)" not in css
     assert "IntersectionObserver" in javascript
     assert "MAX_MOUNTED_POSTERS" in javascript
     assert "kanvas-collection-grid" in javascript

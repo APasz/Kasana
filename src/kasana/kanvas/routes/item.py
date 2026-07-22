@@ -8,7 +8,7 @@ from nicegui.elements.label import Label
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.controls import action_button
 from kasana.kanvas.components.feedback import feedback_state
-from kasana.kanvas.components.poster import poster_card
+from kasana.kanvas.components.poster import poster_card, poster_placeholder_art
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import section_title
@@ -40,7 +40,7 @@ async def render_item(settings: Kanvas_Settings, profile: SessionProfile, item_i
                         f'src="{detail.poster_url}" alt="" loading="eager"'
                     )
                 else:
-                    ui.label(detail.title[:1].upper()).classes("k-item__fallback")
+                    poster_placeholder_art(detail.id, detail.poster_placeholder)
                 progress_indicator(detail.progress_percent)
             with ui.element("div").classes("k-item__content"):
                 ui.label(detail.title).classes("k-item__title")
@@ -80,7 +80,7 @@ async def render_item(settings: Kanvas_Settings, profile: SessionProfile, item_i
 
         if detail.children:
             with ui.element("section").classes("k-item-children").props('aria-label="Children"'):
-                section_title("Episodes")
+                section_title(detail.child_section_title)
                 with ui.element("div").classes("k-child-grid"):
                     for child in detail.children:
                         poster_card(child)

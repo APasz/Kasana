@@ -33,7 +33,12 @@ from kasana.kanvas.viewmodels.collections import (
 )
 from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.kanvas.viewmodels.item import ItemDetailView
-from kasana.kanvas.viewmodels.library import LibraryFilters, PosterState, PosterView
+from kasana.kanvas.viewmodels.library import (
+    LibraryFilters,
+    PlaceholderArtView,
+    PosterState,
+    PosterView,
+)
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     ArtworkKind,
@@ -62,6 +67,7 @@ from kasana.katalog.public import (
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    PaginatedResponse,
     PlaybackStateResponse,
     ScanRequest,
     WatchOrderCreate,
@@ -85,7 +91,16 @@ _WATCH_ORDER_PAGE_SIZE = 50
 _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
 _ARTWORK_URL = re.compile(r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$")
+_GENERIC_EPISODE_TITLE = re.compile(r"^(?:episode|ep\.?)\s*(?P<number>\d+)$", re.IGNORECASE)
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ItemChildrenView:
+    """Direct child cards plus the heading that best describes them."""
+
+    title: Literal["Episodes", "Seasons"]
+    children: tuple[PosterView, ...]
 
 
 class LibraryPosterTransformationError(RuntimeError):
@@ -356,6 +371,7 @@ class KanvasKatalogService:
             children_page = await client.list_library_item_children(
                 item_id, limit=_DETAIL_CHILD_PAGE_SIZE
             )
+            child_view = await _item_children_view(client, item.kind, children_page)
             playback = await _playback_for_item(client, self._required_user_id(), item_id)
 
         return ItemDetailView(
@@ -365,6 +381,7 @@ class KanvasKatalogService:
             year=item.year,
             overview=item.overview,
             posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+            posterPlaceholder=placeholder_art_for_summary(item),
             backdropUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.BACKDROP),
             runtimeLabel=runtime_label(media_page.items[0].duration_seconds)
             if media_page.items
@@ -372,7 +389,8 @@ class KanvasKatalogService:
             progressPercent=progress_percent(playback),
             watched=playback.completed if playback is not None else False,
             available=item.availability is Availability.AVAILABLE,
-            children=tuple(poster_from_summary(child) for child in children_page.items),
+            childSectionTitle=child_view.title,
+            children=child_view.children,
         )
 
     async def item_edit_detail(self, item_id: int) -> LibraryItemDetail:
@@ -967,6 +985,39 @@ def watch_order_update_request(
     return WatchOrderUpdate(expected_revision=revision)
 
 
+async def _item_children_view(
+    client: KatalogClient,
+    item_kind: LibraryItemKind,
+    children_page: PaginatedResponse[LibraryItemSummary],
+) -> ItemChildrenView:
+    """Flatten a single-season series so the detail page opens straight to episodes."""
+
+    children = tuple(children_page.items)
+    if (
+        item_kind is LibraryItemKind.SERIES
+        and len(children) == 1
+        and children[0].kind is LibraryItemKind.SEASON
+        and children_page.next_cursor is None
+    ):
+        season_page = await client.list_library_item_children(
+            children[0].id, limit=_DETAIL_CHILD_PAGE_SIZE
+        )
+        return ItemChildrenView(
+            title="Episodes",
+            children=tuple(poster_from_summary(child) for child in season_page.items),
+        )
+    title: Literal["Episodes", "Seasons"] = (
+        "Seasons"
+        if item_kind is LibraryItemKind.SERIES
+        and any(child.kind is LibraryItemKind.SEASON for child in children)
+        else "Episodes"
+    )
+    return ItemChildrenView(
+        title=title,
+        children=tuple(poster_from_summary(child) for child in children),
+    )
+
+
 async def _playback_for_item(
     client: KatalogClient, user_id: int, item_id: int
 ) -> PlaybackStateResponse | None:
@@ -1003,6 +1054,7 @@ def poster_from_summary(
         subtitle=subtitle or None,
         href=f"/item/{item.id}",
         posterUrl=poster_url,
+        placeholder=placeholder_art_for_summary(item),
         progressPercent=progress_percent(playback),
         state=state,
         available=item.availability is Availability.AVAILABLE,
@@ -1041,6 +1093,42 @@ def artwork_proxy_url(
 
     selected = next((entry for entry in artwork if entry.kind is kind), None)
     return f"/kanvas/artwork/{item_id}/{selected.id}" if selected is not None else None
+
+
+def placeholder_art_for_summary(item: LibraryItemSummary) -> PlaceholderArtView:
+    """Build deterministic missing-poster text from the strongest known item label."""
+
+    if item.kind is LibraryItemKind.EPISODE and _is_generic_episode_title(
+        item.title, item.episode_number, item.series_title
+    ):
+        episode_label = (
+            f"Episode {item.episode_number}" if item.episode_number is not None else "Episode"
+        )
+        return PlaceholderArtView(
+            lines=(episode_label,),
+            footer=item.context_label,
+        )
+    return PlaceholderArtView(lines=placeholder_title_lines(item.title), footer=item.context_label)
+
+
+def placeholder_title_lines(title: str) -> tuple[str, ...]:
+    """Split a title/subtitle pair into separate generated-art text lines."""
+
+    primary, separator, secondary = title.partition(":")
+    if separator and primary.strip() and secondary.strip():
+        return (primary.strip(), secondary.strip())
+    return (title.strip(),)
+
+
+def _is_generic_episode_title(
+    title: str, episode_number: int | None, series_title: str | None
+) -> bool:
+    if series_title is not None and title.strip().casefold() == series_title.strip().casefold():
+        return True
+    if episode_number is None:
+        return False
+    match = _GENERIC_EPISODE_TITLE.fullmatch(title.strip())
+    return match is not None and int(match["number"]) == episode_number
 
 
 def progress_percent(playback: PlaybackStateResponse | None) -> int | None:

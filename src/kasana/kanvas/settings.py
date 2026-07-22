@@ -6,6 +6,10 @@ from pydantic import Field, HttpUrl
 from pydantic_settings import SettingsConfigDict
 
 from kasana.configuration import configured_katalog_api_url
+from kasana.shared.profile_rules import (
+    PROFILE_ACCENT_COLOUR_DEFAULT,
+    PROFILE_ACCENT_COLOUR_PATTERN,
+)
 from kasana.shared.settings import KSettings
 
 
@@ -25,7 +29,9 @@ class Kanvas_Settings(KSettings):
     design_route_enabled: bool = True
     auto_browser_open: bool = False
     development_mode: bool = False
-    accent_colour: str = Field(default="#e8e8e8", pattern=r"^#[0-9A-Fa-f]{6}$")
+    accent_colour: str = Field(
+        default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
+    )
     katalog_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
 
     @property
