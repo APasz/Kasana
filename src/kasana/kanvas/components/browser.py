@@ -15,6 +15,7 @@ class BrowserComponent(StrEnum):
 
     ADMINISTRATION = "kanvas-administration"
     COLLECTION_GRID = "kanvas-collection-grid"
+    ITEM_EDITOR = "kanvas-item-editor"
     ONBOARDING = "kanvas-onboarding"
     ITEM_PICKER = "kanvas-item-picker"
     POSTER_GRID = "kanvas-poster-grid"

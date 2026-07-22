@@ -58,7 +58,8 @@ def configure(context: typer.Context) -> None:
     except ValidationError as error:
         typer.echo("Configuration error.", err=True)
         raise typer.Exit(2) from error
-    configure_logging(SharedSettings().log_level)
+    shared_settings = SharedSettings()
+    configure_logging(shared_settings.log_level, shared_settings.log_file)
     context.obj = CLIContext(settings=settings)
     if context.invoked_subcommand is None:
         LOGGER.info("Kestrel configured; run with --help to list commands.")

@@ -37,8 +37,11 @@ from kasana.katalog.api.contracts import (
     JobStatus,
     JobSubmission,
     LibraryItemDetail,
+    LibraryItemEditAudit,
     LibraryItemKind,
+    LibraryItemMutationResult,
     LibraryItemSummary,
+    LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootDeletion,
     LibraryRootSummary,
@@ -60,7 +63,10 @@ from kasana.katalog.api.contracts import (
     ScanRequest,
     SessionProgressUpdate,
     StatusResponse,
+    UserAuthentication,
+    UserCreate,
     UserSummary,
+    UserUpdate,
     WatchedFilter,
     WatchOrderCreate,
     WatchOrderDetail,
@@ -169,6 +175,56 @@ def create_app(
     async def list_users(runtime: KatalogApiRuntime = Depends(_runtime)) -> tuple[UserSummary, ...]:
         return await run_blocking(runtime.queries.list_users)
 
+    @app.post(
+        "/api/v1/users",
+        response_model=UserSummary,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_user",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_user(
+        user: UserCreate, runtime: KatalogApiRuntime = Depends(_runtime)
+    ) -> UserSummary:
+        return await run_blocking(runtime.queries.create_user, user)
+
+    @app.patch(
+        "/api/v1/users/{user_id}",
+        response_model=UserSummary,
+        operation_id="v1_update_user",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_user(
+        user_id: Annotated[int, Path(gt=0)],
+        user: UserUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> UserSummary:
+        return await run_blocking(runtime.queries.update_user, user_id, user)
+
+    @app.post(
+        "/api/v1/users/{user_id}/disable",
+        response_model=UserSummary,
+        operation_id="v1_disable_user",
+        responses=_ERROR_RESPONSES,
+    )
+    async def disable_user(
+        user_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> UserSummary:
+        return await run_blocking(runtime.queries.disable_user, user_id)
+
+    @app.post(
+        "/api/v1/users/{user_id}/authenticate",
+        response_model=UserSummary,
+        operation_id="v1_authenticate_user",
+        responses=_ERROR_RESPONSES,
+    )
+    async def authenticate_user(
+        user_id: Annotated[int, Path(gt=0)],
+        credentials: UserAuthentication,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> UserSummary:
+        return await run_blocking(runtime.queries.authenticate_user, user_id, credentials)
+
     @app.get(
         "/api/v1/library/roots",
         response_model=tuple[LibraryRootSummary, ...],
@@ -218,6 +274,17 @@ def create_app(
     ) -> Response:
         await run_blocking(runtime.queries.delete_library_root, root_id, confirm=deletion.confirm)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get(
+        "/api/v1/library/tags",
+        response_model=tuple[str, ...],
+        operation_id="v1_list_library_tags",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_library_tags(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[str, ...]:
+        return await run_blocking(runtime.queries.list_item_tags)
 
     @app.get(
         "/api/v1/library/items",
@@ -280,6 +347,32 @@ def create_app(
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
         item = await run_blocking(runtime.queries.get_item, item_id)
         return JSONResponse(content=item.model_dump(mode="json"), headers={"ETag": etag})
+
+    @app.patch(
+        "/api/v1/library/items/{item_id}",
+        response_model=LibraryItemMutationResult,
+        operation_id="v1_update_library_item",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_library_item(
+        item_id: Annotated[int, Path(gt=0)],
+        item: LibraryItemUpdate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> LibraryItemMutationResult:
+        return await run_blocking(runtime.queries.update_item, item_id, item)
+
+    @app.get(
+        "/api/v1/library/items/{item_id}/edit-audit",
+        response_model=tuple[LibraryItemEditAudit, ...],
+        operation_id="v1_list_library_item_edit_audit",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_library_item_edit_audit(
+        item_id: Annotated[int, Path(gt=0)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[LibraryItemEditAudit, ...]:
+        return await run_blocking(runtime.queries.list_item_edit_audit, item_id, limit=limit)
 
     @app.get(
         "/api/v1/library/items/{item_id}/children",

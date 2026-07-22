@@ -21,11 +21,13 @@ def test_config_show_reports_aligned_non_secret_defaults() -> None:
     assert report["kanvas_url"] == "http://127.0.0.1:5370"
     assert report["kestrel_katalog_url"] == report["katalog_api_url"]
     assert report["kourier_katalog_url"] == "http://127.0.0.1:5373/"
+    assert report["log_file"] == "logs/kasana.log"
 
     human_result = CliRunner().invoke(cli.app, ["config", "show"])
     assert human_result.exit_code == 0, human_result.output
     assert "Kasana configuration" in human_result.output
     assert "Katalog API" in human_result.output
+    assert "Log file" in human_result.output
 
 
 def test_top_level_doctor_delegates_to_kestrel_readiness(monkeypatch: MonkeyPatch) -> None:

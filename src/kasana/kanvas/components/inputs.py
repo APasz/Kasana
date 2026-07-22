@@ -62,12 +62,34 @@ def select_input(
         with (
             ui.element("select")
             .classes("k-select")
-            .props(
-                f"name={name!r} aria-label={aria_label!r}"
-            )
+            .props(f"name={name!r} aria-label={aria_label!r}")
         ) as select_element:
             for option in options:
                 selected = " selected" if option.value == value else ""
+                with ui.element("option").props(f"value={option.value!r}{selected}"):
+                    ui.label(option.label)
+    return select_element
+
+
+def multi_select_input(
+    *,
+    name: str,
+    aria_label: str,
+    options: tuple[SelectOption, ...],
+    values: tuple[str, ...],
+) -> Element:
+    """Render a native multi-select for a finite, server-provided vocabulary."""
+
+    selected_values = frozenset(values)
+    with ui.element("label").classes("k-control-shell k-select-wrap k-select-wrap--tags"):
+        ui.label(aria_label).classes("k-sr-only")
+        with (
+            ui.element("select")
+            .classes("k-select k-select--tags")
+            .props(f"name={name!r} aria-label={aria_label!r} multiple")
+        ) as select_element:
+            for option in options:
+                selected = " selected" if option.value in selected_values else ""
                 with ui.element("option").props(f"value={option.value!r}{selected}"):
                     ui.label(option.label)
     return select_element
@@ -101,8 +123,10 @@ def textarea_input(
 
     with ui.element("label").classes("k-control-shell k-textarea-shell"):
         ui.label(aria_label).classes("k-sr-only")
-        textarea = ui.element("textarea").classes("k-textarea").props(
-            f"name={name!r} aria-label={aria_label!r}"
+        textarea = (
+            ui.element("textarea")
+            .classes("k-textarea")
+            .props(f"name={name!r} aria-label={aria_label!r}")
         )
         if value is not None:
             textarea.props(f"value={value!r}")

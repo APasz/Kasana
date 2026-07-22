@@ -5,18 +5,26 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
+from kasana.configuration import (
+    DEFAULT_KATALOG_API_HOST,
+    DEFAULT_KATALOG_API_PORT,
+    katalog_api_url,
+    user_configuration_directory,
+)
 from kasana.shared.settings import KSettings
 
 
 class KatalogSettings(KSettings):
+    configuration_section = "katalog"
     model_config = SettingsConfigDict(
         env_prefix="KASANA_KATALOG_",
     )
 
     library_root: Path = Field(default=Path("media"))
     database_path: Path = Field(default=Path("kasana.sqlite3"))
-    api_host: str = "127.0.0.1"
-    api_port: int = Field(default=5373, ge=1, le=65535)
+    user_configuration_directory: Path = Field(default_factory=user_configuration_directory)
+    api_host: str = DEFAULT_KATALOG_API_HOST
+    api_port: int = Field(default=DEFAULT_KATALOG_API_PORT, ge=1, le=65535)
     video_extensions: frozenset[str] = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
     probe_concurrency: int = Field(default=4, ge=1, le=16)
     ffprobe_executable: str = "ffprobe"
@@ -33,3 +41,9 @@ class KatalogSettings(KSettings):
     playback_max_queue_size: int = Field(default=100, ge=1, le=500)
     media_transfer_chunk_size: int = Field(default=64 * 1024, ge=4 * 1024, le=1024 * 1024)
     maintenance_max_active_jobs: int = Field(default=4, ge=1, le=32)
+
+    @property
+    def api_url(self) -> str:
+        """Return the canonical HTTP endpoint derived from Katalog's bind settings."""
+
+        return katalog_api_url(self.api_host, self.api_port)

@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
+from kasana.configuration import configured_katalog_api_url
 from kasana.shared.settings import KSettings
 
 
@@ -24,12 +25,13 @@ def _default_runtime_directory() -> Path:
 
 
 class KestrelSettings(KSettings):
+    configuration_section = "kestrel"
     model_config = SettingsConfigDict(
         env_prefix="KASANA_KESTREL_",
     )
 
     player_backend: PlayerBackend = PlayerBackend.MPV
-    katalog_url: str = "http://127.0.0.1:5373"
+    katalog_url: str = Field(default_factory=configured_katalog_api_url)
     mpv_executable: str = "mpv"
     runtime_directory: Path = Field(default_factory=_default_runtime_directory)
     temporary_directory: Path = Field(default_factory=lambda: Path(tempfile.gettempdir()))

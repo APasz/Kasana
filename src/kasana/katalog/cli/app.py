@@ -25,6 +25,7 @@ from kasana.katalog.api.service import (
 )
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.settings import KatalogSettings
+from kasana.katalog.user_configuration import UserConfigurationStore
 from kasana.shared import SharedSettings, configure_logging
 
 
@@ -73,7 +74,8 @@ def configure(
     except ValidationError as error:
         typer.echo(f"Configuration error: {error}", err=True)
         raise typer.Exit(2) from error
-    configure_logging(SharedSettings().log_level)
+    shared_settings = SharedSettings()
+    configure_logging(shared_settings.log_level, shared_settings.log_file)
     context.obj = CLIContext(settings=settings, json_output=json_output, debug=debug)
     if context.invoked_subcommand is None:
         LOGGER.info("Katalog CLI configured; run with --help to list commands.")
@@ -94,7 +96,14 @@ def with_administration[Result](
 ) -> Result:
     database = KatalogDatabase(database_path(cli))
     try:
-        return operation(KatalogAdmin(database))
+        return operation(
+            KatalogAdmin(
+                database,
+                user_configurations=UserConfigurationStore(
+                    cli.settings.user_configuration_directory
+                ),
+            )
+        )
     except (AdminError, SQLAlchemyError) as error:
         fail(cli, str(error), 3)
     finally:
@@ -106,7 +115,11 @@ def with_catalogue_queries[Result](
 ) -> Result:
     """Run revisioned collection commands against the local Katalog database."""
     database = KatalogDatabase(database_path(cli))
-    queries = KatalogQueryService(database, artwork_cache_path=cli.settings.artwork_cache_path)
+    queries = KatalogQueryService(
+        database,
+        artwork_cache_path=cli.settings.artwork_cache_path,
+        user_configurations=UserConfigurationStore(cli.settings.user_configuration_directory),
+    )
     try:
         return operation(queries)
     except CatalogueConflictError as error:

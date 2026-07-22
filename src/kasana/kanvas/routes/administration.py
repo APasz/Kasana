@@ -9,6 +9,7 @@ from nicegui import ui
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.settings import Kanvas_Settings
 
 AdministrationSection = Literal["overview", "metadata", "libraries", "jobs", "artwork", "hierarchy"]
@@ -23,10 +24,12 @@ _SECTIONS: tuple[tuple[AdministrationSection, str, str], ...] = (
 )
 
 
-def render_administration(settings: Kanvas_Settings, section: AdministrationSection) -> None:
+def render_administration(
+    settings: Kanvas_Settings, profile: SessionProfile, section: AdministrationSection
+) -> None:
     """Render one local administration section with browser-owned bounded data."""
 
-    with page_shell(settings, "/administration", "Administration"):
+    with page_shell(settings, "/administration", "Administration", profile):
         page_title("Administration")
         with ui.element("nav").classes("k-admin-nav").props('aria-label="Administration sections"'):
             for name, label, href in _SECTIONS:
@@ -36,7 +39,7 @@ def render_administration(settings: Kanvas_Settings, section: AdministrationSect
         mount_browser_component(
             BrowserComponent.ADMINISTRATION,
             {
-                "section": section,
+                "data-section": section,
                 "overview-source": "/kanvas/data/administration/overview",
                 "jobs-source": "/kanvas/data/administration/jobs",
                 "roots-source": "/kanvas/data/administration/roots",

@@ -5,23 +5,25 @@ from __future__ import annotations
 from nicegui import ui
 from nicegui.elements.label import Label
 
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.controls import action_button
 from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import section_title
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.public import KatalogClientError, KatalogClientErrorKind
 
 
-async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
+async def render_item(settings: Kanvas_Settings, profile: SessionProfile, item_id: int) -> None:
     """Render useful detail, playback, and compact child navigation for one item."""
 
-    with page_shell(settings, "/library", "Item detail"):
-        catalogue = KanvasKatalogService(settings)
+    with page_shell(settings, "/library", "Item detail", profile):
+        catalogue = KanvasKatalogService(settings, profile.user.id)
         try:
             detail = await catalogue.item_detail(item_id)
         except KatalogClientError as error:
@@ -57,6 +59,7 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
                 status = ui.label("").classes("k-action-status").props('aria-live="polite"')
                 _item_actions(
                     settings,
+                    profile,
                     catalogue,
                     item_id,
                     detail.watched,
@@ -64,6 +67,16 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
                     detail.kind == "series",
                     status,
                 )
+
+        if profile.is_administrator:
+            mount_browser_component(
+                BrowserComponent.ITEM_EDITOR,
+                {
+                    "item-id": item_id,
+                    "source": f"/kanvas/data/items/{item_id}/edit",
+                    "action-source": f"/kanvas/actions/items/{item_id}",
+                },
+            )
 
         if detail.children:
             with ui.element("section").classes("k-item-children").props('aria-label="Children"'):
@@ -75,6 +88,7 @@ async def render_item(settings: Kanvas_Settings, item_id: int) -> None:
 
 def _item_actions(
     settings: Kanvas_Settings,
+    profile: SessionProfile,
     catalogue: KanvasKatalogService,
     item_id: int,
     initially_watched: bool,
@@ -85,7 +99,7 @@ def _item_actions(
     """Render optimistic watched state and a one-use playback launch action."""
 
     watched_state = OptimisticWatchedState(initially_watched)
-    playback = KanvasPlaybackService(settings)
+    playback = KanvasPlaybackService(settings, profile.user.id)
 
     async def launch(resume: bool) -> None:
         status.set_text("Opening player…")

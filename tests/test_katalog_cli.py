@@ -16,7 +16,10 @@ from kasana.katalog.services import attach_media_file, create_library_item, crea
 
 
 def _environment(database_path: Path) -> dict[str, str]:
-    return {"KASANA_KATALOG_DATABASE_PATH": str(database_path)}
+    return {
+        "KASANA_KATALOG_DATABASE_PATH": str(database_path),
+        "KASANA_KATALOG_USER_CONFIGURATION_DIRECTORY": str(database_path.parent / "users"),
+    }
 
 
 def _initialise(runner: CliRunner, environment: dict[str, str]) -> None:
@@ -67,7 +70,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260719_0010"}
+    assert json.loads(current.output) == {"revision": "20260722_0012"}
 
     added = runner.invoke(
         katalog_cli.app,

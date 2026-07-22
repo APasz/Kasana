@@ -1,22 +1,27 @@
 """Kanvas process configuration."""
 
+from secrets import token_urlsafe
+
 from pydantic import Field, HttpUrl
 from pydantic_settings import SettingsConfigDict
 
+from kasana.configuration import configured_katalog_api_url
 from kasana.shared.settings import KSettings
 
 
 class Kanvas_Settings(KSettings):
     """Settings for the local Kanvas presentation process."""
 
+    configuration_section = "kanvas"
     model_config = SettingsConfigDict(
         env_prefix="KASANA_KANVAS_",
     )
 
     host: str = "127.0.0.1"
     port: int = Field(default=5370, ge=1, le=65535)
-    katalog_url: HttpUrl = HttpUrl("http://127.0.0.1:5373")
-    user_id: int = Field(default=1, gt=0)
+    katalog_url: HttpUrl = Field(default_factory=lambda: HttpUrl(configured_katalog_api_url()))
+    session_secret: str = Field(default_factory=lambda: token_urlsafe(32), min_length=32)
+    session_cookie_secure: bool = False
     design_route_enabled: bool = True
     auto_browser_open: bool = False
     development_mode: bool = False

@@ -6,18 +6,19 @@ from kasana.kanvas.components.browser import BrowserComponent, mount_browser_com
 from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.media_rail import media_rail
 from kasana.kanvas.components.shell import page_shell
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.home import MediaRailView
 from kasana.katalog.public import KatalogClientError, KatalogClientErrorKind
 
 
-async def render_home(settings: Kanvas_Settings) -> None:
+async def render_home(settings: Kanvas_Settings, profile: SessionProfile) -> None:
     """Render real continue, on-deck, and recently-added data in compact rails."""
 
-    with page_shell(settings, "/", "Home"):
+    with page_shell(settings, "/", "Home", profile):
         try:
-            rails = await KanvasKatalogService(settings).home_rails()
+            rails = await KanvasKatalogService(settings, profile.user.id).home_rails()
         except KatalogClientError as error:
             detail = (
                 "Katalog is unavailable."

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -34,6 +34,17 @@ class ArtworkKind(StrEnum):
     POSTER = "poster"
     BACKDROP = "backdrop"
     STILL = "still"
+
+
+class MetadataField(StrEnum):
+    """A locally editable field that can be protected from provider refreshes."""
+
+    TITLE = "title"
+    SORT_TITLE = "sort_title"
+    RELEASE_DATE = "release_date"
+    OVERVIEW = "overview"
+    SEASON_NUMBER = "season_number"
+    EPISODE_NUMBER = "episode_number"
 
 
 class WatchOrderKind(StrEnum):
@@ -76,6 +87,12 @@ class PlaybackSessionEventKind(StrEnum):
     ADVANCED = "advanced"
 
 
+class UserRole(StrEnum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    USER = "user"
+
+
 class JobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -89,6 +106,15 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def _normalise_profile_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalised = value.strip()
+    if not normalised:
+        raise ValueError("Profile text must not be blank.")
+    return normalised
+
+
 class HealthResponse(APIModel):
     status: Literal["ok"] = "ok"
     api_version: Literal["v1"] = "v1"
@@ -98,6 +124,37 @@ class UserSummary(APIModel):
     id: int = Field(gt=0)
     username: str = Field(min_length=1, max_length=200)
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    role: UserRole = UserRole.USER
+    is_disabled: bool = False
+    pin_required: bool = False
+
+
+class UserCreate(APIModel):
+    username: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    role: UserRole = UserRole.USER
+    pin: str | None = Field(default=None, min_length=4, max_length=200)
+
+    @field_validator("username", "display_name")
+    @classmethod
+    def normalise_profile_text(cls, value: str | None) -> str | None:
+        return _normalise_profile_text(value)
+
+
+class UserUpdate(APIModel):
+    username: str | None = Field(default=None, min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    role: UserRole | None = None
+    pin: str | None = Field(default=None, min_length=4, max_length=200)
+
+    @field_validator("username", "display_name")
+    @classmethod
+    def normalise_profile_text(cls, value: str | None) -> str | None:
+        return _normalise_profile_text(value)
+
+
+class UserAuthentication(APIModel):
+    pin: str | None = Field(default=None, max_length=200)
 
 
 class StatusResponse(APIModel):
@@ -129,6 +186,13 @@ class ArtworkSelection(APIModel):
     size_bytes: int = Field(ge=0)
 
 
+class SelectedArtwork(APIModel):
+    """One user-selected cached artwork record for a visual role."""
+
+    kind: ArtworkKind
+    artwork_id: int = Field(gt=0)
+
+
 class LibraryItemSummary(APIModel):
     id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=1_000)
@@ -141,12 +205,74 @@ class LibraryItemSummary(APIModel):
 
 
 class LibraryItemDetailBase(LibraryItemSummary):
+    sort_title: str = Field(min_length=1, max_length=1_000)
     overview: str | None = Field(default=None, max_length=20_000)
     release_date: str | None = None
     air_date: str | None = None
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
+    locked_metadata_fields: tuple[MetadataField, ...] = ()
+    selected_artwork: tuple[SelectedArtwork, ...] = ()
     playback_url: str = Field(pattern=r"^/api/v1/playback/items/\d+$")
+
+
+class LibraryItemUpdate(APIModel):
+    """A validated, non-file-system mutation submitted by an administrator."""
+
+    actor: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, max_length=1_000)
+    sort_title: str | None = Field(default=None, max_length=1_000)
+    overview: str | None = Field(default=None, max_length=20_000)
+    release_date: date | None = None
+    release_year: int | None = Field(default=None, ge=1, le=9999)
+    tags: tuple[str, ...] | None = Field(default=None, max_length=50)
+    season_number: int | None = Field(default=None, ge=0)
+    episode_number: int | None = Field(default=None, ge=0)
+    locked_metadata_fields: tuple[MetadataField, ...] | None = Field(default=None)
+    selected_artwork: tuple[SelectedArtwork, ...] | None = Field(default=None)
+    kind: LibraryItemKind | None = None
+    parent_id: int | None = Field(default=None, gt=0)
+
+    @field_validator("actor", "title", "sort_title")
+    @classmethod
+    def normalise_required_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalised = value.strip()
+        if not normalised:
+            raise ValueError("Library item text must not be blank.")
+        return normalised
+
+    @field_validator("tags")
+    @classmethod
+    def normalise_tags(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        normalised = tuple(sorted({tag.strip().casefold() for tag in value}))
+        if "" in normalised:
+            raise ValueError("Library item tags must not be blank.")
+        return normalised
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if self.model_fields_set == {"actor"}:
+            raise ValueError("Library item update must include a change.")
+        for field in ("title", "sort_title"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field.replace('_', ' ')} cannot be null.")
+        selected_kinds = [selection.kind for selection in self.selected_artwork or ()]
+        if len(selected_kinds) != len(set(selected_kinds)):
+            raise ValueError("Artwork can only be selected once per kind.")
+        return self
+
+
+class LibraryItemEditAudit(APIModel):
+    """A safe, append-only summary of one local item edit."""
+
+    id: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=200)
+    changed_fields: tuple[str, ...] = ()
+    occurred_at: datetime
 
 
 class MovieItemDetail(LibraryItemDetailBase):
@@ -205,6 +331,11 @@ type LibraryItemDetail = (
     | SpecialItemDetail
     | ExtraItemDetail
 )
+
+
+class LibraryItemMutationResult(APIModel):
+    item: LibraryItemDetail
+    audit: LibraryItemEditAudit
 
 
 class MediaStreamSummary(APIModel):

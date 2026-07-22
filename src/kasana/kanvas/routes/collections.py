@@ -26,6 +26,7 @@ from kasana.kanvas.components.inputs import (
 )
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title, quiet_copy, section_title
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService
 from kasana.kanvas.settings import Kanvas_Settings
@@ -40,10 +41,12 @@ from kasana.katalog.public import (
 )
 
 
-async def render_collections_index(settings: Kanvas_Settings, *, search: str | None) -> None:
+async def render_collections_index(
+    settings: Kanvas_Settings, profile: SessionProfile, *, search: str | None
+) -> None:
     """Render the search strip and a bounded browser-owned collection grid."""
 
-    with page_shell(settings, "/collections", "Collections"):
+    with page_shell(settings, "/collections", "Collections", profile):
         with ui.element("div").classes("k-collection-page-heading"):
             page_title("Collections")
             action_button("Create", lambda: ui.navigate.to("/collections/new"), primary=True)
@@ -63,10 +66,10 @@ async def render_collections_index(settings: Kanvas_Settings, *, search: str | N
         collection_grid(source=collection_form_query(search=search))
 
 
-async def render_collection_new(settings: Kanvas_Settings) -> None:
+async def render_collection_new(settings: Kanvas_Settings, profile: SessionProfile) -> None:
     """Render a focused native form for a new collection."""
 
-    with page_shell(settings, "/collections", "Create collection"):
+    with page_shell(settings, "/collections", "Create collection", profile):
         page_title("New collection")
         with (
             ui.element("form")
@@ -82,12 +85,16 @@ async def render_collection_new(settings: Kanvas_Settings) -> None:
                 action_button("Cancel", lambda: ui.navigate.to("/collections"))
 
 
-async def render_collection_detail(settings: Kanvas_Settings, collection_id: int) -> None:
+async def render_collection_detail(
+    settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
+) -> None:
     """Render bounded collection media and derived watch-order cards."""
 
-    with page_shell(settings, "/collections", "Collection"):
+    with page_shell(settings, "/collections", "Collection", profile):
         try:
-            detail = await KanvasKatalogService(settings).collection_detail(collection_id)
+            detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
+                collection_id
+            )
         except KatalogClientError as error:
             _collection_error(error)
             return
@@ -120,12 +127,16 @@ async def render_collection_detail(settings: Kanvas_Settings, collection_id: int
             quiet_copy("More direct members are available in the editor.")
 
 
-async def render_collection_edit(settings: Kanvas_Settings, collection_id: int) -> None:
+async def render_collection_edit(
+    settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
+) -> None:
     """Render focused metadata, membership and relationship controls."""
 
-    with page_shell(settings, "/collections", "Edit collection"):
+    with page_shell(settings, "/collections", "Edit collection", profile):
         try:
-            detail = await KanvasKatalogService(settings).collection_detail(collection_id)
+            detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
+                collection_id
+            )
         except KatalogClientError as error:
             _collection_error(error)
             return
@@ -170,12 +181,16 @@ async def render_collection_edit(settings: Kanvas_Settings, collection_id: int) 
             action_button("Delete collection", button_type=ButtonType.SUBMIT)
 
 
-async def render_watch_order_new(settings: Kanvas_Settings, collection_id: int) -> None:
+async def render_watch_order_new(
+    settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
+) -> None:
     """Render an empty watch-order creation form tied to the collection revision."""
 
-    with page_shell(settings, "/collections", "New watch order"):
+    with page_shell(settings, "/collections", "New watch order", profile):
         try:
-            detail = await KanvasKatalogService(settings).collection_detail(collection_id)
+            detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
+                collection_id
+            )
         except KatalogClientError as error:
             _collection_error(error)
             return
@@ -206,6 +221,7 @@ async def render_watch_order_new(settings: Kanvas_Settings, collection_id: int) 
 
 async def render_watch_order(
     settings: Kanvas_Settings,
+    profile: SessionProfile,
     watch_order_id: int,
     *,
     editable: bool,
@@ -214,8 +230,8 @@ async def render_watch_order(
 ) -> None:
     """Render a virtualised order detail/editor with optional explicit generation review."""
 
-    with page_shell(settings, "/collections", "Watch order"):
-        catalogue = KanvasKatalogService(settings)
+    with page_shell(settings, "/collections", "Watch order", profile):
+        catalogue = KanvasKatalogService(settings, profile.user.id)
         try:
             editor = await catalogue.watch_order_editor(watch_order_id)
         except KatalogClientError as error:
@@ -223,7 +239,7 @@ async def render_watch_order(
             return
         page_title(editor.name)
         watch_order_header(editor)
-        _watch_order_playback_actions(settings, editor.id)
+        _watch_order_playback_actions(settings, profile, editor.id)
         if editable:
             _watch_order_edit_form(editor)
             item_picker_overlay(
@@ -292,10 +308,12 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
                 action_button("Remove", button_type=ButtonType.SUBMIT)
 
 
-def _watch_order_playback_actions(settings: Kanvas_Settings, watch_order_id: int) -> None:
+def _watch_order_playback_actions(
+    settings: Kanvas_Settings, profile: SessionProfile, watch_order_id: int
+) -> None:
     status = ui.label("").classes("k-action-status").props('aria-live="polite"')
-    playback = KanvasPlaybackService(settings)
-    catalogue = KanvasKatalogService(settings)
+    playback = KanvasPlaybackService(settings, profile.user.id)
+    catalogue = KanvasKatalogService(settings, profile.user.id)
 
     async def launch(*, resume: bool) -> None:
         status.set_text("Opening player…")

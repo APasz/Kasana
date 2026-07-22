@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
@@ -94,7 +94,7 @@ class LibraryFilters(BaseModel):
 
     search: str | None = Field(default=None, max_length=200)
     kind: LibraryItemKind | None = None
-    anime: bool = False
+    tags: tuple[str, ...] = ()
     watched: WatchedFilter | None = None
     availability: Availability | None = None
     year: int | None = Field(default=None, ge=1, le=9999)
@@ -107,12 +107,20 @@ class LibraryFilters(BaseModel):
         stripped = value.strip()
         return stripped or None
 
+    @field_validator("tags")
+    @classmethod
+    def normalise_tags(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        tags = tuple(sorted({value.strip().casefold() for value in values if value.strip()}))
+        if len(tags) != len(values):
+            raise ValueError("Tags must not be blank or repeated.")
+        return tags
+
     def to_katalog_arguments(self) -> dict[str, object]:
         """Map visible filters to the stable public Katalog contract exactly once."""
 
         return {
             "kind": self.kind,
-            "tags": ("anime",) if self.anime else (),
+            "tags": self.tags,
             "year": self.year,
             "watched": self.watched,
             "availability": self.availability,
@@ -120,19 +128,28 @@ class LibraryFilters(BaseModel):
         }
 
     @classmethod
-    def from_query(cls, values: Mapping[str, str]) -> LibraryFilters:
+    def from_query(
+        cls, values: Mapping[str, str], *, tags: Collection[str] | None = None
+    ) -> LibraryFilters:
         """Parse the intentionally small browser query surface into typed filters."""
 
         return cls.model_validate(
             {
                 "search": values.get("search"),
                 "kind": values.get("kind") or None,
-                "anime": values.get("anime") == "1",
+                "tags": tuple(tags) if tags is not None else _query_tags(values),
                 "watched": values.get("watched") or None,
                 "availability": values.get("availability") or None,
                 "year": values.get("year") or None,
             }
         )
+
+
+def _query_tags(values: Mapping[str, str]) -> tuple[str, ...]:
+    """Accept the one-value mapping used by small unit callers and API requests."""
+
+    raw_tag = values.get("tag")
+    return (raw_tag,) if raw_tag is not None else ()
 
 
 @dataclass

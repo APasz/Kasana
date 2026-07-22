@@ -16,6 +16,7 @@ from nicegui import app
 from nicegui.client import Client
 from nicegui.element import Element
 from nicegui.page import page
+from pydantic import TypeAdapter
 from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.routing import Route
@@ -64,9 +65,10 @@ from kasana.kanvas.dashboard import (
     delete_collection_action,
     delete_watch_order_action,
     design_page,
+    item_edit_action,
+    item_edit_data,
     library_data,
     remove_collection_member_action,
-    search_page,
     update_collection_action,
     update_collection_member_action,
     update_watch_order_action,
@@ -74,9 +76,12 @@ from kasana.kanvas.dashboard import (
     watch_order_entry_action,
     watch_order_launch_action,
 )
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.routes import collections as collections_route
 from kasana.kanvas.routes import home as home_route
 from kasana.kanvas.routes import item as item_route
+from kasana.kanvas.routes import library as library_route
+from kasana.kanvas.routes.administration import render_administration
 from kasana.kanvas.routes.library import render_library
 from kasana.kanvas.services.katalog import (
     KanvasKatalogService,
@@ -101,6 +106,7 @@ from kasana.kanvas.viewmodels.administration import (
     LibraryRootView,
     MetadataCandidateView,
     MetadataReviewItemView,
+    job_view,
     overview_from_status,
 )
 from kasana.kanvas.viewmodels.collections import (
@@ -135,8 +141,11 @@ from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemDetail,
+    LibraryItemEditAudit,
     LibraryItemKind,
+    LibraryItemMutationResult,
     LibraryItemSummary,
+    LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootKind,
     LibraryRootSummary,
@@ -145,12 +154,34 @@ from kasana.katalog.public import (
     PaginatedResponse,
     PlaybackStateResponse,
     ScanRequest,
+    SelectedArtwork,
     SeriesPlaybackContext,
     StandalonePlaybackContext,
     StatusResponse,
+    UserRole,
+    UserSummary,
     WatchedFilter,
     WatchOrderPlaybackContext,
 )
+
+_EDITABLE_ITEM_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDetail)
+
+
+@pytest.fixture(autouse=True)
+def active_profile(monkeypatch: MonkeyPatch) -> SessionProfile:
+    """Give legacy route-contract tests a selected owner profile."""
+
+    profile = SessionProfile(UserSummary(id=1, username="tester", role=UserRole.OWNER))
+
+    async def current_profile(_request: object) -> SessionProfile:
+        return profile
+
+    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
+    return profile
+
+
+def _selected_profile() -> SessionProfile:
+    return SessionProfile(UserSummary(id=1, username="tester", role=UserRole.OWNER))
 
 
 def _item(*, artwork: tuple[ArtworkSelection, ...] = ()) -> LibraryItemSummary:
@@ -161,6 +192,36 @@ def _item(*, artwork: tuple[ArtworkSelection, ...] = ()) -> LibraryItemSummary:
         year=2004,
         availability=Availability.AVAILABLE,
         artwork=artwork,
+    )
+
+
+def _editable_item(*, title: str = "A title") -> LibraryItemDetail:
+    """Build the public item-detail union exactly as Katalog returns it."""
+
+    return _EDITABLE_ITEM_ADAPTER.validate_python(
+        {
+            "id": 7,
+            "title": title,
+            "sort_title": title,
+            "kind": LibraryItemKind.MOVIE,
+            "year": 2004,
+            "availability": Availability.AVAILABLE,
+            "tags": ["anime"],
+            "artwork": [
+                {
+                    "id": 8,
+                    "kind": ArtworkKind.POSTER,
+                    "url": "/api/v1/library/items/7/artwork/8",
+                    "content_type": "image/jpeg",
+                    "size_bytes": 4,
+                }
+            ],
+            "overview": "An overview",
+            "release_date": "2004-02-03",
+            "locked_metadata_fields": ["title"],
+            "selected_artwork": [{"kind": "poster", "artwork_id": 8}],
+            "playback_url": "/api/v1/playback/items/7",
+        }
     )
 
 
@@ -190,6 +251,29 @@ def _admin_job() -> JobView:
         cancellable=True,
         cancellationRequested=False,
     )
+
+
+def test_job_view_exposes_failure_reason_for_failed_rows() -> None:
+    job = BackgroundJob(
+        id="job-1",
+        kind="scan",
+        status=JobStatus.FAILED,
+        submitted_at=datetime.now(UTC),
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        progress=JobProgress(phase="matching", current=358, total=358, unit="files"),
+        message="Maintenance job failed.",
+        failure_code="runtimeerror",
+        failure_message="TMDB request failed.",
+        cancellable=False,
+    )
+
+    view = job_view(job)
+    payload = view.model_dump(by_alias=True, mode="json")
+
+    assert payload["status"] == "failed"
+    assert payload["message"] == "Maintenance job failed."
+    assert payload["failure"] == "TMDB request failed."
 
 
 def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
@@ -240,16 +324,16 @@ def test_filter_mapping_and_cursor_pagination_prevent_duplicate_requests() -> No
         {
             "search": "  Ghost  ",
             "kind": "movie",
-            "anime": "1",
             "watched": "in_progress",
             "availability": "available",
             "year": "2001",
-        }
+        },
+        tags=("anime", "favourite"),
     )
 
     assert filters.to_katalog_arguments() == {
         "kind": LibraryItemKind.MOVIE,
-        "tags": ("anime",),
+        "tags": ("anime", "favourite"),
         "year": 2001,
         "watched": WatchedFilter.IN_PROGRESS,
         "availability": Availability.AVAILABLE,
@@ -638,7 +722,7 @@ async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class ConflictCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def add_collection_member(self, _collection_id: int, **_arguments: object) -> int:
@@ -668,7 +752,7 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
     calls: list[tuple[str, object]] = []
 
     class FakeCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def create_collection(self, *, name: str, overview: str | None) -> int:
@@ -778,7 +862,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
     calls: list[str] = []
 
     class FakeCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def item_picker_page(
@@ -848,7 +932,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
             return self._payload
 
     class FakePlayback:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def create_watch_order_launch_uri(
@@ -915,7 +999,7 @@ async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_stat
     monkeypatch: MonkeyPatch,
 ) -> None:
     class ArtworkCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def artwork_content(
@@ -950,7 +1034,7 @@ async def test_browser_data_endpoints_return_typed_katalog_failure_states(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class FailingCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def collection_page(self, **_arguments: object) -> object:
@@ -1031,7 +1115,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     )
 
     class AdminCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def administration_overview(self) -> AdministrationOverviewView:
@@ -1110,11 +1194,12 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
             return self._payload
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", AdminCatalogue)
-    overview_response = await administration_overview_data()
+    request = Request({"type": "http", "query_string": b"", "headers": []})
+    overview_response = await administration_overview_data(request)
     jobs_response = await administration_jobs_data(
         Request({"type": "http", "query_string": b"", "headers": []})
     )
-    roots_response = await administration_roots_data()
+    roots_response = await administration_roots_data(request)
     metadata_response = await administration_metadata_data(
         Request({"type": "http", "query_string": b"", "headers": []})
     )
@@ -1319,11 +1404,160 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
     ]
 
 
+async def test_katalog_service_item_edit_contracts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    item = _editable_item()
+    audit = LibraryItemEditAudit(
+        id=3,
+        actor="tester",
+        changed_fields=("title", "selected_artwork"),
+        occurred_at=datetime.now(UTC),
+    )
+    mutation = LibraryItemMutationResult(item=item, audit=audit)
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get_library_item(self, item_id: int) -> SimpleNamespace:
+            assert item_id == 7
+            calls.append("detail")
+            return SimpleNamespace(item=item)
+
+        async def update_library_item(
+            self, item_id: int, request: LibraryItemUpdate
+        ) -> LibraryItemMutationResult:
+            assert item_id == 7
+            assert request.title == "Updated"
+            assert request.selected_artwork == (
+                SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),
+            )
+            calls.append("update")
+            return mutation
+
+        async def list_library_item_edit_audit(
+            self, item_id: int
+        ) -> tuple[LibraryItemEditAudit, ...]:
+            assert item_id == 7
+            calls.append("audit")
+            return (audit,)
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", FakeClient)
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+
+    detail = await service.item_edit_detail(7)
+    result = await service.update_item(
+        7,
+        LibraryItemUpdate(
+            actor="tester",
+            title="Updated",
+            selected_artwork=(SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),),
+        ),
+    )
+    audits = await service.item_edit_audit(7)
+
+    assert detail.title == "A title"
+    assert result.audit.changed_fields == ("title", "selected_artwork")
+    assert audits == (audit,)
+    assert calls == ["detail", "update", "audit"]
+
+
+async def test_item_edit_endpoints_report_data_and_validation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    item = _editable_item(title="Updated")
+    audit = LibraryItemEditAudit(
+        id=3,
+        actor="tester",
+        changed_fields=("title", "tags"),
+        occurred_at=datetime.now(UTC),
+    )
+
+    class EditingCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            assert _user_id == 1
+
+        async def item_edit_detail(self, item_id: int) -> LibraryItemDetail:
+            assert item_id == 7
+            return item
+
+        async def item_edit_audit(self, item_id: int) -> tuple[LibraryItemEditAudit, ...]:
+            assert item_id == 7
+            return (audit,)
+
+        async def update_item(
+            self, item_id: int, request: LibraryItemUpdate
+        ) -> LibraryItemMutationResult:
+            assert item_id == 7
+            assert request.actor == "tester"
+            assert request.title == "Updated"
+            assert request.sort_title == "Updated"
+            assert request.release_year == 2004
+            assert request.tags == ("anime", "favourite")
+            assert request.locked_metadata_fields == ("title",)
+            assert request.selected_artwork == (
+                SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),
+            )
+            return LibraryItemMutationResult(item=item, audit=audit)
+
+    class JsonRequest:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        async def json(self) -> object:
+            return self._payload
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", EditingCatalogue)
+    detail_response = await item_edit_data(
+        7, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    action_response = await item_edit_action(
+        7,
+        cast(
+            Request,
+            JsonRequest(
+                {
+                    "title": "Updated",
+                    "sortTitle": "Updated",
+                    "overview": "An overview",
+                    "releaseDate": "2004-02-03",
+                    "releaseYear": 2004,
+                    "tags": ["anime", "favourite"],
+                    "seasonNumber": None,
+                    "episodeNumber": None,
+                    "lockedMetadataFields": ["title"],
+                    "selectedArtwork": [{"kind": "poster", "artworkId": 8}],
+                    "kind": "movie",
+                    "parentId": None,
+                }
+            ),
+        ),
+    )
+    invalid_action_response = await item_edit_action(
+        7, cast(Request, JsonRequest({"tags": "anime"}))
+    )
+
+    assert json.loads(bytes(detail_response.body))["item"]["selected_artwork"] == [
+        {"kind": "poster", "artwork_id": 8}
+    ]
+    assert json.loads(bytes(detail_response.body))["audit"][0]["actor"] == "tester"
+    assert json.loads(bytes(action_response.body))["audit"]["changed_fields"] == ["title", "tags"]
+    assert invalid_action_response.status_code == 422
+
+
 async def test_administration_error_states_and_local_section_routes(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class FailingAdminCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def administration_overview(self) -> object:
@@ -1347,11 +1581,15 @@ async def test_administration_error_states_and_local_section_routes(
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalogue)
     responses = (
-        await administration_overview_data(),
+        await administration_overview_data(
+            Request({"type": "http", "query_string": b"", "headers": []})
+        ),
         await administration_jobs_data(
             Request({"type": "http", "query_string": b"", "headers": []})
         ),
-        await administration_roots_data(),
+        await administration_roots_data(
+            Request({"type": "http", "query_string": b"", "headers": []})
+        ),
         await administration_metadata_data(
             Request({"type": "http", "query_string": b"", "headers": []})
         ),
@@ -1364,11 +1602,12 @@ async def test_administration_error_states_and_local_section_routes(
 
     assert [response.status_code for response in responses] == [503, 503, 503, 503, 422, 422, 422]
     with Client(page("")):
-        await administration_page()
-        await administration_metadata_page()
-        await administration_libraries_page()
-        await administration_jobs_page()
-        await administration_artwork_page()
+        request = Request({"type": "http", "query_string": b"", "headers": []})
+        await administration_page(request)
+        await administration_metadata_page(request)
+        await administration_libraries_page(request)
+        await administration_jobs_page(request)
+        await administration_artwork_page(request)
 
 
 def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> None:
@@ -1386,6 +1625,45 @@ def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> Non
             feedback_state("Empty", "No entries")
             feedback_state("Retry", "Try again", retry=lambda: None)
         skeleton_posters(2)
+
+
+def test_shell_does_not_mount_search_overlay() -> None:
+    with Client(page("")) as client:
+        with page_shell(Kanvas_Settings(), "/library", "Library", _selected_profile()):
+            pass
+        search_actions = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-kanvas-global-search") == "true"
+        ]
+        overlays = [
+            element for element in client.elements.values() if element.tag == "kanvas-global-search"
+        ]
+
+    assert search_actions == []
+    assert overlays == []
+
+
+def test_administration_sections_mount_distinct_browser_states_and_active_tabs() -> None:
+    sections = ("overview", "metadata", "libraries", "jobs", "artwork", "hierarchy")
+
+    for section in sections:
+        with Client(page("")) as client:
+            render_administration(Kanvas_Settings(), _selected_profile(), section)
+            administration = next(
+                element
+                for element in client.elements.values()
+                if element.tag == BrowserComponent.ADMINISTRATION
+            )
+            active_tabs = [
+                element
+                for element in client.elements.values()
+                if "k-admin-nav__link--active" in _element_classes(element)
+            ]
+
+        assert _element_props(administration)["data-section"] == section
+        assert "section" not in _element_props(administration)
+        assert len(active_tabs) == 1
 
 
 def test_browser_component_mounting_uses_native_elements_and_validates_attributes() -> None:
@@ -1458,14 +1736,14 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
     poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
 
     class HomeCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def home_rails(self) -> tuple[MediaRailView, ...]:
             return (MediaRailView(title="Continue", posters=(poster,)),)
 
     class ItemCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def item_detail(self, item_id: int) -> ItemDetailView:
@@ -1487,15 +1765,21 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         async def clear_watched(self, _item_id: int) -> None:
             pass
 
+        async def library_tags(self) -> tuple[str, ...]:
+            return ("anime",)
+
     with Client(page("")) as client:
         monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalogue)
-        await home_route.render_home(Kanvas_Settings())
+        await home_route.render_home(Kanvas_Settings(), _selected_profile())
         monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalogue)
-        await item_route.render_item(Kanvas_Settings(), 7)
-        render_library(Kanvas_Settings(), LibraryFilters(search="poster"))
+        await item_route.render_item(Kanvas_Settings(), _selected_profile(), 7)
+        monkeypatch.setattr(library_route, "KanvasKatalogService", ItemCatalogue)
+        await render_library(
+            Kanvas_Settings(), _selected_profile(), LibraryFilters(search="poster")
+        )
         await collections_page(Request({"type": "http", "query_string": b"", "headers": []}))
-        await search_page()
-        await administration_page()
+        request = Request({"type": "http", "query_string": b"", "headers": []})
+        await administration_page(request)
         await design_page()
 
         browser_components = [
@@ -1571,7 +1855,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
     )
 
     class RouteCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def collection_detail(self, collection_id: int) -> CollectionDetailView:
@@ -1592,12 +1876,13 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
     monkeypatch.setattr(collections_route, "KanvasKatalogService", RouteCatalogue)
 
     with Client(page("")) as client:
-        await collections_route.render_collection_new(Kanvas_Settings())
-        await collections_route.render_collection_detail(Kanvas_Settings(), 4)
-        await collections_route.render_collection_edit(Kanvas_Settings(), 4)
-        await collections_route.render_watch_order_new(Kanvas_Settings(), 4)
+        await collections_route.render_collection_new(Kanvas_Settings(), _selected_profile())
+        await collections_route.render_collection_detail(Kanvas_Settings(), _selected_profile(), 4)
+        await collections_route.render_collection_edit(Kanvas_Settings(), _selected_profile(), 4)
+        await collections_route.render_watch_order_new(Kanvas_Settings(), _selected_profile(), 4)
         await collections_route.render_watch_order(
             Kanvas_Settings(),
+            _selected_profile(),
             9,
             editable=True,
             preview_mode="air",
@@ -1629,7 +1914,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
 
 async def test_collection_routes_share_one_unavailable_state(monkeypatch: MonkeyPatch) -> None:
     class UnavailableCatalogue:
-        def __init__(self, _settings: Kanvas_Settings) -> None:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
         async def collection_detail(self, _collection_id: int) -> CollectionDetailView:
@@ -1641,10 +1926,12 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
     monkeypatch.setattr(collections_route, "KanvasKatalogService", UnavailableCatalogue)
 
     with Client(page("")) as client:
-        await collections_route.render_collection_detail(Kanvas_Settings(), 4)
-        await collections_route.render_collection_edit(Kanvas_Settings(), 4)
-        await collections_route.render_watch_order_new(Kanvas_Settings(), 4)
-        await collections_route.render_watch_order(Kanvas_Settings(), 9, editable=True)
+        await collections_route.render_collection_detail(Kanvas_Settings(), _selected_profile(), 4)
+        await collections_route.render_collection_edit(Kanvas_Settings(), _selected_profile(), 4)
+        await collections_route.render_watch_order_new(Kanvas_Settings(), _selected_profile(), 4)
+        await collections_route.render_watch_order(
+            Kanvas_Settings(), _selected_profile(), 9, editable=True
+        )
 
         feedback_titles = [
             element
@@ -1655,14 +1942,25 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
     assert len(feedback_titles) == 4
 
 
-async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None:
+async def test_native_forms_and_design_review_use_shared_ui_primitives(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class TagCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def library_tags(self) -> tuple[str, ...]:
+            return ("anime", "favourite")
+
+    monkeypatch.setattr(library_route, "KanvasKatalogService", TagCatalogue)
     with Client(page("")) as library_client:
-        render_library(
+        await render_library(
             Kanvas_Settings(),
+            _selected_profile(),
             LibraryFilters(
                 search="poster",
                 kind=LibraryItemKind.MOVIE,
-                anime=True,
+                tags=("anime",),
                 watched=WatchedFilter.IN_PROGRESS,
                 availability=Availability.AVAILABLE,
             ),
@@ -1684,10 +1982,9 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
             assert "k-select" in _element_classes(select)
             assert "k-control-shell" in _element_classes(_parent_element(select))
             assert "k-select-wrap" in _element_classes(_parent_element(select))
-        anime = _input_named(library_client, "anime")
-        assert _element_props(anime)["checked"] is True
-        assert "k-control-shell" in _element_classes(_parent_element(anime))
-        assert "k-check" in _element_classes(_parent_element(anime))
+        tags = _select_named(library_client, "tag")
+        assert _element_props(tags)["multiple"] is True
+        assert "k-select--tags" in _element_classes(tags)
         apply_button = next(
             element
             for element in library_client.elements.values()
@@ -1704,23 +2001,10 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
         assert "search=poster" in cast(str, _element_props(poster_grid)["source"])
         assert "kind=movie" in cast(str, _element_props(poster_grid)["source"])
 
-    with Client(page("")) as search_client:
-        await search_page()
-        search_page_input = _input_named(search_client, "search")
-
-        assert "k-input" in _element_classes(search_page_input)
-        assert _element_props(search_page_input)["autofocus"] is True
-        assert "k-control-shell" in _element_classes(_parent_element(search_page_input))
-        assert "k-input-shell" in _element_classes(_parent_element(search_page_input))
-        search_button = next(
-            element
-            for element in search_client.elements.values()
-            if element.tag == "button" and _element_props(element).get("aria-label") == "Search"
-        )
-        assert _element_props(search_button)["type"] == "submit"
-
     with Client(page("")) as collections_client:
-        await collections_route.render_collections_index(Kanvas_Settings(), search=None)
+        await collections_route.render_collections_index(
+            Kanvas_Settings(), _selected_profile(), search=None
+        )
         collections_search = _input_named(collections_client, "search")
 
         assert _element_props(collections_search)["autofocus"] is True
@@ -1732,6 +2016,32 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives() -> None
         assert "k-input" in _element_classes(review_input)
         assert "k-control-shell" in _element_classes(_parent_element(review_input))
         assert "k-input-shell" in _element_classes(_parent_element(review_input))
+
+
+async def test_library_tag_filter_reports_katalog_failure_without_losing_active_tags(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class UnavailableCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def library_tags(self) -> tuple[str, ...]:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+    monkeypatch.setattr(library_route, "KanvasKatalogService", UnavailableCatalogue)
+    with Client(page("")) as client:
+        await render_library(
+            Kanvas_Settings(), _selected_profile(), LibraryFilters(tags=("anime",))
+        )
+        tags = _select_named(client, "tag")
+        feedback_titles = [
+            element
+            for element in client.elements.values()
+            if "k-feedback__title" in _element_classes(element)
+        ]
+
+    assert _element_props(tags)["multiple"] is True
+    assert len(feedback_titles) == 1
 
 
 def test_poster_component_passes_one_safe_payload_to_the_browser_renderer() -> None:
@@ -1784,6 +2094,30 @@ def _element_props(element: Element) -> dict[str, object]:
     """Expose NiceGUI's internal test-only rendered attributes."""
 
     return cast(dict[str, object], element._props)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_profile_controls_do_not_duplicate_the_administration_navigation() -> None:
+    owner = _selected_profile()
+    member = SessionProfile(UserSummary(id=2, username="member", role=UserRole.USER))
+
+    with Client(page("")) as owner_client:
+        primary_navigation("/library", owner)
+        owner_shortcuts = [
+            element
+            for element in owner_client.elements.values()
+            if "k-administration-shortcut" in _element_classes(element)
+        ]
+
+    with Client(page("")) as member_client:
+        primary_navigation("/library", member)
+        member_shortcuts = [
+            element
+            for element in member_client.elements.values()
+            if "k-administration-shortcut" in _element_classes(element)
+        ]
+
+    assert owner_shortcuts == []
+    assert member_shortcuts == []
 
 
 def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> None:
@@ -1876,10 +2210,10 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
         return FakeClient()
 
     monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", fake_client)
-    service = KanvasKatalogService(Kanvas_Settings())
+    service = KanvasKatalogService(Kanvas_Settings(), _selected_profile().user.id)
 
     rails = await service.home_rails()
-    posters, next_cursor = await service.library_page(LibraryFilters(anime=True), cursor=None)
+    posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
 
     assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
     assert posters[0].poster_url == "/kanvas/artwork/7/8"
@@ -1945,7 +2279,6 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/collections/{collection_id}/watch-orders/new",
         "/watch-orders/{watch_order_id}",
         "/watch-orders/{watch_order_id}/edit",
-        "/search",
         "/administration",
         "/administration/metadata",
         "/administration/libraries",
@@ -1954,6 +2287,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/administration/hierarchy",
         "/_design",
     } <= paths
+    assert "/search" not in paths
     assert keyboard_action("Enter") is NavigationAction.ACTIVATE
     assert keyboard_action("Escape") is NavigationAction.BACK
     assert keyboard_action("/") is NavigationAction.FOCUS_SEARCH
@@ -1991,6 +2325,13 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "AbortController" in javascript
     assert "normalisedGridSource" in javascript
     assert "kanvas-onboarding" in javascript
+    assert "const jobDetail" in javascript
+    assert "job.failure || job.message" in javascript
+    assert "const providerEntryUrl" in javascript
+    assert "https://www.themoviedb.org/${section}/${providerId}" in javascript
+    assert "https://www.imdb.com/title/${providerId}/" in javascript
+    assert "https://www.tvmaze.com/shows/${providerId}" in javascript
+    assert "k-metadata-selected__title" in css
 
 
 def test_administration_overview_transformation_and_adaptive_polling() -> None:

@@ -3,20 +3,23 @@
 from pydantic import AnyHttpUrl, AnyUrl, Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 
+from kasana.configuration import configured_katalog_api_url
 from kasana.shared.settings import KSettings
 
 
 class KourierSettings(KSettings):
+    configuration_section = "kourier"
     model_config = SettingsConfigDict(
         env_prefix="KASANA_KOURIER_",
     )
 
-    katalog_url: AnyUrl = AnyUrl("http://127.0.0.1:5373")
+    katalog_url: AnyUrl = Field(default_factory=lambda: AnyUrl(configured_katalog_api_url()))
 
 
 class TMDBSettings(KSettings):
     """TMDB adapter settings loaded from ``KASANA_KOURIER_TMDB_`` variables."""
 
+    configuration_section = "tmdb"
     model_config = SettingsConfigDict(
         env_prefix="KASANA_KOURIER_TMDB_",
     )

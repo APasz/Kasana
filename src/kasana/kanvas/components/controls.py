@@ -98,9 +98,7 @@ def action_button(
     return ActionButton(button, visible_label)
 
 
-def icon_action(
-    label: str, icon: IconName, handler: Callable[..., Any] | None = None
-) -> Element:
+def icon_action(label: str, icon: IconName, handler: Callable[..., Any] | None = None) -> Element:
     """Build a labelled icon action with a persistent accessible name."""
 
     button = ui.element("button").classes("k-icon-action").props("type=button")
@@ -118,8 +116,7 @@ def icon_svg(name: IconName | str) -> None:
 
     paths = {
         IconName.HOME: (
-            "M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 "
-            "1 3 19.5z M9 21v-6h6v6"
+            "M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z M9 21v-6h6v6"
         ),
         IconName.LIBRARY: "M4 4h16v16H4z M8 4v16 M12 4v16",
         IconName.COLLECTIONS: "M4 5h16v4H4z M4 15h16v4H4z M7 9v6 M17 9v6",

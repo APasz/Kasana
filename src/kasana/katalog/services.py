@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection as AbstractCollection
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -85,6 +86,7 @@ def create_library_item(
     season_number: int | None = None,
     episode_number: int | None = None,
     overview: str | None = None,
+    tags: frozenset[str] = frozenset(),
     availability: AvailabilityState = AvailabilityState.AVAILABLE,
     locked_metadata_fields: frozenset[MetadataField] = frozenset(),
 ) -> Zaisan:
@@ -99,7 +101,7 @@ def create_library_item(
         msg = "An episode requires season and episode numbers."
         raise ValueError(msg)
 
-    _validate_parent(session, library_root_id, item_kind, parent_id)
+    validate_library_item_parent(session, library_root_id, item_kind, parent_id)
     item: Zaisan = Zaisan(
         library_root_id=library_root_id,
         parent_id=parent_id,
@@ -112,6 +114,7 @@ def create_library_item(
         season_number=season_number,
         episode_number=episode_number,
         overview=overview,
+        tags=normalise_library_item_tags(tags),
         availability=availability,
         locked_metadata_fields=sorted(field.value for field in locked_metadata_fields),
     )
@@ -298,29 +301,45 @@ def delete_library_item(session: Session, *, library_item_id: int) -> None:
     session.flush()
 
 
-def _validate_parent(
+def allowed_parent_kinds(item_kind: ZaisanKind) -> frozenset[ZaisanKind] | None:
+    """Return the valid parent kinds, or ``None`` for top-level kinds."""
+
+    return _PARENT_KINDS.get(item_kind)
+
+
+def validate_library_item_parent(
     session: Session,
     library_root_id: int,
     item_kind: ZaisanKind,
     parent_id: int | None,
 ) -> None:
-    allowed_parent_kinds: frozenset[ZaisanKind] | None = _PARENT_KINDS.get(item_kind)
+    parent_kinds = allowed_parent_kinds(item_kind)
     if parent_id is None:
-        if allowed_parent_kinds is not None:
+        if parent_kinds is not None:
             msg: LiteralString = f"{item_kind.value} items require a parent."
             raise ValueError(msg)
         return
-    if allowed_parent_kinds is None:
+    if parent_kinds is None:
         msg = f"{item_kind.value} items cannot have a parent."
         raise ValueError(msg)
     parent = _require_item(session, parent_id)
     if parent.library_root_id != library_root_id:
         msg = "A library item's parent must be in the same library root."
         raise ValueError(msg)
-    if parent.item_kind not in allowed_parent_kinds:
-        expected = ", ".join(kind.value for kind in sorted(allowed_parent_kinds))
+    if parent.item_kind not in parent_kinds:
+        expected = ", ".join(kind.value for kind in sorted(parent_kinds))
         msg = f"{item_kind.value} requires one of these parent kinds: {expected}."
         raise ValueError(msg)
+
+
+def normalise_library_item_tags(values: AbstractCollection[str]) -> list[str]:
+    """Store ordinary item tags once, with stable casing and no blank values."""
+
+    tags = {value.strip().casefold() for value in values}
+    if "" in tags:
+        msg = "Library item tags cannot be blank."
+        raise ValueError(msg)
+    return sorted(tags)
 
 
 def _require_item(session: Session, library_item_id: int) -> Zaisan:

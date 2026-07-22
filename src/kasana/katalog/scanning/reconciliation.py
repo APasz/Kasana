@@ -55,7 +55,9 @@ def apply_scan(
             select(MediaFile).where(MediaFile.id.in_([record.id for record in existing_files]))
         ).all()
     }
-    cache: ItemCache = item_cache(session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all())
+    cache: ItemCache = item_cache(
+        session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all()
+    )
     for plan in plans:
         if plan.action is PlanAction.MOVE:
             assert plan.existing_file_id is not None
@@ -137,7 +139,9 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
     return cache
 
 
-def materialise_item(session: Session, root_id: int, cache: ItemCache, parsed: ParsedMedia) -> Zaisan:
+def materialise_item(
+    session: Session, root_id: int, cache: ItemCache, parsed: ParsedMedia
+) -> Zaisan:
     match parsed.kind:
         case ParsedMediaKind.MOVIE:
             return get_movie(session, root_id, cache, parsed.title, parsed.release_year)

@@ -68,9 +68,9 @@ def collection_members(title: str, members: tuple[CollectionMemberView, ...]) ->
     if not members:
         return
     with (
-        ui.element("section").classes("k-collection-members").props(
-            f'aria-label="{escape(title, quote=True)}"'
-        )
+        ui.element("section")
+        .classes("k-collection-members")
+        .props(f'aria-label="{escape(title, quote=True)}"')
     ):
         section_title(title)
         with ui.element("div").classes("k-child-grid"):

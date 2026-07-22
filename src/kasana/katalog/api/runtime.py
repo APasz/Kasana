@@ -26,6 +26,7 @@ from kasana.katalog.repair import (
 )
 from kasana.katalog.scanning import IncrementalScanner
 from kasana.katalog.settings import KatalogSettings
+from kasana.katalog.user_configuration import UserConfigurationStore
 from kasana.kourier.settings import TMDBSettings
 from kasana.kourier.tmdb import TMDBProvider
 from kasana.shared.concurrency import run_blocking
@@ -48,6 +49,7 @@ class KatalogApiRuntime:
             playback_launch_token_ttl=timedelta(seconds=settings.playback_launch_token_ttl_seconds),
             media_access_token_ttl=timedelta(seconds=settings.media_access_token_ttl_seconds),
             max_playback_queue_size=settings.playback_max_queue_size,
+            user_configurations=UserConfigurationStore(settings.user_configuration_directory),
         )
         self.file_transfers: FileTransferPolicy = RangeStreamingFileTransferPolicy(
             chunk_size=settings.media_transfer_chunk_size
@@ -104,18 +106,50 @@ class KatalogApiRuntime:
                 include_unavailable=include_unavailable,
                 dry_run=dry_run,
             )
+            counters = {"discovered": result.totals.discovered}
+            message = f"Scanned {result.totals.discovered} files."
+            if not dry_run:
+                await context.report(
+                    phase="matching",
+                    current=result.totals.discovered,
+                    total=result.totals.discovered,
+                    unit="files",
+                    message="Finding safe high-confidence metadata matches.",
+                    force=True,
+                )
+                try:
+                    outcomes = await self._with_provider(
+                        lambda workflow, providers: workflow.auto_match(
+                            providers, root_id=root_id
+                        )
+                    )
+                except MetadataProviderConfigurationError:
+                    message += " Metadata matching skipped because TMDB is not configured."
+                else:
+                    auto_matched = sum(
+                        outcome.auto_matched_provider_id is not None for outcome in outcomes
+                    )
+                    review_required = sum(
+                        outcome.auto_matched_provider_id is None and bool(outcome.candidates)
+                        for outcome in outcomes
+                    )
+                    counters.update(
+                        auto_matched=auto_matched,
+                        review_required=review_required,
+                    )
+                    message += (
+                        f" Automatically matched {auto_matched} items; "
+                        f"{review_required} require review."
+                    )
             await context.report(
                 phase="complete",
                 current=result.totals.discovered,
                 total=result.totals.discovered,
                 unit="files",
-                message="Scan complete.",
+                message=message,
                 force=True,
             )
-            return JobOutcome(
-                message=f"Scanned {result.totals.discovered} files.",
-                counters={"discovered": result.totals.discovered},
-            )
+            return JobOutcome(message=message, counters=counters)
 
         return await self.jobs.submit("scan", scan, library_root_id=root_id)
 

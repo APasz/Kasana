@@ -15,9 +15,6 @@ git clone <repository-url> kasana
 cd kasana
 uv sync --all-groups
 
-export KASANA_KATALOG_DATABASE_PATH="$PWD/.local/share/kasana/kasana.sqlite3"
-export KASANA_KATALOG_ARTWORK_CACHE_PATH="$PWD/.cache/kasana/artwork"
-
 uv run kasana-katalog database initialise
 uv run kasana-katalog user create owner --display-name Owner
 uv run kasana-katalog library add /absolute/path/to/Movies --expected-kind movie --display-name Movies
@@ -26,18 +23,28 @@ uv run kasana-katalog status
 ```
 
 Use `--expected-kind series` for a television root. The scanner recognises
-`.avi`, `.m4v`, `.mkv`, `.mov`, `.mp4`, and `.webm`. Settings can instead go in
-an ignored `.env` file:
+`.avi`, `.m4v`, `.mkv`, `.mov`, `.mp4`, and `.webm`.
 
-```dotenv
-KASANA_KATALOG_DATABASE_PATH=.local/share/kasana/kasana.sqlite3
-KASANA_KATALOG_ARTWORK_CACHE_PATH=.cache/kasana/artwork
-```
+Non-secret application preferences live in one domain file per component:
+`configs/config.shared.json`, `config.katalog.json`, `config.kanvas.json`,
+`config.kestrel.json`, `config.kourier.json`, and `config.tmdb.json`. Each
+created profile is stored independently at `configs/users/<user-id>/configuration.json`;
+the numeric directory is its user ID and contains the profile name, level, state,
+and PIN verifier. User documents are deliberately ignored by Git. Kestrel,
+Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
+`api_host` and `api_port`. Keep only secrets (for example
+`KASANA_KOURIER_TMDB_API_TOKEN`) in `.env`; environment variables can still
+temporarily override non-secret preferences for deployment.
 
 Start the API with `uv run kasana-katalog-api`; its documentation is at
-<http://127.0.0.1:5373/api/v1/docs>. Set `KASANA_KATALOG_API_HOST` or
-`KASANA_KATALOG_API_PORT` to change the default `127.0.0.1:5373` bind address.
+<http://127.0.0.1:5373/api/v1/docs>. Change its bind address in
+`configs/config.katalog.json` (or temporarily set `KASANA_KATALOG_API_HOST` or
+`KASANA_KATALOG_API_PORT`).
 Kanvas is configured to use `127.0.0.1:5370` when its web server is enabled.
+All Kasana entry points write application logs to `logs/kasana.log` by default.
+Set `log_file` in `configs/config.shared.json` or temporarily set
+`KASANA_LOG_FILE` to change the destination; background job exceptions include
+their traceback there even when the Jobs page stores a compact failure reason.
 
 ## Play a file with Kestrel
 
@@ -125,9 +132,9 @@ uv run kasana-katalog artwork fetch --root 1
 ```
 
 Matching is reviewable and conservative; fuzzy title similarity alone cannot
-auto-match. Downloaded artwork is cached at `KASANA_KATALOG_ARTWORK_CACHE_PATH`
-(default `kasana-artwork-cache`) and never replaces artwork in media directories.
-TMDB options use the `KASANA_KOURIER_TMDB_` prefix; shared logging uses
-`KASANA_LOG_LEVEL`.
+auto-match. Downloaded artwork uses the configured `katalog.artwork_cache_path`
+and never replaces artwork in media directories. TMDB and logging preferences
+live in `configs/config.tmdb.json` and `configs/config.shared.json`; the TMDB
+token remains an environment-only secret.
 
 See [docs/architecture.md](docs/architecture.md) for component boundaries.

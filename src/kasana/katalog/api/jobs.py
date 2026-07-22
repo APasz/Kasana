@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from kasana.katalog.models import MaintenanceJob, MaintenanceJobStatus
 from kasana.shared.concurrency import run_blocking
 
 _ACTIVE_STATUSES = frozenset({MaintenanceJobStatus.QUEUED, MaintenanceJobStatus.RUNNING})
+_LOGGER = logging.getLogger(__name__)
 _TERMINAL_STATUSES = frozenset(
     {
         MaintenanceJobStatus.COMPLETED,
@@ -50,6 +52,18 @@ class JobOutcome:
 
     message: str | None = None
     counters: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class FailedJobLog:
+    """Stable log fields for a job that was persisted as failed."""
+
+    job_id: str
+    kind: str
+    phase: str | None
+    library_root_id: int | None
+    failure_code: str | None
+    failure_message: str | None
 
 
 class JobContext:
@@ -307,6 +321,7 @@ class JobRegistry:
                 message="Cancelled.",
             )
         except Exception as error:
+            _LOGGER.exception("Katalog maintenance job %s failed.", job_id)
             await self._transition(
                 job_id,
                 status=MaintenanceJobStatus.FAILED,
@@ -331,14 +346,34 @@ class JobRegistry:
     async def _transition(self, job_id: str, **changes: object) -> None:
         now = datetime.now(UTC)
 
-        def transition(session: Session) -> None:
+        def transition(session: Session) -> FailedJobLog | None:
             job = _require_job(session, job_id)
             for name, value in changes.items():
                 setattr(job, name, value)
             job.updated_at = now
             session.flush()
+            if changes.get("status") is not MaintenanceJobStatus.FAILED:
+                return None
+            return FailedJobLog(
+                job_id=job.id,
+                kind=job.kind,
+                phase=job.phase,
+                library_root_id=job.library_root_id,
+                failure_code=job.failure_code,
+                failure_message=job.failure_message,
+            )
 
-        await run_blocking(self._database.run_transaction, transition)
+        failed = await run_blocking(self._database.run_transaction, transition)
+        if failed is not None:
+            _LOGGER.error(
+                "Katalog maintenance job failed: id=%s kind=%s phase=%s root=%s code=%s message=%s",
+                failed.job_id,
+                failed.kind,
+                failed.phase or "-",
+                failed.library_root_id or "-",
+                failed.failure_code or "-",
+                failed.failure_message or "-",
+            )
 
     async def _start(self, job_id: str, started_at: datetime) -> bool:
         """Claim a queued row, respecting a cancellation that won the startup race."""

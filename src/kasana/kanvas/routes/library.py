@@ -8,26 +8,44 @@ from nicegui import ui
 
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.controls import ButtonType, action_button
-from kasana.kanvas.components.inputs import SelectOption, checkbox_input, select_input, text_input
+from kasana.kanvas.components.feedback import feedback_state
+from kasana.kanvas.components.inputs import (
+    SelectOption,
+    multi_select_input,
+    select_input,
+    text_input,
+)
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title
+from kasana.kanvas.profiles import SessionProfile
+from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.library import LibraryFilters
-from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
+from kasana.katalog.public import (
+    Availability,
+    KatalogClientError,
+    LibraryItemKind,
+    WatchedFilter,
+)
 
 
-def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
+async def render_library(
+    settings: Kanvas_Settings, profile: SessionProfile, filters: LibraryFilters
+) -> None:
     """Render the native filter strip and a lazy client-side bounded grid."""
 
-    with page_shell(settings, "/library", "Library"):
+    with page_shell(settings, "/library", "Library", profile):
         page_title("Library")
-        _filter_strip(filters)
+        tag_options, tag_error = await _tag_options(settings, profile, filters)
+        _filter_strip(filters, tag_options)
+        if tag_error is not None:
+            feedback_state("Tags unavailable", tag_error)
         source = "/kanvas/data/library?" + urlencode(_filter_query(filters))
         grid = mount_browser_component(
             BrowserComponent.POSTER_GRID,
             {
                 "source": source,
-                "state-user": settings.user_id,
+                "state-user": profile.user.id,
                 "development-mode": settings.development_mode,
             },
         )
@@ -35,7 +53,25 @@ def render_library(settings: Kanvas_Settings, filters: LibraryFilters) -> None:
             ui.label("Loading library…").classes("k-grid-status").props('aria-live="polite"')
 
 
-def _filter_strip(filters: LibraryFilters) -> None:
+async def _tag_options(
+    settings: Kanvas_Settings, profile: SessionProfile, filters: LibraryFilters
+) -> tuple[tuple[SelectOption, ...], str | None]:
+    """Keep active tags visible and report when Katalog cannot load its vocabulary."""
+
+    try:
+        tags = await KanvasKatalogService(settings, profile.user.id).library_tags()
+    except KatalogClientError:
+        tags = ()
+        error = "Existing tag filters remain applied; reload to try the complete tag list again."
+    else:
+        error = None
+    return (
+        tuple(SelectOption(tag, tag.title()) for tag in sorted(set(tags) | set(filters.tags))),
+        error,
+    )
+
+
+def _filter_strip(filters: LibraryFilters, tag_options: tuple[SelectOption, ...]) -> None:
     with ui.element("form").classes("k-filter-strip").props('method="get" action="/library"'):
         search = text_input(
             name="search",
@@ -64,6 +100,12 @@ def _filter_strip(filters: LibraryFilters) -> None:
             options=_availability_options(),
             value=filters.availability.value if filters.availability else "",
         )
+        multi_select_input(
+            name="tag",
+            aria_label="Tags",
+            options=tag_options,
+            values=filters.tags,
+        )
         year = text_input(
             name="year",
             input_type="number",
@@ -74,12 +116,6 @@ def _filter_strip(filters: LibraryFilters) -> None:
             shell_classes="k-input-shell--year",
         )
         year.props('min="1" max="9999"')
-        checkbox_input(
-            name="anime",
-            label="Anime",
-            value="1",
-            checked=filters.anime,
-        )
         action_button("Apply", button_type=ButtonType.SUBMIT)
 
 
@@ -110,18 +146,17 @@ def _availability_options() -> tuple[SelectOption, ...]:
     )
 
 
-def _filter_query(filters: LibraryFilters) -> dict[str, str]:
-    values: dict[str, str] = {}
+def _filter_query(filters: LibraryFilters) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
     if filters.search is not None:
-        values["search"] = filters.search
+        values.append(("search", filters.search))
     if filters.kind is not None:
-        values["kind"] = filters.kind.value
-    if filters.anime:
-        values["anime"] = "1"
+        values.append(("kind", filters.kind.value))
+    values.extend(("tag", tag) for tag in filters.tags)
     if filters.watched is not None:
-        values["watched"] = filters.watched.value
+        values.append(("watched", filters.watched.value))
     if filters.availability is not None:
-        values["availability"] = filters.availability.value
+        values.append(("availability", filters.availability.value))
     if filters.year is not None:
-        values["year"] = str(filters.year)
+        values.append(("year", str(filters.year)))
     return values

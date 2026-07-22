@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,11 +16,13 @@ import httpx
 import pytest
 import uvicorn
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from kasana.katalog.api.app import create_app
 from kasana.katalog.api.runtime import KatalogApiRuntime
 from kasana.katalog.client import KatalogClient, KatalogClientError, KatalogClientErrorKind
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.metadata import MetadataProvider, MetadataWorkflow, SearchOutcome
 from kasana.katalog.models import (
     AvailabilityState,
     CachedArtwork,
@@ -30,6 +33,8 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
+from kasana.katalog.public import JobStatus
+from kasana.katalog.scanning import ScanResult, ScanTotals
 from kasana.katalog.services import (
     add_collection_membership,
     append_watch_order_entry,
@@ -163,7 +168,11 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
                 rejected_at=None,
             )
         )
-    settings = KatalogSettings(database_path=database_path, artwork_cache_path=artwork_path)
+    settings = KatalogSettings(
+        database_path=database_path,
+        artwork_cache_path=artwork_path,
+        user_configuration_directory=tmp_path / "users",
+    )
     app = create_app(settings, database=database)
     runtime = KatalogApiRuntime(settings, database)
     app.state.runtime = runtime
@@ -210,6 +219,81 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
             "/api/v1/library/items", params={"watched": "watched", "user_id": 1}
         )
     ).json()["items"][0]["title"] == "Alpha"
+
+
+async def test_library_item_edit_is_audited_and_never_changes_media_files(
+    api_fixture: ApiFixture,
+) -> None:
+    def stored_media_path() -> str:
+        def load(session: Session) -> str:
+            item = session.get(Zaisan, 1)
+            assert item is not None
+            assert item.media_files
+            return item.media_files[0].absolute_path
+
+        return api_fixture.database.run_transaction(load)
+
+    media_path = stored_media_path()
+    response = await api_fixture.client.patch(
+        "/api/v1/library/items/1",
+        json={
+            "actor": "owner",
+            "title": "Edited Alpha",
+            "sort_title": "Alpha, Edited",
+            "overview": "Local overview",
+            "release_date": "2001-03-04",
+            "release_year": 2001,
+            "tags": ["anime", "favourite"],
+            "locked_metadata_fields": ["title", "overview"],
+            "selected_artwork": [{"kind": "poster", "artwork_id": 1}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["item"]["title"] == "Edited Alpha"
+    assert payload["item"]["tags"] == ["anime", "favourite", "genre"]
+    assert payload["item"]["selected_artwork"] == [{"kind": "poster", "artwork_id": 1}]
+    assert set(payload["audit"]["changed_fields"]) >= {
+        "title",
+        "sort_title",
+        "overview",
+        "release_date",
+        "tags",
+    }
+    assert (await api_fixture.client.get("/api/v1/library/tags")).json() == [
+        "anime",
+        "favourite",
+        "genre",
+    ]
+    audit = await api_fixture.client.get("/api/v1/library/items/1/edit-audit")
+    assert audit.status_code == 200
+    assert audit.json()[0]["actor"] == "owner"
+    current_media_path = stored_media_path()
+    assert current_media_path == media_path
+
+    clear_artwork = await api_fixture.client.patch(
+        "/api/v1/library/items/1",
+        json={"actor": "owner", "selected_artwork": []},
+    )
+    assert clear_artwork.status_code == 200
+    assert clear_artwork.json()["item"]["selected_artwork"] == []
+    assert clear_artwork.json()["audit"]["changed_fields"] == ["selected_artwork"]
+
+    invalid_hierarchy = await api_fixture.client.patch(
+        "/api/v1/library/items/1",
+        json={"actor": "owner", "kind": "series"},
+    )
+    assert invalid_hierarchy.status_code == 422
+
+    hierarchy_change = await api_fixture.client.patch(
+        "/api/v1/library/items/2",
+        json={"actor": "owner", "kind": "extra", "parent_id": 1},
+    )
+    assert hierarchy_change.status_code == 200
+    hierarchy_item = hierarchy_change.json()["item"]
+    assert hierarchy_item["kind"] == "extra"
+    assert hierarchy_item["parent_id"] == 1
 
 
 async def test_recently_added_coalesces_new_series_activity_and_excludes_unavailable_items(
@@ -375,6 +459,184 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     assert (await api_fixture.client.post("/api/v1/repairs/hierarchy", json={})).status_code == 202
     assert (
         await api_fixture.client.post("/api/v1/repairs/hierarchy", json={"apply": True})
+    ).status_code == 422
+
+
+async def test_metadata_review_only_returns_unresolved_suggestions(
+    api_fixture: ApiFixture,
+) -> None:
+    initial = await api_fixture.client.get("/api/v1/metadata/review")
+    assert [candidate["status"] for candidate in initial.json()["items"]] == ["suggested"]
+
+    ignored = await api_fixture.client.post("/api/v1/metadata/items/1/ignore")
+    review = await api_fixture.client.get("/api/v1/metadata/review")
+
+    assert ignored.status_code == 200
+    assert review.json()["items"] == []
+
+
+async def test_completed_scan_auto_matches_safe_candidates(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeScanner:
+        def __init__(self, _database: KatalogDatabase, **_options: object) -> None:
+            pass
+
+        def scan(
+            self,
+            *,
+            root_id: int | None,
+            include_unavailable: bool,
+            dry_run: bool,
+        ) -> ScanResult:
+            assert root_id == 1
+            assert include_unavailable is False
+            assert dry_run is False
+            return ScanResult(totals=ScanTotals(discovered=3), findings=())
+
+    class FakeWorkflow:
+        async def auto_match(
+            self, _providers: tuple[MetadataProvider, ...], *, root_id: int | None
+        ) -> tuple[SearchOutcome, ...]:
+            assert root_id == 1
+            return (
+                SearchOutcome(
+                    item_id=1,
+                    candidates=(),
+                    auto_matched_provider="fake",
+                    auto_matched_provider_id="safe-match",
+                ),
+            )
+
+    async def with_fake_provider(
+        operation: Callable[
+            [MetadataWorkflow, tuple[MetadataProvider, ...]], Awaitable[tuple[SearchOutcome, ...]]
+        ],
+    ) -> tuple[SearchOutcome, ...]:
+        return await operation(FakeWorkflow(), ())  # type: ignore[arg-type]
+
+    monkeypatch.setattr("kasana.katalog.api.runtime.IncrementalScanner", FakeScanner)
+    monkeypatch.setattr(api_fixture.runtime, "_with_provider", with_fake_provider)
+
+    job = await api_fixture.runtime.submit_scan(
+        root_id=1, include_unavailable=False, dry_run=False
+    )
+    task = api_fixture.runtime.jobs._tasks[job.id]  # pyright: ignore[reportPrivateUsage]
+    await task
+    completed = await api_fixture.runtime.jobs.get(job.id)
+
+    assert completed.status.value == "completed"
+    assert completed.result_counters == {
+        "discovered": 3,
+        "auto_matched": 1,
+        "review_required": 0,
+    }
+    assert completed.message == "Scanned 3 files. Automatically matched 1 items; 0 require review."
+
+
+async def test_failed_background_job_is_logged(
+    api_fixture: ApiFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def fail_job() -> None:
+        raise RuntimeError("fixture job failure")
+
+    caplog.set_level(logging.ERROR, logger="kasana.katalog.api.jobs")
+    job = await api_fixture.runtime.jobs.submit("fixture", fail_job)
+    task = api_fixture.runtime.jobs._tasks[job.id]  # pyright: ignore[reportPrivateUsage]
+    await task
+    failed = await api_fixture.runtime.jobs.get(job.id)
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.failure_message == "fixture job failure"
+    assert "Katalog maintenance job failed" in caplog.text
+    assert f"id={job.id}" in caplog.text
+    assert "message=fixture job failure" in caplog.text
+
+
+async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: ApiFixture) -> None:
+    created = await api_fixture.client.post(
+        "/api/v1/users",
+        json={"username": "profile", "role": "admin", "pin": "2468"},
+    )
+    assert created.status_code == 201
+    user = created.json()
+    assert user["role"] == "admin"
+    assert user["pin_required"] is True
+    assert "pin_hash" not in user
+    configuration_path = (
+        api_fixture.settings.user_configuration_directory / str(user["id"]) / "configuration.json"
+    )
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    assert set(configuration) == {"level", "name", "pin_hash", "state", "username"}
+    assert configuration["level"] == "admin"
+    assert configuration["name"] is None
+    assert configuration["state"] == "active"
+    assert configuration["username"] == "profile"
+    assert isinstance(configuration["pin_hash"], str)
+    configuration["level"] = "user"
+    configuration_path.write_text(json.dumps(configuration), encoding="utf-8")
+    assert (
+        next(
+            entry
+            for entry in (await api_fixture.client.get("/api/v1/users")).json()
+            if entry["id"] == user["id"]
+        )["role"]
+        == "user"
+    )
+
+    configured_user_path = (
+        api_fixture.settings.user_configuration_directory / "73" / "configuration.json"
+    )
+    configured_user_path.parent.mkdir()
+    configured_user_path.write_text(
+        json.dumps(
+            {
+                "username": "filesystem-profile",
+                "name": "Filesystem profile",
+                "level": "user",
+                "state": "active",
+                "pin_hash": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert next(
+        entry
+        for entry in (await api_fixture.client.get("/api/v1/users")).json()
+        if entry["id"] == 73
+    ) == {
+        "id": 73,
+        "username": "filesystem-profile",
+        "display_name": "Filesystem profile",
+        "role": "user",
+        "is_disabled": False,
+        "pin_required": False,
+    }
+
+    assert (
+        await api_fixture.client.post(
+            f"/api/v1/users/{user['id']}/authenticate", json={"pin": "0000"}
+        )
+    ).status_code == 422
+    assert (
+        await api_fixture.client.patch(
+            f"/api/v1/users/{user['id']}", json={"display_name": "Profile"}
+        )
+    ).json()["display_name"] == "Profile"
+    assert json.loads(configuration_path.read_text(encoding="utf-8"))["name"] == "Profile"
+    assert (await api_fixture.client.post(f"/api/v1/users/{user['id']}/disable")).json()[
+        "is_disabled"
+    ] is True
+    assert (
+        await api_fixture.client.post(
+            f"/api/v1/users/{user['id']}/authenticate", json={"pin": "2468"}
+        )
+    ).status_code == 422
+    assert (
+        await api_fixture.client.post(
+            "/api/v1/playback/plans",
+            json={"user_id": user["id"], "context": {"kind": "standalone", "item_id": 1}},
+        )
     ).status_code == 422
 
 

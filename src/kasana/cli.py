@@ -21,6 +21,7 @@ from kasana.kestrel.doctor import DoctorReport, run_doctor
 from kasana.kestrel.presentation import doctor_table
 from kasana.kestrel.settings import KestrelSettings
 from kasana.kourier.settings import KourierSettings
+from kasana.shared import SharedSettings, configure_logging
 
 app: Typer = typer.Typer(
     name="kasana",
@@ -42,11 +43,15 @@ class ConfigurationReport(BaseModel):
     kestrel_katalog_url: str
     kourier_katalog_url: str
     mpv_executable: str
+    log_file: str | None
 
 
 @app.callback()
 def configure() -> None:
     """Kasana component convenience commands."""
+
+    shared_settings = SharedSettings()
+    configure_logging(shared_settings.log_level, shared_settings.log_file)
 
 
 @app.command()
@@ -81,15 +86,17 @@ def show_config(
         kanvas = Kanvas_Settings()
         kestrel = KestrelSettings()
         kourier = KourierSettings()
+        shared = SharedSettings()
     except ValidationError as error:
         typer.echo("Configuration error.", err=True)
         raise typer.Exit(2) from error
     report = ConfigurationReport(
-        katalog_api_url=f"http://{katalog.api_host}:{katalog.api_port}",
+        katalog_api_url=katalog.api_url,
         kanvas_url=f"http://{kanvas.host}:{kanvas.port}",
         kestrel_katalog_url=kestrel.katalog_url,
         kourier_katalog_url=str(kourier.katalog_url),
         mpv_executable=kestrel.mpv_executable,
+        log_file=str(shared.log_file) if shared.log_file is not None else None,
     )
     if json_output:
         typer.echo(
@@ -113,6 +120,7 @@ def _configuration_table(report: ConfigurationReport) -> Table:
     table.add_row("Kestrel → Katalog", report.kestrel_katalog_url)
     table.add_row("Kourier → Katalog", report.kourier_katalog_url)
     table.add_row("mpv executable", report.mpv_executable)
+    table.add_row("Log file", report.log_file or "disabled")
     return table
 
 

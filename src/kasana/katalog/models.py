@@ -87,6 +87,12 @@ class PlaybackSessionEventKind(StrEnum):
     ADVANCED = "advanced"
 
 
+class UserRole(StrEnum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    USER = "user"
+
+
 class MetadataField(StrEnum):
     TITLE = "title"
     SORT_TITLE = "sort_title"
@@ -309,12 +315,21 @@ class Zaisan(Base):
     season_number: Mapped[int | None] = mapped_column(Integer)
     episode_number: Mapped[int | None] = mapped_column(Integer)
     overview: Mapped[str | None] = mapped_column(Text)
+    # Root tags describe a library as a whole.  These are deliberately separate
+    # so an editor can add a tag to one title without altering every item in a
+    # root.
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
     availability: Mapped[AvailabilityState] = mapped_column(
         _enum(AvailabilityState, "availability_state"),
         nullable=False,
         default=AvailabilityState.AVAILABLE,
     )
     locked_metadata_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # At most one cached artwork record is selected for each artwork kind.  The
+    # cache remains the source of bytes; this only stores the viewer's choice.
+    selected_artwork_ids: Mapped[dict[str, int]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -356,6 +371,9 @@ class Zaisan(Base):
     playback_session_entries: Mapped[list[PlaybackSessionEntry]] = orm_relationship(
         back_populates="library_item", passive_deletes=True
     )
+    edit_events: Mapped[list[LibraryItemEditEvent]] = orm_relationship(
+        back_populates="library_item", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -392,6 +410,28 @@ class Zaisan(Base):
             unique=True,
             sqlite_where=episode_number.is_not(None),
         ),
+    )
+
+
+class LibraryItemEditEvent(Base):
+    """An append-only local audit event for an administrator item edit."""
+
+    __tablename__ = "library_item_edit_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    library_item_id: Mapped[int] = mapped_column(
+        ForeignKey("library_item.id", ondelete="CASCADE"), nullable=False
+    )
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    changes: Mapped[JSONObject] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    library_item: Mapped[Zaisan] = orm_relationship(back_populates="edit_events")
+
+    __table_args__ = (
+        Index("ix_library_item_edit_event_item_time", "library_item_id", "occurred_at"),
     )
 
 
@@ -717,6 +757,14 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String)
+    role: Mapped[UserRole] = mapped_column(
+        _enum(UserRole, "user_role"),
+        nullable=False,
+        default=UserRole.USER,
+        server_default=UserRole.USER.value,
+    )
+    is_disabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default=false())
+    pin_hash: Mapped[str | None] = mapped_column(String)
 
     playback_states: Mapped[list[PlaybackState]] = orm_relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True

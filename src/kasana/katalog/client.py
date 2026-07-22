@@ -32,8 +32,11 @@ from kasana.katalog.api.contracts import (
     HierarchyRepairRequest,
     JobSubmission,
     LibraryItemDetail,
+    LibraryItemEditAudit,
     LibraryItemKind,
+    LibraryItemMutationResult,
     LibraryItemSummary,
+    LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootSummary,
     LibraryRootUpdate,
@@ -54,7 +57,10 @@ from kasana.katalog.api.contracts import (
     ScanRequest,
     SessionProgressUpdate,
     StatusResponse,
+    UserAuthentication,
+    UserCreate,
     UserSummary,
+    UserUpdate,
     WatchedFilter,
     WatchOrderCreate,
     WatchOrderDetail,
@@ -70,6 +76,10 @@ from kasana.katalog.api.contracts import (
 
 _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
 _ITEM_DETAIL_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDetail)
+_LIBRARY_TAGS_ADAPTER: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...])
+_ITEM_EDIT_AUDIT_ADAPTER: TypeAdapter[tuple[LibraryItemEditAudit, ...]] = TypeAdapter(
+    tuple[LibraryItemEditAudit, ...]
+)
 
 
 class _LibraryItemFilters(TypedDict, total=False):
@@ -201,6 +211,20 @@ class KatalogClient:
         except ValidationError as error:
             raise _response_error("Katalog returned invalid users.", response.request_id) from error
 
+    async def create_user(self, request: UserCreate) -> UserSummary:
+        return await self._send_model("POST", "/api/v1/users", request, UserSummary)
+
+    async def update_user(self, user_id: int, request: UserUpdate) -> UserSummary:
+        return await self._send_model("PATCH", f"/api/v1/users/{user_id}", request, UserSummary)
+
+    async def disable_user(self, user_id: int) -> UserSummary:
+        return await self._send_model("POST", f"/api/v1/users/{user_id}/disable", None, UserSummary)
+
+    async def authenticate_user(self, user_id: int, request: UserAuthentication) -> UserSummary:
+        return await self._send_model(
+            "POST", f"/api/v1/users/{user_id}/authenticate", request, UserSummary
+        )
+
     async def list_library_items(
         self,
         *,
@@ -230,6 +254,15 @@ class KatalogClient:
         return await self._get_model(
             "/api/v1/library/items", PaginatedResponse[LibraryItemSummary], params=params
         )
+
+    async def list_library_tags(self) -> tuple[str, ...]:
+        response = await self._request("GET", "/api/v1/library/tags")
+        try:
+            return _LIBRARY_TAGS_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid library tags.", response.request_id
+            ) from error
 
     async def iter_library_items(
         self, **filters: Unpack[_LibraryItemFilters]
@@ -264,6 +297,26 @@ class KatalogClient:
                 "Katalog returned an invalid library item.", response.request_id
             ) from error
         return ConditionalItem(item=item, etag=response.headers.get("ETag"), not_modified=False)
+
+    async def update_library_item(
+        self, item_id: int, request: LibraryItemUpdate
+    ) -> LibraryItemMutationResult:
+        return await self._send_model(
+            "PATCH", f"/api/v1/library/items/{item_id}", request, LibraryItemMutationResult
+        )
+
+    async def list_library_item_edit_audit(
+        self, item_id: int, *, limit: int = 20
+    ) -> tuple[LibraryItemEditAudit, ...]:
+        response = await self._request(
+            "GET", f"/api/v1/library/items/{item_id}/edit-audit", params=_params(limit=limit)
+        )
+        try:
+            return _ITEM_EDIT_AUDIT_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid library item edit audit data.", response.request_id
+            ) from error
 
     async def list_library_item_children(
         self, item_id: int, *, cursor: str | None = None, limit: int = 50

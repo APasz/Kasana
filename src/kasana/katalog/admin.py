@@ -27,6 +27,11 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.services import create_library_root, create_user
+from kasana.katalog.user_configuration import (
+    UserConfiguration,
+    UserConfigurationState,
+    UserConfigurationStore,
+)
 
 type RootKind = Literal["movie", "series"]
 
@@ -215,8 +220,16 @@ class DatabaseAdmin:
 class KatalogAdmin:
     """Focused root, audit, and status operations for Katalog administrators."""
 
-    def __init__(self, database: KatalogDatabase) -> None:
+    def __init__(
+        self,
+        database: KatalogDatabase,
+        *,
+        user_configurations: UserConfigurationStore | None = None,
+    ) -> None:
         self.database = database
+        self._user_configurations = user_configurations or UserConfigurationStore(
+            database.database_path.parent / "users"
+        )
 
     def list_roots(self) -> tuple[KuraView, ...]:
         return self.database.run_transaction(
@@ -226,23 +239,45 @@ class KatalogAdmin:
         )
 
     def list_users(self) -> tuple[UserView, ...]:
-        return self.database.run_transaction(
-            lambda session: tuple(
-                _user_view(user) for user in session.scalars(select(User).order_by(User.id)).all()
-            )
-        )
+        def load(session: Session) -> tuple[UserView, ...]:
+            self._user_configurations.synchronise_database_users(session)
+            views: list[UserView] = []
+            for user in session.scalars(select(User).order_by(User.id)):
+                configuration = self._user_configurations.load_or_migrate(user)
+                views.append(
+                    UserView(
+                        id=user.id,
+                        username=configuration.username,
+                        display_name=configuration.name,
+                    )
+                )
+            return tuple(views)
+
+        return self.database.run_transaction(load)
 
     def create_user(self, user_input: UserInput) -> UserView:
         try:
-            return self.database.run_transaction(
-                lambda session: _user_view(
-                    create_user(
-                        session,
-                        username=user_input.username,
-                        display_name=user_input.display_name,
-                    )
+
+            def create(session: Session) -> UserView:
+                self._user_configurations.synchronise_database_users(session)
+                user = create_user(
+                    session,
+                    username=user_input.username,
+                    display_name=user_input.display_name,
                 )
-            )
+                configuration = UserConfiguration(
+                    username=user.username,
+                    name=user.display_name,
+                    state=UserConfigurationState.ACTIVE,
+                )
+                self._user_configurations.save(user.id, configuration)
+                return UserView(
+                    id=user.id,
+                    username=configuration.username,
+                    display_name=configuration.name,
+                )
+
+            return self.database.run_transaction(create)
         except IntegrityError as error:
             msg = f"A user already uses username {user_input.username}."
             raise AdminError(msg) from error
@@ -415,10 +450,6 @@ def _root_view(root: Kura) -> KuraView:
         if root.last_scan_completed_at is not None
         else None,
     )
-
-
-def _user_view(user: User) -> UserView:
-    return UserView(id=user.id, username=user.username, display_name=user.display_name)
 
 
 def _item_view(item: Zaisan) -> ItemView:

@@ -11,6 +11,7 @@ from pathlib import Path
 from nicegui import ui
 
 from kasana.kanvas.components.navigation import primary_navigation
+from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.settings import Kanvas_Settings
 
 
@@ -58,10 +59,15 @@ def add_kanvas_head(settings: Kanvas_Settings, asset_versions: KanvasAssetVersio
 
 
 @contextmanager
-def page_shell(settings: Kanvas_Settings, active_route: str, title: str) -> Generator[None]:
+def page_shell(
+    settings: Kanvas_Settings,
+    active_route: str,
+    title: str,
+    profile: SessionProfile | None = None,
+) -> Generator[None]:
     """Create the same native shell for every first-pass Kanvas page."""
 
     with ui.element("div").classes("k-app"):
-        primary_navigation(active_route)
+        primary_navigation(active_route, profile)
         with ui.element("main").classes("k-main").props(f'aria-label="{title}"'):
             yield

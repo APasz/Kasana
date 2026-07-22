@@ -19,8 +19,9 @@ from kasana.katalog.public import (
 class KanvasPlaybackService:
     """Creates safe Katalog playback plans for explicit UI actions."""
 
-    def __init__(self, settings: Kanvas_Settings) -> None:
+    def __init__(self, settings: Kanvas_Settings, user_id: int) -> None:
         self._settings = settings
+        self._user_id = user_id
 
     async def create_item_launch_uri(self, item_id: int, *, resume: bool) -> str:
         """Create a one-use launch URI, without exposing a media URL to the browser."""
@@ -33,9 +34,7 @@ class KanvasPlaybackService:
                 msg = "Katalog returned an unexpected empty item response."
                 raise RuntimeError(msg)
             launch = await client.create_playback_plan(
-                playback_plan_request(
-                    conditional_item.item, user_id=self._settings.user_id, resume=resume
-                )
+                playback_plan_request(conditional_item.item, user_id=self._user_id, resume=resume)
             )
         return launch_uri(launch.launch_token)
 
@@ -50,7 +49,7 @@ class KanvasPlaybackService:
             launch = await client.create_playback_plan(
                 watch_order_playback_plan_request(
                     watch_order_id,
-                    user_id=self._settings.user_id,
+                    user_id=self._user_id,
                     start_item_id=start_item_id,
                 )
             )

@@ -48,8 +48,12 @@ from kasana.katalog.public import (
     HierarchyRepairPreview,
     HierarchyRepairRequest,
     KatalogClient,
+    LibraryItemDetail,
+    LibraryItemEditAudit,
     LibraryItemKind,
+    LibraryItemMutationResult,
     LibraryItemSummary,
+    LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootSummary,
     LibraryRootUpdate,
@@ -127,8 +131,14 @@ class OptimisticRevisionState[ValueT]:
 class KanvasKatalogService:
     """Transforms Katalog contracts into safe, purpose-specific Kanvas data."""
 
-    def __init__(self, settings: Kanvas_Settings) -> None:
+    def __init__(self, settings: Kanvas_Settings, user_id: int | None = None) -> None:
         self._settings = settings
+        self._user_id = user_id
+
+    def _required_user_id(self) -> int:
+        if self._user_id is None:
+            raise RuntimeError("A session profile is required for user-specific Kanvas data.")
+        return self._user_id
 
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[KatalogClient]:
@@ -142,8 +152,8 @@ class KanvasKatalogService:
 
         async with self._client() as client:
             continue_page, on_deck_page, added_page = await gather(
-                client.continue_watching(self._settings.user_id, limit=_RAIL_PAGE_SIZE),
-                client.on_deck(self._settings.user_id, limit=_RAIL_PAGE_SIZE),
+                client.continue_watching(self._required_user_id(), limit=_RAIL_PAGE_SIZE),
+                client.on_deck(self._required_user_id(), limit=_RAIL_PAGE_SIZE),
                 client.recently_added_catalogue_items(limit=_RAIL_PAGE_SIZE),
             )
 
@@ -296,10 +306,10 @@ class KanvasKatalogService:
                 cursor=cursor,
                 limit=_GRID_PAGE_SIZE,
                 kind=filters.kind,
-                tags=("anime",) if filters.anime else (),
+                tags=filters.tags,
                 year=filters.year,
                 watched=filters.watched,
-                user_id=self._settings.user_id if filters.watched is not None else None,
+                user_id=self._required_user_id() if filters.watched is not None else None,
                 availability=filters.availability,
                 search=filters.search,
             )
@@ -316,6 +326,12 @@ class KanvasKatalogService:
                 raise LibraryPosterTransformationError(item.id, field_names) from None
         return tuple(posters), page.next_cursor
 
+    async def library_tags(self) -> tuple[str, ...]:
+        """Load the real tag vocabulary used by the generic library filter."""
+
+        async with self._client() as client:
+            return await client.list_library_tags()
+
     async def item_detail(self, item_id: int) -> ItemDetailView:
         """Create a safe item view without exposing Katalog playback or media URLs."""
 
@@ -329,7 +345,7 @@ class KanvasKatalogService:
             children_page = await client.list_library_item_children(
                 item_id, limit=_DETAIL_CHILD_PAGE_SIZE
             )
-            playback = await _playback_for_item(client, self._settings.user_id, item_id)
+            playback = await _playback_for_item(client, self._required_user_id(), item_id)
 
         return ItemDetailView(
             id=item.id,
@@ -348,17 +364,36 @@ class KanvasKatalogService:
             children=tuple(poster_from_summary(child) for child in children_page.items),
         )
 
+    async def item_edit_detail(self, item_id: int) -> LibraryItemDetail:
+        """Return the full supported edit contract only to the Kanvas owner/admin UI."""
+
+        async with self._client() as client:
+            response = await client.get_library_item(item_id)
+        if response.item is None:
+            raise RuntimeError("Katalog returned an unexpected empty item response.")
+        return response.item
+
+    async def update_item(
+        self, item_id: int, request: LibraryItemUpdate
+    ) -> LibraryItemMutationResult:
+        async with self._client() as client:
+            return await client.update_library_item(item_id, request)
+
+    async def item_edit_audit(self, item_id: int) -> tuple[LibraryItemEditAudit, ...]:
+        async with self._client() as client:
+            return await client.list_library_item_edit_audit(item_id)
+
     async def mark_watched(self, item_id: int) -> None:
         """Mark an item watched through Katalog's public mutation contract."""
 
         async with self._client() as client:
-            await client.mark_watched(self._settings.user_id, item_id)
+            await client.mark_watched(self._required_user_id(), item_id)
 
     async def clear_watched(self, item_id: int) -> None:
         """Clear watched state through Katalog's public mutation contract."""
 
         async with self._client() as client:
-            await client.clear_watched(self._settings.user_id, item_id)
+            await client.clear_watched(self._required_user_id(), item_id)
 
     async def artwork_content(self, item_id: int, artwork_id: int) -> tuple[bytes, str, str | None]:
         """Fetch artwork server-side so browser clients never learn Katalog's origin."""
@@ -391,7 +426,7 @@ class KanvasKatalogService:
                 client.get_collection(collection_id),
                 client.list_collection_members(collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE),
                 client.list_collection_watch_orders(collection_id, limit=_WATCH_ORDER_PAGE_SIZE),
-                client.continue_watching(self._settings.user_id, limit=100),
+                client.continue_watching(self._required_user_id(), limit=100),
             )
             order_details = await gather(
                 *(
@@ -463,7 +498,7 @@ class KanvasKatalogService:
             cursor: str | None = None
             while True:
                 page = await client.on_deck(
-                    self._settings.user_id,
+                    self._required_user_id(),
                     cursor=cursor,
                     limit=_WATCH_ORDER_ENTRY_PAGE_SIZE,
                 )

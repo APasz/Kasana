@@ -10,10 +10,15 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-.env# Kasana runtime data
+# Kasana runtime data
+.env
 *.sqlite
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
 kasana-artwork-cache/
-.env
+logs/
+configs/users/*
+!configs/users/.gitkeep
+.cache/*
+configs/*

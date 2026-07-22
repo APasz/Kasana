@@ -190,6 +190,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
     settings = KatalogSettings(
         database_path=database_path,
         artwork_cache_path=tmp_path / "artwork",
+        user_configuration_directory=tmp_path / "users",
         playback_launch_token_ttl_seconds=30,
         media_access_token_ttl_seconds=30,
     )

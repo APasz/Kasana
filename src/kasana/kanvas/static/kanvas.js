@@ -13,6 +13,9 @@
   const localArtworkUrl = (value) => typeof value === 'string' && /^\/kanvas\/artwork\/\d+\/\d+$/.test(value);
   const safeRequestId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
   const safePosterId = (value) => value && typeof value === 'object' && Number.isSafeInteger(value.id) && value.id > 0 ? value.id : null;
+  const jobDetail = (job, counters) => (job.status === 'failed' || job.status === 'interrupted')
+    ? (job.failure || job.message || counters || '—')
+    : (counters || job.message || job.failure || '—');
 
   class LibraryLoadError extends Error {
     constructor(category, {status = null, requestId = null, cause = null} = {}) {
@@ -1014,6 +1017,117 @@
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
   if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
 
+  class KanvasItemEditor extends HTMLElement {
+    constructor() {
+      super();
+      this.dialog = null;
+      this.status = null;
+      this.controller = null;
+    }
+
+    connectedCallback() {
+      this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
+      this.dialog = this.querySelector('dialog');
+      this.querySelector('[data-item-edit-open]')?.addEventListener('click', () => this.open());
+    }
+
+    disconnectedCallback() { this.controller?.abort(); }
+
+    async open() {
+      if (!this.dialog) return;
+      this.dialog.showModal();
+      const content = this.querySelector('[data-item-editor-content]');
+      if (!content) return;
+      content.innerHTML = '<div class="k-picker__status" aria-live="polite">Loading editable metadata…</div>';
+      this.controller?.abort();
+      this.controller = new AbortController();
+      const source = this.getAttribute('source');
+      if (!source) return;
+      try {
+        const response = await fetch(source, {headers: {'Accept': 'application/json'}, credentials: 'same-origin', signal: this.controller.signal});
+        if (!response.ok) throw new Error('Item editor request failed');
+        const payload = await response.json();
+        if (!payload.item || typeof payload.item !== 'object') throw new Error('Item editor response was invalid');
+        this.render(payload.item, Array.isArray(payload.audit) ? payload.audit : []);
+      } catch (error) {
+        if (error?.name !== 'AbortError') content.innerHTML = '<div class="k-picker__status">This item could not be loaded for editing. Close and try again.</div>';
+      }
+    }
+
+    render(item, audit) {
+      const content = this.querySelector('[data-item-editor-content]');
+      if (!content) return;
+      const selected = new Map((Array.isArray(item.selected_artwork) ? item.selected_artwork : []).map((entry) => [entry.kind, entry.artwork_id]));
+      const locks = new Set(Array.isArray(item.locked_metadata_fields) ? item.locked_metadata_fields : []);
+      const artworks = Array.isArray(item.artwork) ? item.artwork : [];
+      const artworkKinds = [...new Set(artworks.map((artwork) => artwork.kind))];
+      const artworkRows = artworks.length ? artworkKinds.map((kind) => {
+        const automatic = `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(kind)}" value="" data-artwork-kind="${escapeHtml(kind)}"${selected.has(kind) ? '' : ' checked'}><span>Automatic ${escapeHtml(kind)}</span></label>`;
+        const choices = artworks.filter((artwork) => artwork.kind === kind).map((artwork) => {
+          const artworkUrl = typeof artwork.url === 'string'
+            ? artwork.url.replace(/^\/api\/v1\/library\/items\/(\d+)\/artwork\/(\d+)$/, '/kanvas/artwork/$1/$2')
+            : null;
+          const image = artworkUrl && localArtworkUrl(artworkUrl) ? `<img src="${escapeHtml(artworkUrl)}" alt="">` : '';
+          return `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(artwork.kind)}" value="${artwork.id}" data-artwork-kind="${escapeHtml(artwork.kind)}"${selected.get(artwork.kind) === artwork.id ? ' checked' : ''}><span>${image}${escapeHtml(artwork.kind)} #${artwork.id}</span></label>`;
+        }).join('');
+        return automatic + choices;
+      }).join('') : '<p class="k-quiet-copy">No cached artwork is available to select.</p>';
+      const metadataFields = [['title', 'Title'], ['sort_title', 'Sort title'], ['release_date', 'Release date'], ['overview', 'Overview'], ['season_number', 'Season number'], ['episode_number', 'Episode number']];
+      const lockRows = metadataFields.map(([value, label]) => `<label class="k-check"><input type="checkbox" name="lock" value="${value}"${locks.has(value) ? ' checked' : ''}> ${label}</label>`).join('');
+      const auditRows = audit.length ? audit.map((entry) => `<li>${escapeHtml(entry.actor || 'administrator')} · ${escapeHtml((entry.changed_fields || []).join(', ') || 'updated')} · ${escapeHtml(entry.occurred_at || '')}</li>`).join('') : '<li>No local edits have been recorded.</li>';
+      const kinds = ['movie', 'series', 'season', 'episode', 'special', 'extra'];
+      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit catalogue metadata</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><p class="k-quiet-copy">Edits affect catalogue metadata only. They never rename, move, or delete media files.</p><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label><div class="k-action-row"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label><div class="k-action-row"><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="seasonNumber" value="${item.season_number ?? ''}" placeholder="Season" aria-label="Season number"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="episodeNumber" value="${item.episode_number ?? ''}" placeholder="Episode" aria-label="Episode number"></label></div><details><summary>Metadata locks</summary><div class="k-item-editor__checks">${lockRows}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><p class="k-quiet-copy">Changing kind or parent is validated before it is saved. Existing media files are preserved.</p><div class="k-action-row"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind">${kinds.map((kind) => `<option value="${kind}"${kind === item.kind ? ' selected' : ''}>${kind}</option>`).join('')}</select></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" name="parentId" value="${item.parent_id || ''}" placeholder="Parent ID" aria-label="Parent item ID"></label></div></details><details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
+      this.status = content.querySelector('[data-item-editor-status]');
+      content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
+      content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
+    }
+
+    async submit(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      if (!(form instanceof HTMLFormElement) || !this.status) return;
+      const values = new FormData(form);
+      const toNullableNumber = (name) => {
+        const raw = String(values.get(name) || '').trim();
+        return raw ? Number(raw) : null;
+      };
+      const selectedArtwork = Array.from(form.querySelectorAll('[data-artwork-kind]:checked'))
+        .filter((input) => input.value)
+        .map((input) => ({kind: input.dataset.artworkKind, artworkId: Number(input.value)}));
+      const payload = {
+        title: String(values.get('title') || ''),
+        sortTitle: String(values.get('sortTitle') || ''),
+        overview: String(values.get('overview') || '').trim() || null,
+        releaseDate: String(values.get('releaseDate') || '').trim() || null,
+        releaseYear: toNullableNumber('releaseYear'),
+        tags: String(values.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean),
+        seasonNumber: toNullableNumber('seasonNumber'),
+        episodeNumber: toNullableNumber('episodeNumber'),
+        lockedMetadataFields: Array.from(form.querySelectorAll('input[name="lock"]:checked')).map((input) => input.value),
+        selectedArtwork,
+        kind: String(values.get('kind') || ''),
+        parentId: toNullableNumber('parentId')
+      };
+      const button = form.querySelector('button[type="submit"]');
+      if (button) button.disabled = true;
+      this.status.textContent = 'Saving metadata…';
+      try {
+        const source = this.getAttribute('action-source');
+        if (!source) throw new Error('Missing item edit action');
+        const response = await fetch(source, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify(payload)});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Item edit failed');
+        this.status.textContent = `Saved ${result.audit?.changed_fields?.join(', ') || 'metadata'}.`;
+        window.setTimeout(() => window.location.reload(), 450);
+      } catch (error) {
+        this.status.textContent = error?.message || 'Item edit could not be applied.';
+        if (button) button.disabled = false;
+      }
+    }
+  }
+
+  if (!customElements.get('kanvas-item-editor')) customElements.define('kanvas-item-editor', KanvasItemEditor);
+
   const adminDate = (value) => {
     if (typeof value !== 'string') return '—';
     const parsed = new Date(value);
@@ -1024,6 +1138,21 @@
     if (value < 1024) return `${value} B`;
     if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
     return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  };
+  const providerEntryUrl = (candidate) => {
+    const provider = typeof candidate?.provider === 'string' ? candidate.provider.toLowerCase() : '';
+    const providerId = typeof candidate?.providerId === 'string' ? candidate.providerId : '';
+    if (provider === 'tmdb' && /^\d+$/.test(providerId)) {
+      const section = candidate.kind === 'movie' ? 'movie' : candidate.kind === 'series' ? 'tv' : null;
+      return section ? `https://www.themoviedb.org/${section}/${providerId}` : null;
+    }
+    if ((provider === 'imdb' || provider === 'omdb') && /^tt\d+$/i.test(providerId)) {
+      return `https://www.imdb.com/title/${providerId}/`;
+    }
+    if (provider === 'tvmaze' && candidate.kind === 'series' && /^\d+$/.test(providerId)) {
+      return `https://www.tvmaze.com/shows/${providerId}`;
+    }
+    return null;
   };
 
   class KanvasAdministration extends HTMLElement {
@@ -1046,7 +1175,7 @@
     }
 
     connectedCallback() {
-      this.section = this.getAttribute('section') || 'overview';
+      this.section = this.getAttribute('data-section') || 'overview';
       document.addEventListener('visibilitychange', this.onVisibility);
       document.addEventListener('keydown', this.onKeyDown);
       this.load();
@@ -1170,7 +1299,7 @@
         const percent = total && total > 0 ? Math.min(100, Math.round((current / total) * 100)) : null;
         const progress = total === null ? (job.phase ? `${current} ${job.progressUnit || ''}` : '—') : `${current}/${total} ${job.progressUnit || ''}`;
         const counters = Array.isArray(job.counters) ? job.counters.map(([key, value]) => `${key}: ${value}`).join(' · ') : '';
-        return `<article class="k-job-row" data-job-id="${escapeHtml(job.id)}"><div><strong>${escapeHtml(job.kind)}</strong><small>${escapeHtml(job.status)}${job.phase ? ` · ${escapeHtml(job.phase)}` : ''}</small></div><div class="k-job-row__progress">${percent === null ? '<span class="k-progress-edge k-progress-edge--unknown"></span>' : `<span class="k-progress-edge"><span style="--k-progress:${percent}%"></span></span>`}<small>${escapeHtml(progress)}</small></div><div><small>${escapeHtml(counters || job.message || job.failure || '—')}</small><small>${adminDate(job.completedAt || job.startedAt || job.submittedAt)}</small></div>${job.cancellable ? `<button type="button" class="k-button" data-admin-cancel="${escapeHtml(job.id)}">Cancel</button>` : ''}</article>`;
+        return `<article class="k-job-row" data-job-id="${escapeHtml(job.id)}"><div><strong>${escapeHtml(job.kind)}</strong><small>${escapeHtml(job.status)}${job.phase ? ` · ${escapeHtml(job.phase)}` : ''}</small></div><div class="k-job-row__progress">${percent === null ? '<span class="k-progress-edge k-progress-edge--unknown"></span>' : `<span class="k-progress-edge"><span style="--k-progress:${percent}%"></span></span>`}<small>${escapeHtml(progress)}</small></div><div><small>${escapeHtml(jobDetail(job, counters))}</small><small>${adminDate(job.completedAt || job.startedAt || job.submittedAt)}</small></div>${job.cancellable ? `<button type="button" class="k-button" data-admin-cancel="${escapeHtml(job.id)}">Cancel</button>` : ''}</article>`;
       }).join('');
       this.innerHTML = `<section class="k-admin-list" aria-live="polite">${rows || '<div class="k-admin-status">No recent jobs.</div>'}${this.cursor ? '<button type="button" class="k-button" data-admin-more>More</button>' : ''}</section>`;
       this.bindActions();
@@ -1185,7 +1314,7 @@
     renderArtwork() {
       const data = this.overview;
       if (!data) return this.renderError();
-      this.innerHTML = `<section class="k-admin-panel"><div class="k-admin-row"><span>Cache</span><span class="k-admin-row__value">${adminBytes(data.artworkCacheSizeBytes)} · ${data.artworkCacheFileCount || 0} files</span></div><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-operation="artwork-fetch">Fetch missing artwork</button><span class="k-quiet-copy">Pruning requires the Katalog prune contract.</span></div></section>`;
+      this.innerHTML = `<section class="k-admin-panel"><div class="k-admin-row"><span>Cache</span><span class="k-admin-row__value">${adminBytes(data.artworkCacheSizeBytes)} · ${data.artworkCacheFileCount || 0} files</span></div><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-operation="artwork-fetch">Fetch missing artwork</button></div></section>`;
       this.bindActions();
     }
 
@@ -1217,8 +1346,14 @@
       this.candidateIndex = Math.min(this.candidateIndex, Math.max(0, candidates.length - 1));
       const candidate = candidates[this.candidateIndex];
       const candidateRows = candidates.map((entry, index) => `<button type="button" class="k-metadata-candidate${index === this.candidateIndex ? ' k-metadata-candidate--selected' : ''}" data-admin-candidate="${index}"><span>${escapeHtml(entry.title)}</span><small>${escapeHtml(entry.provider)} · ${Math.round(Number(entry.confidence || 0) * 100)}%</small><span class="k-progress-edge"><span style="--k-progress:${Math.round(Number(entry.confidence || 0) * 100)}%"></span></span></button>`).join('');
-      const selected = candidate ? `<div class="k-metadata-selected"><strong>${escapeHtml(candidate.title)}</strong><small>${escapeHtml(candidate.provider)} · ${candidate.year || '—'} · ${Math.round(Number(candidate.confidence || 0) * 100)}%</small><details><summary>Scoring</summary><p>Confidence is supplied by ${escapeHtml(candidate.provider)}. Match only when the local title, year, and kind agree.</p></details></div>` : '<div class="k-admin-status">No candidates.</div>';
-      this.innerHTML = `<section class="k-metadata-review" aria-live="polite"><div class="k-metadata-local">${item.posterUrl ? `<img src="${escapeHtml(item.posterUrl)}" alt="">` : '<span class="k-metadata-poster">?</span>'}<div><strong>${escapeHtml(item.title)}</strong><small>${item.year || '—'} · ${escapeHtml(item.kind)}</small></div></div><div class="k-metadata-candidates">${candidateRows}</div><div class="k-metadata-actions">${selected}<div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-metadata="match">Match</button><button type="button" class="k-button" data-admin-metadata="reject">Reject</button><button type="button" class="k-button" data-admin-metadata="ignore">Ignore</button><button type="button" class="k-button" data-admin-metadata="refresh">Refresh</button><button type="button" class="k-button" data-admin-search>Manual search</button></div><div class="k-action-row"><button type="button" class="k-button" data-admin-review-nav="previous">Previous</button><button type="button" class="k-button" data-admin-review-nav="next">Next</button></div></div></section><dialog class="k-kanvas-dialog" data-admin-search-dialog><form method="dialog" class="k-picker"><div class="k-picker__header"><label class="k-control-shell k-input-shell"><input class="k-input" data-admin-search-input placeholder="Filter current candidates" aria-label="Filter candidates"></label><button class="k-button">Close</button></div><p class="k-quiet-copy">Manual provider search is unavailable until Katalog exposes its public search contract.</p></form></dialog>`;
+      const selectedUrl = providerEntryUrl(candidate);
+      const selectedTitle = candidate
+        ? selectedUrl
+          ? `<a class="k-metadata-selected__title" href="${escapeHtml(selectedUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(candidate.title)} on ${escapeHtml(candidate.provider)}">${escapeHtml(candidate.title)}</a>`
+          : `<strong>${escapeHtml(candidate.title)}</strong>`
+        : '';
+      const selected = candidate ? `<div class="k-metadata-selected">${selectedTitle}<small>${escapeHtml(candidate.provider)} · ${candidate.year || '—'} · ${Math.round(Number(candidate.confidence || 0) * 100)}%</small><details><summary>Scoring</summary><p>Confidence is supplied by ${escapeHtml(candidate.provider)}. Match only when the local title, year, and kind agree.</p></details></div>` : '<div class="k-admin-status">No candidates.</div>';
+      this.innerHTML = `<section class="k-metadata-review" aria-live="polite"><div class="k-metadata-local">${item.posterUrl ? `<img src="${escapeHtml(item.posterUrl)}" alt="">` : '<span class="k-metadata-poster">?</span>'}<div><strong>${escapeHtml(item.title)}</strong><small>${item.year || '—'} · ${escapeHtml(item.kind)}</small></div></div><div class="k-metadata-candidates">${candidateRows}</div><div class="k-metadata-actions">${selected}<div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-metadata="match">Match</button><button type="button" class="k-button" data-admin-metadata="reject">Reject</button><button type="button" class="k-button" data-admin-metadata="ignore">Ignore</button><button type="button" class="k-button" data-admin-metadata="refresh">Refresh</button></div><div class="k-action-row"><button type="button" class="k-button" data-admin-review-nav="previous">Previous</button><button type="button" class="k-button" data-admin-review-nav="next">Next</button></div></div></section>`;
       this.bindActions();
     }
 
@@ -1235,7 +1370,6 @@
       this.querySelectorAll('[data-admin-candidate]').forEach((button) => button.addEventListener('click', () => { this.candidateIndex = Number(button.dataset.adminCandidate); this.renderMetadata(); }));
       this.querySelectorAll('[data-admin-metadata]').forEach((button) => this.querySelector('[data-admin-metadata]') && button.addEventListener('click', () => this.metadataAction(button.dataset.adminMetadata)));
       this.querySelectorAll('[data-admin-review-nav]').forEach((button) => button.addEventListener('click', () => this.moveReview(button.dataset.adminReviewNav === 'next' ? 1 : -1)));
-      this.querySelector('[data-admin-search]')?.addEventListener('click', () => this.querySelector('[data-admin-search-dialog]')?.showModal());
       this.querySelector('[data-admin-root-add]')?.addEventListener('click', () => this.rootDialog(null));
       this.querySelectorAll('[data-admin-root-edit]').forEach((button) => button.addEventListener('click', () => this.rootDialog(this.roots.find((root) => root.id === Number(button.dataset.adminRootEdit)) || null)));
       this.querySelectorAll('[data-admin-root-delete]').forEach((button) => button.addEventListener('click', () => { if (window.confirm('Remove this root configuration? Catalogued items require confirmation.')) this.operation('root-delete', {rootId: Number(button.dataset.adminRootDelete), confirm: true}); }));
@@ -1320,7 +1454,6 @@
       if (event.key === 'Enter') { event.preventDefault(); this.metadataAction('match'); }
       else if (event.key.toLowerCase() === 'r') this.metadataAction('reject');
       else if (event.key.toLowerCase() === 'i') this.metadataAction('ignore');
-      else if (event.key.toLowerCase() === 's') this.querySelector('[data-admin-search]')?.click();
       else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); this.candidateIndex += 1; this.renderMetadata(); }
       else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); this.candidateIndex = Math.max(0, this.candidateIndex - 1); this.renderMetadata(); }
       else if (event.key.toLowerCase() === 'j') this.moveReview(1);

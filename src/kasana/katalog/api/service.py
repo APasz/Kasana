@@ -14,6 +14,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from os import stat_result
 from pathlib import Path
 from typing import Any, cast
@@ -43,8 +44,11 @@ from kasana.katalog.api.contracts import (
     EpisodeItemDetail,
     ExtraItemDetail,
     LibraryItemDetail,
+    LibraryItemEditAudit,
     LibraryItemKind,
+    LibraryItemMutationResult,
     LibraryItemSummary,
+    LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootKind,
     LibraryRootSummary,
@@ -70,13 +74,18 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionResponse,
     PlaybackStateResponse,
     SeasonItemDetail,
+    SelectedArtwork,
     SeriesItemDetail,
     SeriesPlaybackContext,
     SessionProgressUpdate,
     SpecialItemDetail,
     StandalonePlaybackContext,
     StatusResponse,
+    UserAuthentication,
+    UserCreate,
+    UserRole,
     UserSummary,
+    UserUpdate,
     WatchedFilter,
     WatchOrderCreate,
     WatchOrderDetail,
@@ -100,15 +109,21 @@ from kasana.katalog.models import (
     CachedArtwork,
     Collection,
     CollectionKin,
+    JSONObject,
+    JSONValue,
     Keiro,
     KeiroEntry,
     KeiroKind,
     Kinship,
     Kura,
+    LibraryItemEditEvent,
     MediaAccessOperation,
     MediaAccessToken,
     MediaFile,
+    MetadataBinding,
     MetadataCandidate,
+    MetadataCandidateStatus,
+    MetadataMatchStatus,
     PlaybackLaunchToken,
     PlaybackSession,
     PlaybackSessionEntry,
@@ -129,7 +144,22 @@ from kasana.katalog.models import (
 from kasana.katalog.models import (
     PlaybackSessionEventKind as ModelPlaybackSessionEventKind,
 )
-from kasana.katalog.services import PLAYABLE_ITEM_KINDS, record_playback_progress
+from kasana.katalog.models import (
+    UserRole as ModelUserRole,
+)
+from kasana.katalog.security import hash_profile_pin, verify_profile_pin
+from kasana.katalog.services import (
+    PLAYABLE_ITEM_KINDS,
+    allowed_parent_kinds,
+    normalise_library_item_tags,
+    record_playback_progress,
+    validate_library_item_parent,
+)
+from kasana.katalog.user_configuration import (
+    UserConfiguration,
+    UserConfigurationState,
+    UserConfigurationStore,
+)
 
 _MAX_PAGE_SIZE = 100
 
@@ -205,6 +235,7 @@ class KatalogQueryService:
         playback_launch_token_ttl: timedelta = timedelta(minutes=5),
         media_access_token_ttl: timedelta = timedelta(minutes=10),
         max_playback_queue_size: int = 100,
+        user_configurations: UserConfigurationStore | None = None,
     ) -> None:
         if (
             min(
@@ -225,6 +256,9 @@ class KatalogQueryService:
         self._playback_launch_token_ttl = playback_launch_token_ttl
         self._media_access_token_ttl = media_access_token_ttl
         self._max_playback_queue_size = max_playback_queue_size
+        self._user_configurations = user_configurations or UserConfigurationStore(
+            database.database_path.parent / "users"
+        )
 
     def health(self) -> None:
         with self._database.engine.connect() as connection:
@@ -267,16 +301,113 @@ class KatalogQueryService:
         return self._database.run_transaction(load)
 
     def list_users(self) -> tuple[UserSummary, ...]:
-        return self._database.run_transaction(
-            lambda session: tuple(
-                UserSummary(
-                    id=user.id,
-                    username=user.username,
-                    display_name=user.display_name,
-                )
+        def load(session: Session) -> tuple[UserSummary, ...]:
+            self._synchronise_configured_users(session)
+            return tuple(
+                _profile_summary(user.id, self._profile_configuration(user))
                 for user in session.scalars(select(User).order_by(User.id))
             )
-        )
+
+        return self._database.run_transaction(load)
+
+    def create_user(self, request: UserCreate) -> UserSummary:
+        """Create a profile without ever returning its PIN verifier."""
+
+        def create(session: Session) -> UserSummary:
+            self._synchronise_configured_users(session)
+            existing = session.scalar(select(User).where(User.username == request.username))
+            if existing is not None:
+                raise CatalogueConflictError("A user already has this username.")
+            if request.role is UserRole.OWNER and session.scalar(
+                select(func.count()).select_from(User)
+            ):
+                raise CatalogueConflictError("Only the initial profile can be an owner.")
+            pin_hash = hash_profile_pin(request.pin) if request.pin is not None else None
+            user = User(
+                username=request.username.strip(),
+                display_name=request.display_name,
+                role=ModelUserRole(request.role.value),
+                is_disabled=False,
+                pin_hash=pin_hash,
+            )
+            session.add(user)
+            session.flush()
+            configuration = UserConfiguration(
+                username=request.username,
+                name=request.display_name,
+                level=ModelUserRole(request.role.value),
+                state=UserConfigurationState.ACTIVE,
+                pin_hash=pin_hash,
+            )
+            self._user_configurations.save(user.id, configuration)
+            return _profile_summary(user.id, configuration)
+
+        return self._database.run_transaction(create)
+
+    def update_user(self, user_id: int, request: UserUpdate) -> UserSummary:
+        """Update profile metadata and optionally replace or remove its PIN."""
+
+        def update_user(session: Session) -> UserSummary:
+            user = self._configured_user(session, user_id)
+            values = request.model_fields_set
+            configuration = self._profile_configuration(user)
+            if "username" in values and request.username is not None:
+                existing = session.scalar(
+                    select(User).where(User.username == request.username, User.id != user_id)
+                )
+                if existing is not None:
+                    raise CatalogueConflictError("A user already has this username.")
+                user.username = request.username.strip()
+                configuration = configuration.model_copy(update={"username": user.username})
+            if "display_name" in values:
+                user.display_name = request.display_name
+                configuration = configuration.model_copy(update={"name": request.display_name})
+            if request.role is not None:
+                if request.role is UserRole.OWNER and user.role is not ModelUserRole.OWNER:
+                    raise CatalogueValidationError("Owner is reserved for the initial profile.")
+                user.role = ModelUserRole(request.role.value)
+                configuration = configuration.model_copy(
+                    update={"level": ModelUserRole(request.role.value)}
+                )
+            if "pin" in values:
+                user.pin_hash = hash_profile_pin(request.pin) if request.pin is not None else None
+                configuration = configuration.model_copy(update={"pin_hash": user.pin_hash})
+            self._user_configurations.save(user.id, configuration)
+            session.flush()
+            return _profile_summary(user.id, configuration)
+
+        return self._database.run_transaction(update_user)
+
+    def disable_user(self, user_id: int) -> UserSummary:
+        """Disable new profile and playback sessions while preserving history."""
+
+        def disable(session: Session) -> UserSummary:
+            user = self._configured_user(session, user_id)
+            user.is_disabled = True
+            configuration = self._profile_configuration(user).model_copy(
+                update={"state": UserConfigurationState.DISABLED}
+            )
+            self._user_configurations.save(user.id, configuration)
+            session.flush()
+            return _profile_summary(user.id, configuration)
+
+        return self._database.run_transaction(disable)
+
+    def authenticate_user(self, user_id: int, request: UserAuthentication) -> UserSummary:
+        """Validate a profile PIN before Kanvas starts a browser session."""
+
+        def authenticate(session: Session) -> UserSummary:
+            user = self._configured_user(session, user_id)
+            configuration = self._profile_configuration(user)
+            if configuration.state is UserConfigurationState.DISABLED:
+                raise CatalogueValidationError("Disabled users cannot start sessions.")
+            if configuration.pin_hash is not None and not verify_profile_pin(
+                configuration.pin_hash, request.pin
+            ):
+                raise CatalogueValidationError("Invalid profile PIN.")
+            return _profile_summary(user.id, configuration)
+
+        return self._database.run_transaction(authenticate)
 
     def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
         return self._database.run_transaction(
@@ -369,9 +500,118 @@ class KatalogQueryService:
                     )
                 )
             rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
-                session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1))
+                session.scalars(
+                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1)
+                )
             )
             return _item_page(session, rows, normalised_limit)
+
+        return self._database.run_transaction(load)
+
+    def list_item_tags(self) -> tuple[str, ...]:
+        """Return the small, stable set of effective tags available to library filters."""
+
+        def load(session: Session) -> tuple[str, ...]:
+            root_tags = session.scalars(select(Kura.default_tags))
+            item_tags = session.scalars(select(Zaisan.tags))
+            values = {
+                tag.strip().casefold()
+                for tags in (*root_tags, *item_tags)
+                for tag in tags
+                if tag.strip()
+            }
+            return tuple(sorted(values))
+
+        return self._database.run_transaction(load)
+
+    def update_item(self, item_id: int, request: LibraryItemUpdate) -> LibraryItemMutationResult:
+        """Update catalogue metadata without moving, renaming, or deleting media files."""
+
+        def update_item(session: Session) -> LibraryItemMutationResult:
+            item = _require(session, Zaisan, item_id, "Library item")
+            fields = request.model_fields_set
+            target_kind = (
+                ZaisanKind(request.kind.value)
+                if "kind" in fields and request.kind is not None
+                else item.item_kind
+            )
+            target_parent_id = request.parent_id if "parent_id" in fields else item.parent_id
+            target_season = (
+                request.season_number if "season_number" in fields else item.season_number
+            )
+            target_episode = (
+                request.episode_number if "episode_number" in fields else item.episode_number
+            )
+            _validate_item_hierarchy(
+                session,
+                item,
+                target_kind=target_kind,
+                target_parent_id=target_parent_id,
+                target_season_number=target_season,
+                target_episode_number=target_episode,
+            )
+            changes: dict[str, tuple[object, object]] = {}
+            _set_item_value(changes, item, "title", request.title, fields)
+            _set_item_value(changes, item, "sort_title", request.sort_title, fields)
+            _set_item_value(changes, item, "overview", request.overview, fields)
+            _set_item_value(changes, item, "release_date", request.release_date, fields)
+            _set_item_value(changes, item, "release_year", request.release_year, fields)
+            _set_item_value(changes, item, "season_number", request.season_number, fields)
+            _set_item_value(changes, item, "episode_number", request.episode_number, fields)
+            if "tags" in fields:
+                assert request.tags is not None
+                tags = normalise_library_item_tags(request.tags)
+                _set_item_value(changes, item, "tags", tags, fields)
+            if "locked_metadata_fields" in fields:
+                assert request.locked_metadata_fields is not None
+                locks = sorted(field.value for field in request.locked_metadata_fields)
+                _set_item_value(changes, item, "locked_metadata_fields", locks, fields)
+            if "selected_artwork" in fields:
+                assert request.selected_artwork is not None
+                selection = _validated_artwork_selection(session, item.id, request.selected_artwork)
+                _set_item_value(
+                    changes,
+                    item,
+                    "selected_artwork_ids",
+                    selection,
+                    fields,
+                    field_name="selected_artwork",
+                )
+            _set_item_value(changes, item, "item_kind", target_kind, fields, field_name="kind")
+            _set_item_value(changes, item, "parent_id", target_parent_id, fields)
+            if not changes:
+                raise CatalogueValidationError("This edit does not change the library item.")
+            session.flush()
+            event = LibraryItemEditEvent(
+                library_item_id=item.id,
+                actor=request.actor,
+                changes=_audit_changes(changes),
+                occurred_at=datetime.now(UTC),
+            )
+            session.add(event)
+            session.flush()
+            return LibraryItemMutationResult(item=_detail(session, item), audit=_edit_audit(event))
+
+        return self._database.run_transaction(update_item)
+
+    def list_item_edit_audit(self, item_id: int, *, limit: int) -> tuple[LibraryItemEditAudit, ...]:
+        """Expose a bounded audit trail without retaining an editable event surface."""
+
+        normalised_limit = _page_limit(limit)
+
+        def load(session: Session) -> tuple[LibraryItemEditAudit, ...]:
+            _require(session, Zaisan, item_id, "Library item")
+            events = tuple(
+                session.scalars(
+                    select(LibraryItemEditEvent)
+                    .where(LibraryItemEditEvent.library_item_id == item_id)
+                    .order_by(
+                        LibraryItemEditEvent.occurred_at.desc(), LibraryItemEditEvent.id.desc()
+                    )
+                    .limit(normalised_limit)
+                )
+            )
+            return tuple(_edit_audit(event) for event in events)
 
         return self._database.run_transaction(load)
 
@@ -401,7 +641,9 @@ class KatalogQueryService:
                 seen_ids.add(candidate.id)
                 if len(selected) == normalised_limit:
                     break
-            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple[Zaisan, ...](selected))
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(
+                session, tuple[Zaisan, ...](selected)
+            )
             return PaginatedResponse[LibraryItemSummary](
                 items=tuple[LibraryItemSummary, ...](summaries[item.id] for item in selected),
                 next_cursor=None,
@@ -422,7 +664,9 @@ class KatalogQueryService:
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             artworks: tuple[CachedArtwork, ...] = tuple[CachedArtwork, ...](
                 session.scalars(
-                    select(CachedArtwork).where(CachedArtwork.library_item_id == item.id).order_by(CachedArtwork.id)
+                    select(CachedArtwork)
+                    .where(CachedArtwork.library_item_id == item.id)
+                    .order_by(CachedArtwork.id)
                 )
             )
             source: str = "|".join(
@@ -458,7 +702,9 @@ class KatalogQueryService:
                     )
                 )
             rows: tuple[Zaisan, ...] = tuple(
-                session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1))
+                session.scalars(
+                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1)
+                )
             )
             return _item_page(session, rows, normalised_limit)
 
@@ -477,7 +723,9 @@ class KatalogQueryService:
             )
             if cursor_value is not None:
                 statement = statement.where(MediaFile.id > _cursor_int(cursor_value, "id"))
-            rows = tuple(session.scalars(statement.order_by(MediaFile.id).limit(normalised_limit + 1)))
+            rows = tuple(
+                session.scalars(statement.order_by(MediaFile.id).limit(normalised_limit + 1))
+            )
             page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse(
                 items=tuple(_media_summary(file) for file in page),
@@ -547,13 +795,19 @@ class KatalogQueryService:
                     )
                 )
             rows: tuple[Collection, ...] = tuple(
-                session.scalars(statement.order_by(Collection.name, Collection.id).limit(normalised_limit + 1))
+                session.scalars(
+                    statement.order_by(Collection.name, Collection.id).limit(normalised_limit + 1)
+                )
             )
             page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse[CollectionSummary](
-                items=tuple[CollectionSummary, ...](_collection_summary(session, collection) for collection in page),
+                items=tuple[CollectionSummary, ...](
+                    _collection_summary(session, collection) for collection in page
+                ),
                 next_cursor=(
-                    _encode_cursor("collections", {"name": page[-1].name, "id": page[-1].id}) if has_next else None
+                    _encode_cursor("collections", {"name": page[-1].name, "id": page[-1].id})
+                    if has_next
+                    else None
                 ),
                 limit=normalised_limit,
             )
@@ -630,12 +884,18 @@ class KatalogQueryService:
                 session.execute(statement.limit(normalised_limit + 1))
             )
             page, has_next = _split_page(rows, normalised_limit)
-            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(
+                session, tuple(item for _, item in page)
+            )
             return PaginatedResponse[CollectionMembership](
                 items=tuple[CollectionMembership, ...](
                     _membership_detail(membership, summaries[item.id]) for membership, item in page
                 ),
-                next_cursor=(_encode_cursor("collection-members", {"id": page[-1][0].id}) if has_next else None),
+                next_cursor=(
+                    _encode_cursor("collection-members", {"id": page[-1][0].id})
+                    if has_next
+                    else None
+                ),
                 limit=normalised_limit,
             )
 
@@ -661,7 +921,11 @@ class KatalogQueryService:
             membership: CollectionKin = CollectionKin(
                 collection_id=collection_id,
                 library_item_id=item.id,
-                relationship=(Kinship(request.relationship.value) if request.relationship is not None else None),
+                relationship=(
+                    Kinship(request.relationship.value)
+                    if request.relationship is not None
+                    else None
+                ),
             )
             session.add(membership)
             collection.revision += 1
@@ -757,13 +1021,19 @@ class KatalogQueryService:
                     or_(Keiro.name > name, and_(Keiro.name == name, Keiro.id > order_id))
                 )
             rows: tuple[Keiro, ...] = tuple(
-                session.scalars(statement.order_by(Keiro.name, Keiro.id).limit(normalised_limit + 1))
+                session.scalars(
+                    statement.order_by(Keiro.name, Keiro.id).limit(normalised_limit + 1)
+                )
             )
             page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse[WatchOrderSummary](
-                items=tuple[WatchOrderSummary, ...](_watch_order_summary(session, order) for order in page),
+                items=tuple[WatchOrderSummary, ...](
+                    _watch_order_summary(session, order) for order in page
+                ),
                 next_cursor=(
-                    _encode_cursor("watch-orders", {"name": page[-1].name, "id": page[-1].id}) if has_next else None
+                    _encode_cursor("watch-orders", {"name": page[-1].name, "id": page[-1].id})
+                    if has_next
+                    else None
                 ),
                 limit=normalised_limit,
             )
@@ -826,7 +1096,9 @@ class KatalogQueryService:
                 watch_order.order_kind = KeiroKind(request.kind.value)
             watch_order.revision += 1
             session.flush()
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -841,7 +1113,9 @@ class KatalogQueryService:
         def delete_watch_order(session: Session) -> WatchOrderMutationResult:
             watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, expected_revision, "Watch order")
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             collection.revision += 1
             collection_revision: int = collection.revision
             session.delete(watch_order)
@@ -878,10 +1152,16 @@ class KatalogQueryService:
                     )
                 )
             rows: tuple[Row[tuple[KeiroEntry, Zaisan]], ...] = tuple(
-                session.execute(statement.order_by(KeiroEntry.position, KeiroEntry.id).limit(normalised_limit + 1))
+                session.execute(
+                    statement.order_by(KeiroEntry.position, KeiroEntry.id).limit(
+                        normalised_limit + 1
+                    )
+                )
             )
             page, has_next = _split_page(rows, normalised_limit)
-            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(
+                session, tuple(item for _, item in page)
+            )
             entries: tuple[WatchOrderEntryDetail, ...] = tuple(
                 WatchOrderEntryDetail(id=entry.id, position=entry.position, item=summaries[item.id])
                 for entry, item in page
@@ -942,7 +1222,9 @@ class KatalogQueryService:
             session.add(entry)
             watch_order.revision += 1
             session.flush()
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -969,7 +1251,9 @@ class KatalogQueryService:
                     .order_by(KeiroEntry.position, KeiroEntry.id)
                 )
             )
-            remaining: tuple[KeiroEntry, ...] = tuple(candidate for candidate in entries if candidate.id != entry.id)
+            remaining: tuple[KeiroEntry, ...] = tuple(
+                candidate for candidate in entries if candidate.id != entry.id
+            )
             target_position: int = _move_target_position(
                 session,
                 watch_order.id,
@@ -1001,7 +1285,9 @@ class KatalogQueryService:
             watch_order.revision += 1
             session.flush()
             item: Zaisan = _require(session, Zaisan, entry.library_item_id, "Library item")
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1026,7 +1312,9 @@ class KatalogQueryService:
                 _shift_positions(session, watch_order.id, position + 1, highest, -1)
             watch_order.revision += 1
             session.flush()
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1053,10 +1341,14 @@ class KatalogQueryService:
             watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
             _require_generation_allowed(watch_order)
-            generated: _GeneratedWatchOrderItems = _generated_watch_order_items(session, watch_order, request.mode)
+            generated: _GeneratedWatchOrderItems = _generated_watch_order_items(
+                session, watch_order, request.mode
+            )
             existing: tuple[KeiroEntry, ...] = tuple(
                 session.scalars(
-                    select(KeiroEntry).where(KeiroEntry.watch_order_id == watch_order.id).order_by(KeiroEntry.position)
+                    select(KeiroEntry)
+                    .where(KeiroEntry.watch_order_id == watch_order.id)
+                    .order_by(KeiroEntry.position)
                 )
             )
             if request.apply_mode.value == "replace":
@@ -1082,7 +1374,9 @@ class KatalogQueryService:
                 next_position += 1
             watch_order.revision += 1
             session.flush()
-            collection: Collection = _require(session, Collection, watch_order.collection_id, "Collection")
+            collection: Collection = _require(
+                session, Collection, watch_order.collection_id, "Collection"
+            )
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
@@ -1098,7 +1392,7 @@ class KatalogQueryService:
         cursor_value: dict[str, object] | None = _decode_cursor(cursor, "continue-watching")
 
         def load(session: Session) -> PaginatedResponse[ContinueWatchingEntry]:
-            _require(session, User, user_id, "User")
+            self._configured_user(session, user_id)
             statement: Select[tuple[PlaybackState, Zaisan]] = (
                 select(PlaybackState, Zaisan)
                 .join(Zaisan, PlaybackState.library_item_id == Zaisan.id)
@@ -1128,10 +1422,13 @@ class KatalogQueryService:
                 )
             )
             page, has_next = _split_page(rows, normalised_limit)
-            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(
+                session, tuple(item for _, item in page)
+            )
             return PaginatedResponse[ContinueWatchingEntry](
                 items=tuple[ContinueWatchingEntry, ...](
-                    ContinueWatchingEntry(item=summaries[item.id], playback=_playback(state)) for state, item in page
+                    ContinueWatchingEntry(item=summaries[item.id], playback=_playback(state))
+                    for state, item in page
                 ),
                 next_cursor=(
                     _encode_cursor(
@@ -1156,7 +1453,7 @@ class KatalogQueryService:
         cursor_value: dict[str, object] | None = _decode_cursor(cursor, "on-deck")
 
         def load(session: Session) -> PaginatedResponse[OnDeckEntry]:
-            _require(session, User, user_id, "User")
+            self._configured_user(session, user_id)
             statement: Select[tuple[KeiroEntry, Zaisan]] = (
                 select(KeiroEntry, Zaisan)
                 .join(Zaisan, KeiroEntry.library_item_id == Zaisan.id)
@@ -1189,13 +1486,15 @@ class KatalogQueryService:
                 )
             rows: tuple[Row[tuple[KeiroEntry, Zaisan]], ...] = tuple(
                 session.execute(
-                    statement.order_by(KeiroEntry.watch_order_id, KeiroEntry.position, KeiroEntry.id).limit(
-                        normalised_limit + 1
-                    )
+                    statement.order_by(
+                        KeiroEntry.watch_order_id, KeiroEntry.position, KeiroEntry.id
+                    ).limit(normalised_limit + 1)
                 )
             )
             page, has_next = _split_page(rows, normalised_limit)
-            summaries: dict[int, LibraryItemSummary] = _summaries_for(session, tuple(item for _, item in page))
+            summaries: dict[int, LibraryItemSummary] = _summaries_for(
+                session, tuple(item for _, item in page)
+            )
             return PaginatedResponse[OnDeckEntry](
                 items=tuple[OnDeckEntry, ...](
                     OnDeckEntry(item=summaries[item.id], source_watch_order_id=entry.watch_order_id)
@@ -1225,7 +1524,20 @@ class KatalogQueryService:
         cursor_value: dict[str, object] | None = _decode_cursor(cursor, "metadata-review")
 
         def load(session: Session) -> PaginatedResponse[MetadataReviewCandidate]:
-            statement: Select[tuple[MetadataCandidate]] = select(MetadataCandidate)
+            resolved_binding = (
+                select(MetadataBinding.id)
+                .where(
+                    MetadataBinding.library_item_id == MetadataCandidate.library_item_id,
+                    MetadataBinding.status.in_(
+                        (MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)
+                    ),
+                )
+                .exists()
+            )
+            statement: Select[tuple[MetadataCandidate]] = select(MetadataCandidate).where(
+                MetadataCandidate.status == MetadataCandidateStatus.SUGGESTED,
+                ~resolved_binding,
+            )
             if cursor_value is not None:
                 confidence: float = _cursor_float(cursor_value, "confidence")
                 candidate_id: int = _cursor_int(cursor_value, "id")
@@ -1240,14 +1552,16 @@ class KatalogQueryService:
                 )
             rows: tuple[MetadataCandidate, ...] = tuple(
                 session.scalars(
-                    statement.order_by(MetadataCandidate.confidence.desc(), MetadataCandidate.id).limit(
-                        normalised_limit + 1
-                    )
+                    statement.order_by(
+                        MetadataCandidate.confidence.desc(), MetadataCandidate.id
+                    ).limit(normalised_limit + 1)
                 )
             )
             page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse[MetadataReviewCandidate](
-                items=tuple[MetadataReviewCandidate, ...](_candidate(candidate) for candidate in page),
+                items=tuple[MetadataReviewCandidate, ...](
+                    _candidate(candidate) for candidate in page
+                ),
                 next_cursor=(
                     _encode_cursor(
                         "metadata-review",
@@ -1271,7 +1585,7 @@ class KatalogQueryService:
         completed: bool,
     ) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
-            _require(session, User, user_id, "User")
+            self._configured_user(session, user_id)
             try:
                 state: PlaybackState = record_playback_progress(
                     session,
@@ -1291,10 +1605,14 @@ class KatalogQueryService:
 
     def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
-            _require(session, User, user_id, "User")
+            self._configured_user(session, user_id)
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             duration: float = (
-                session.scalar(select(func.max(MediaFile.duration_seconds)).where(MediaFile.library_item_id == item.id))
+                session.scalar(
+                    select(func.max(MediaFile.duration_seconds)).where(
+                        MediaFile.library_item_id == item.id
+                    )
+                )
                 or 0.0
             )
             try:
@@ -1315,7 +1633,7 @@ class KatalogQueryService:
 
     def clear_watched(self, user_id: int, item_id: int) -> None:
         def clear(session: Session) -> None:
-            _require(session, User, user_id, "User")
+            self._configured_user(session, user_id)
             _require(session, Zaisan, item_id, "Library item")
             state: PlaybackState | None = session.scalar(
                 select(PlaybackState).where(
@@ -1332,7 +1650,9 @@ class KatalogQueryService:
         """Persist a bounded queue, returning a one-use launch capability."""
 
         def create(session: Session) -> PlaybackPlanLaunch:
-            _require(session, User, request.user_id, "User")
+            user = self._configured_user(session, request.user_id)
+            if self._profile_configuration(user).state is UserConfigurationState.DISABLED:
+                raise CatalogueValidationError("Disabled users cannot start playback sessions.")
             planned_entries, context = self._plan_entries(session, request)
             now: datetime = datetime.now(UTC)
             session_id: str = secrets.token_urlsafe(32)
@@ -1373,6 +1693,27 @@ class KatalogQueryService:
 
         return self._database.run_transaction(create)
 
+    def _profile_configuration(self, user: User) -> UserConfiguration:
+        """Load the authoritative profile document, migrating legacy SQLite fields once."""
+
+        return self._user_configurations.load_or_migrate(user)
+
+    def _configured_user(self, session: Session, user_id: int) -> User:
+        """Resolve a user after creating structural SQLite rows for config directories."""
+
+        self._synchronise_configured_users(session)
+        user = _require(session, User, user_id, "User")
+        self._profile_configuration(user)
+        return user
+
+    def _synchronise_configured_users(self, session: Session) -> None:
+        """Project filesystem profiles into SQLite only where relations require numeric IDs."""
+
+        try:
+            self._user_configurations.synchronise_database_users(session)
+        except ValueError as error:
+            raise CatalogueValidationError(str(error)) from error
+
     def launch_playback_plan(self, launch_token: str) -> PlaybackSessionResponse:
         """Consume a plan launch capability and materialise its media capabilities."""
 
@@ -1408,7 +1749,9 @@ class KatalogQueryService:
     def get_playback_session(self, session_id: str) -> PlaybackSessionResponse:
         def load(session: Session) -> PlaybackSessionResponse:
             now: datetime = datetime.now(UTC)
-            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
             _require_active_session(playback_session, now)
             return self._playback_session_response(session, playback_session, now)
 
@@ -1419,7 +1762,9 @@ class KatalogQueryService:
     ) -> PlaybackProgressResult:
         def record(session: Session) -> PlaybackProgressResult:
             now: datetime = datetime.now(UTC)
-            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
             _require_active_session(playback_session, now)
             entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
             media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
@@ -1467,7 +1812,9 @@ class KatalogQueryService:
     def advance_playback_session(self, session_id: str) -> PlaybackSessionResponse:
         def advance(session: Session) -> PlaybackSessionResponse:
             now: datetime = datetime.now(UTC)
-            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
             _require_active_session(playback_session, now)
             current_entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
             next_entry: PlaybackSessionEntry | None = session.scalar(
@@ -1497,7 +1844,9 @@ class KatalogQueryService:
     def complete_playback_session(self, session_id: str) -> PlaybackCompletionResult:
         def complete(session: Session) -> PlaybackCompletionResult:
             now: datetime = datetime.now(UTC)
-            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
             _require_active_session(playback_session, now)
             entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
             media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
@@ -1536,7 +1885,9 @@ class KatalogQueryService:
     def close_playback_session(self, session_id: str) -> None:
         def close(session: Session) -> None:
             now: datetime = datetime.now(UTC)
-            playback_session: PlaybackSession = _require(session, ModelPlaybackSession, session_id, "Playback session")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
             _require_active_session(playback_session, now)
             playback_session.closed_at = now
 
@@ -1550,7 +1901,9 @@ class KatalogQueryService:
         def resolve(session: Session) -> MediaTransferFile:
             now: datetime = datetime.now(UTC)
             token: MediaAccessToken | None = session.scalar(
-                select(MediaAccessToken).where(MediaAccessToken.token_hash == _token_hash(access_token))
+                select(MediaAccessToken).where(
+                    MediaAccessToken.token_hash == _token_hash(access_token)
+                )
             )
             if (
                 token is None
@@ -1816,12 +2169,27 @@ class KatalogQueryService:
             return MigrationContext.configure(connection).get_current_revision()
 
 
+def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSummary:
+    """Map authoritative profile configuration to the public API contract."""
+
+    return UserSummary(
+        id=user_id,
+        username=configuration.username,
+        display_name=configuration.name,
+        role=UserRole(configuration.level.value),
+        is_disabled=configuration.state is UserConfigurationState.DISABLED,
+        pin_required=configuration.pin_hash is not None,
+    )
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _is_expired(expires_at: datetime, now: datetime) -> bool:
-    normalised_expiry: datetime = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+    normalised_expiry: datetime = (
+        expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+    )
     return normalised_expiry <= now
 
 
@@ -1968,10 +2336,14 @@ def _series_start_index(
 
 def _require_parent(session: Session, item: Zaisan, expected_kind: ZaisanKind) -> Zaisan:
     if item.parent_id is None:
-        raise CatalogueValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+        raise CatalogueValidationError(
+            f"Library item {item.id} has no {expected_kind.value} parent."
+        )
     parent = _require(session, Zaisan, item.parent_id, "Library item")
     if parent.item_kind is not expected_kind:
-        raise CatalogueValidationError(f"Library item {item.id} has no {expected_kind.value} parent.")
+        raise CatalogueValidationError(
+            f"Library item {item.id} has no {expected_kind.value} parent."
+        )
     return parent
 
 
@@ -2031,6 +2403,126 @@ def _download_name(title: str, suffix: str) -> str:
     return f"{safe_stem}{normalised_suffix}"
 
 
+def _validate_item_hierarchy(
+    session: Session,
+    item: Zaisan,
+    *,
+    target_kind: ZaisanKind,
+    target_parent_id: int | None,
+    target_season_number: int | None,
+    target_episode_number: int | None,
+) -> None:
+    """Validate a metadata-only hierarchy edit before altering any catalogue rows."""
+
+    if target_parent_id == item.id:
+        raise CatalogueValidationError("A library item cannot be its own parent.")
+    current_parent_id = target_parent_id
+    seen_parent_ids: set[int] = set()
+    while current_parent_id is not None:
+        if current_parent_id in seen_parent_ids or current_parent_id == item.id:
+            raise CatalogueValidationError("A library item's parent cannot be one of its children.")
+        seen_parent_ids.add(current_parent_id)
+        parent = _require(session, Zaisan, current_parent_id, "Library item")
+        current_parent_id = parent.parent_id
+    try:
+        validate_library_item_parent(session, item.library_root_id, target_kind, target_parent_id)
+    except ValueError as error:
+        raise CatalogueValidationError(str(error)) from error
+    if target_kind is ZaisanKind.SEASON and target_season_number is None:
+        raise CatalogueValidationError("Season items require a season number.")
+    if target_kind is ZaisanKind.EPISODE and (
+        target_season_number is None or target_episode_number is None
+    ):
+        raise CatalogueValidationError("Episode items require season and episode numbers.")
+    if target_kind not in PLAYABLE_ITEM_KINDS and session.scalar(
+        select(func.count()).select_from(MediaFile).where(MediaFile.library_item_id == item.id)
+    ):
+        raise CatalogueValidationError("A non-playable item cannot own existing media files.")
+    children = tuple(session.scalars(select(Zaisan).where(Zaisan.parent_id == item.id)))
+    for child in children:
+        parent_kinds = allowed_parent_kinds(child.item_kind)
+        if parent_kinds is None or target_kind not in parent_kinds:
+            raise CatalogueValidationError(
+                f"Changing this item to {target_kind.value} would invalidate child {child.id}."
+            )
+
+
+def _validated_artwork_selection(
+    session: Session, item_id: int, selected: tuple[SelectedArtwork, ...]
+) -> dict[str, int]:
+    artwork_by_id = {
+        artwork.id: artwork
+        for artwork in session.scalars(
+            select(CachedArtwork).where(CachedArtwork.library_item_id == item_id)
+        )
+    }
+    values: dict[str, int] = {}
+    for selection in selected:
+        artwork = artwork_by_id.get(selection.artwork_id)
+        if artwork is None:
+            raise CatalogueValidationError(
+                f"Artwork {selection.artwork_id} does not belong to this library item."
+            )
+        if artwork.artwork_kind.value != selection.kind.value:
+            raise CatalogueValidationError(
+                f"Artwork {selection.artwork_id} is not a {selection.kind.value} selection."
+            )
+        values[selection.kind.value] = selection.artwork_id
+    return values
+
+
+def _set_item_value(
+    changes: dict[str, tuple[object, object]],
+    item: Zaisan,
+    attribute: str,
+    value: object,
+    fields: set[str],
+    *,
+    field_name: str | None = None,
+) -> None:
+    request_field = field_name or attribute
+    if request_field not in fields:
+        return
+    previous = getattr(item, attribute)
+    if previous == value:
+        return
+    setattr(item, attribute, value)
+    changes[request_field] = (previous, value)
+
+
+def _audit_changes(changes: dict[str, tuple[object, object]]) -> JSONObject:
+    result: JSONObject = {}
+    for field, (previous, current) in changes.items():
+        result[field] = {"from": _audit_value(previous), "to": _audit_value(current)}
+    return result
+
+
+def _audit_value(value: object) -> JSONValue:
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, tuple):
+        return [_audit_value(part) for part in cast(tuple[object, ...], value)]
+    if isinstance(value, list):
+        return [_audit_value(part) for part in cast(list[object], value)]
+    if isinstance(value, dict):
+        values = cast(dict[object, object], value)
+        return {str(key): _audit_value(part) for key, part in values.items()}
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    raise TypeError(f"Unsupported library item audit value: {type(value).__name__}.")
+
+
+def _edit_audit(event: LibraryItemEditEvent) -> LibraryItemEditAudit:
+    return LibraryItemEditAudit(
+        id=event.id,
+        actor=event.actor,
+        changed_fields=tuple(event.changes),
+        occurred_at=event.occurred_at,
+    )
+
+
 def _apply_item_filters(
     statement: Select[tuple[Zaisan]], filters: LibraryItemFilters
 ) -> Select[tuple[Zaisan]]:
@@ -2052,12 +2544,22 @@ def _apply_item_filters(
             raise CatalogueValidationError("Search text must not be blank.")
         statement = statement.where(Zaisan.title.ilike(f"%{normalised}%"))
     for tag in filters.tags:
-        normalised_tag = tag.strip()
+        normalised_tag = tag.strip().casefold()
         if not normalised_tag:
             raise CatalogueValidationError("Tags must not be blank.")
         tag_values = func.json_each(Kura.default_tags).table_valued("value").alias("root_tag")
+        item_tag_values = func.json_each(Zaisan.tags).table_valued("value").alias("item_tag")
         statement = statement.where(
-            select(1).select_from(tag_values).where(tag_values.c.value == normalised_tag).exists()
+            or_(
+                select(1)
+                .select_from(tag_values)
+                .where(tag_values.c.value == normalised_tag)
+                .exists(),
+                select(1)
+                .select_from(item_tag_values)
+                .where(item_tag_values.c.value == normalised_tag)
+                .exists(),
+            )
         )
     if filters.watched is not None:
         if filters.user_id is None:
@@ -2093,13 +2595,19 @@ def _recent_catalogue_identity(item: Zaisan, items_by_id: dict[int, Zaisan]) -> 
     if item.item_kind in {ZaisanKind.MOVIE, ZaisanKind.SERIES}:
         return item
     if item.item_kind is ZaisanKind.EPISODE:
-        season: Zaisan | None = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        season: Zaisan | None = (
+            items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        )
         series: Zaisan | None = (
-            items_by_id.get(season.parent_id) if season is not None and season.parent_id is not None else None
+            items_by_id.get(season.parent_id)
+            if season is not None and season.parent_id is not None
+            else None
         )
         return series if series is not None and series.item_kind is ZaisanKind.SERIES else None
     if item.item_kind is ZaisanKind.SPECIAL:
-        parent: Zaisan | None = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        parent: Zaisan | None = (
+            items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        )
         if parent is None:
             return None
         if parent.item_kind is ZaisanKind.SERIES:
@@ -2130,8 +2638,8 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
         return {}
     item_ids = tuple(item.id for item in items)
     root_ids = tuple({item.library_root_id for item in items})
-    tags = {
-        root.id: tuple(sorted(root.default_tags))
+    root_tags = {
+        root.id: frozenset(tag.strip().casefold() for tag in root.default_tags if tag.strip())
         for root in session.scalars(select(Kura).where(Kura.id.in_(root_ids)))
     }
     artworks: dict[int, list[ArtworkSelection]] = {item_id: [] for item_id in item_ids}
@@ -2144,6 +2652,19 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             artworks[artwork.library_item_id].append(
                 _artwork_selection(artwork.library_item_id, artwork)
             )
+    selected_artwork = {
+        item.id: {kind: artwork_id for kind, artwork_id in item.selected_artwork_ids.items()}
+        for item in items
+    }
+    for item_id, selections in artworks.items():
+        selected_ids = selected_artwork[item_id]
+        selections.sort(
+            key=lambda artwork: (
+                0 if selected_ids.get(artwork.kind.value) == artwork.id else 1,
+                artwork.kind.value,
+                artwork.id,
+            )
+        )
     return {
         item.id: LibraryItemSummary(
             id=item.id,
@@ -2152,7 +2673,7 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             year=item.release_year,
             parent_id=item.parent_id,
             availability=Availability(item.availability.value),
-            tags=tags[item.library_root_id],
+            tags=tuple(sorted(root_tags[item.library_root_id] | frozenset(item.tags))),
             artwork=tuple(artworks[item.id]),
         )
         for item in items
@@ -2162,11 +2683,17 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
 def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
     summary = _summaries_for(session, (item,))[item.id]
     values = summary.model_dump() | {
+        "sort_title": item.sort_title,
         "overview": item.overview,
         "release_date": item.release_date.isoformat() if item.release_date is not None else None,
         "air_date": item.air_date.isoformat() if item.air_date is not None else None,
         "season_number": item.season_number,
         "episode_number": item.episode_number,
+        "locked_metadata_fields": tuple(item.locked_metadata_fields),
+        "selected_artwork": tuple(
+            SelectedArtwork(kind=ArtworkKind(kind), artwork_id=artwork_id)
+            for kind, artwork_id in sorted(item.selected_artwork_ids.items())
+        ),
         "playback_url": f"/api/v1/playback/items/{item.id}",
     }
     match item.item_kind:
