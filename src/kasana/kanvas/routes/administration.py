@@ -43,6 +43,7 @@ def render_administration(
                 "overview-source": "/kanvas/data/administration/overview",
                 "jobs-source": "/kanvas/data/administration/jobs",
                 "roots-source": "/kanvas/data/administration/roots",
+                "directories-source": "/kanvas/data/administration/directories",
                 "metadata-source": "/kanvas/data/administration/metadata",
                 "hierarchy-source": "/kanvas/data/administration/hierarchy",
                 "action-source": "/kanvas/actions/administration",

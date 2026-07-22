@@ -31,11 +31,13 @@ from kasana.katalog.api.contracts import (
     CollectionSummary,
     CollectionUpdate,
     ContinueWatchingEntry,
+    DirectoryListing,
     HealthResponse,
     HierarchyRepairPreview,
     HierarchyRepairRequest,
     JobStatus,
     JobSubmission,
+    LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
     LibraryItemKind,
@@ -235,6 +237,18 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> tuple[LibraryRootSummary, ...]:
         return await run_blocking(runtime.queries.list_library_roots)
+
+    @app.get(
+        "/api/v1/library/directories",
+        response_model=DirectoryListing,
+        operation_id="v1_browse_library_directories",
+        responses=_ERROR_RESPONSES,
+    )
+    async def browse_library_directories(
+        path: Annotated[str | None, Query(min_length=1, max_length=10_000)] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> DirectoryListing:
+        return await runtime.browse_directories(path)
 
     @app.post(
         "/api/v1/library/roots",
@@ -1129,6 +1143,24 @@ def create_app(
             root_id=scan.library_root_id,
             include_unavailable=scan.include_unavailable,
             dry_run=scan.dry_run,
+        )
+        return JobSubmission(job=job)
+
+    @app.post(
+        "/api/v1/library/consistency",
+        response_model=JobSubmission,
+        status_code=status.HTTP_202_ACCEPTED,
+        operation_id="v1_submit_library_consistency",
+        responses=_ERROR_RESPONSES,
+    )
+    async def submit_library_consistency(
+        request: LibraryConsistencyRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> JobSubmission:
+        job = await runtime.submit_library_consistency(
+            root_id=request.library_root_id,
+            include_unavailable=request.include_unavailable,
+            dry_run=request.dry_run,
         )
         return JobSubmission(job=job)
 

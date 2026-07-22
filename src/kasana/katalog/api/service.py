@@ -512,13 +512,13 @@ class KatalogQueryService:
         """Return the small, stable set of effective tags available to library filters."""
 
         def load(session: Session) -> tuple[str, ...]:
-            root_tags = session.scalars(select(Kura.default_tags))
+            roots = tuple(session.scalars(select(Kura)))
             item_tags = session.scalars(select(Zaisan.tags))
             values = {
-                tag.strip().casefold()
-                for tags in (*root_tags, *item_tags)
+                tag
+                for tags in (*(_root_effective_tags(root) for root in roots), *item_tags)
                 for tag in tags
-                if tag.strip()
+                if tag
             }
             return tuple(sorted(values))
 
@@ -2551,13 +2551,14 @@ def _apply_item_filters(
         item_tag_values = func.json_each(Zaisan.tags).table_valued("value").alias("item_tag")
         statement = statement.where(
             or_(
+                func.lower(Kura.display_name) == normalised_tag,
                 select(1)
                 .select_from(tag_values)
-                .where(tag_values.c.value == normalised_tag)
+                .where(func.lower(tag_values.c.value) == normalised_tag)
                 .exists(),
                 select(1)
                 .select_from(item_tag_values)
-                .where(item_tag_values.c.value == normalised_tag)
+                .where(func.lower(item_tag_values.c.value) == normalised_tag)
                 .exists(),
             )
         )
@@ -2639,7 +2640,7 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
     item_ids = tuple(item.id for item in items)
     root_ids = tuple({item.library_root_id for item in items})
     root_tags = {
-        root.id: frozenset(tag.strip().casefold() for tag in root.default_tags if tag.strip())
+        root.id: _root_effective_tags(root)
         for root in session.scalars(select(Kura).where(Kura.id.in_(root_ids)))
     }
     artworks: dict[int, list[ArtworkSelection]] = {item_id: [] for item_id in item_ids}
@@ -2678,6 +2679,13 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
         )
         for item in items
     }
+
+
+def _root_effective_tags(root: Kura) -> frozenset[str]:
+    tags = {tag.strip().casefold() for tag in root.default_tags if tag.strip()}
+    if root.display_name is not None and root.display_name.strip():
+        tags.add(root.display_name.strip().casefold())
+    return frozenset(tags)
 
 
 def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:

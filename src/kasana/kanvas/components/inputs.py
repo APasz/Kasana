@@ -78,21 +78,28 @@ def multi_select_input(
     options: tuple[SelectOption, ...],
     values: tuple[str, ...],
 ) -> Element:
-    """Render a native multi-select for a finite, server-provided vocabulary."""
+    """Render a compact checkbox dropdown for a finite, server-provided vocabulary."""
 
     selected_values = frozenset(values)
-    with ui.element("label").classes("k-control-shell k-select-wrap k-select-wrap--tags"):
-        ui.label(aria_label).classes("k-sr-only")
-        with (
-            ui.element("select")
-            .classes("k-select k-select--tags")
-            .props(f"name={name!r} aria-label={aria_label!r} multiple")
-        ) as select_element:
+    selected_labels = tuple(option.label for option in options if option.value in selected_values)
+    summary = ", ".join(selected_labels[:2]) if selected_labels else aria_label
+    if len(selected_labels) > 2:
+        summary = f"{len(selected_labels)} {aria_label.casefold()}"
+
+    with ui.element("details").classes("k-control-shell k-check-menu").props(
+        f"aria-label={aria_label!r}"
+    ) as menu:
+        with ui.element("summary").classes("k-check-menu__summary"):
+            ui.label(summary)
+        with ui.element("div").classes("k-check-menu__options"):
             for option in options:
-                selected = " selected" if option.value in selected_values else ""
-                with ui.element("option").props(f"value={option.value!r}{selected}"):
+                checked = " checked" if option.value in selected_values else ""
+                with ui.element("label").classes("k-check-menu__option"):
+                    ui.element("input").props(
+                        f"name={name!r} type='checkbox' value={option.value!r}{checked}"
+                    )
                     ui.label(option.label)
-    return select_element
+    return menu
 
 
 def checkbox_input(

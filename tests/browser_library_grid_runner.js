@@ -14,6 +14,8 @@ class FakeElement {
     this.type = '';
     this.innerHTML = '';
     this.isConnected = true;
+    this.columnCount = 5;
+    this.rowHeight = 100;
   }
 
   get firstElementChild() {
@@ -70,7 +72,9 @@ class FakeElement {
   }
 
   getBoundingClientRect() {
-    return {height: 100, width: 100};
+    const index = this.parentElement ? this.parentElement.children.indexOf(this) : 0;
+    const row = index >= 0 ? Math.floor(index / (this.parentElement?.columnCount || this.columnCount)) : 0;
+    return {height: this.rowHeight, width: 100, top: row * this.rowHeight};
   }
 
   querySelector() {
@@ -118,11 +122,15 @@ global.document = {
 global.window = {
   location: {origin: 'http://kanvas.test', pathname: '/library'},
   scrollY: 42,
+  scrollByCalls: [],
   addEventListener() {},
   removeEventListener() {},
-  scrollBy() {},
+  scrollBy(...values) {
+    this.scrollByCalls.push(values);
+  },
   scrollTo() {},
   history: {back() {}},
+  clearTimeout() {},
   setTimeout() {}
 };
 global.navigator = {getGamepads: () => []};
@@ -148,6 +156,9 @@ const source = fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
   "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, libraryGridPayload};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
+).replace(
+  "if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);",
+  "globalThis.__administrationTest = {KanvasAdministration};\n  if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);"
 );
 vm.runInThisContext(exposed, {filename: 'kanvas.js'});
 
@@ -285,7 +296,7 @@ async function testCancellationStateAndDevelopmentDiagnostics() {
 
 async function testStateInvalidationAndRenderingFailure() {
   const instance = grid();
-  assert.match(instance.stateKey, /v3:asset=test-asset:user=4:filters=/);
+  assert.match(instance.stateKey, /v4:asset=test-asset:user=4:filters=/);
   assert.match(decodeURIComponent(instance.stateKey), /kind=movie&search=alpha/);
   storage.set(instance.stateKey, JSON.stringify({
     schemaVersion: 2,
@@ -310,12 +321,49 @@ async function testStateInvalidationAndRenderingFailure() {
   assert.match(diagnostic.children[1].textContent, /rendering_failure/);
 }
 
+async function testRowAwareTrimPreservesScrollAnchor() {
+  const instance = grid();
+  for (let index = 1; index <= 150; index += 1) {
+    instance.grid.append(new FakeElement('kanvas-poster'));
+  }
+  const scrollByCallsBefore = window.scrollByCalls.length;
+  instance.trimMountedPosters();
+  assert.equal(instance.grid.children.length, 140);
+  assert.equal(instance.mountedStart, 10);
+  assert.equal(window.scrollByCalls.length, scrollByCallsBefore + 1);
+  assert.deepEqual(window.scrollByCalls.at(-1), [0, -200]);
+}
+
+async function testAdministrationPollingWaitsForOpenDialog() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  let fetches = 0;
+  let renders = 0;
+  let schedules = 0;
+  instance.section = 'libraries';
+  instance.fetchJson = async () => {
+    fetches += 1;
+    return {items: []};
+  };
+  instance.render = () => { renders += 1; };
+  instance.schedule = () => { schedules += 1; };
+  instance.querySelector = (selector) => selector === 'dialog[open]' ? new HTMLDialogElement('dialog') : null;
+
+  await instance.load();
+
+  assert.equal(fetches, 0);
+  assert.equal(renders, 0);
+  assert.equal(schedules, 1);
+  assert.equal(instance.inFlight, false);
+}
+
 async function main() {
   await testValidPageRetainsAvailable();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();
   await testCancellationStateAndDevelopmentDiagnostics();
   await testStateInvalidationAndRenderingFailure();
+  await testRowAwareTrimPreservesScrollAnchor();
+  await testAdministrationPollingWaitsForOpenDialog();
   process.stdout.write('browser library grid checks passed\n');
 }
 

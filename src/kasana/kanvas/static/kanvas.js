@@ -2,6 +2,7 @@
   'use strict';
 
   const MAX_MOUNTED_POSTERS = 144;
+  const GRID_ROW_TOP_TOLERANCE_PX = 1;
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
@@ -115,7 +116,33 @@
     return element;
   };
 
-  const LIBRARY_GRID_SCHEMA_VERSION = 3;
+  const gridColumnCount = (grid) => {
+    const children = Array.from(grid.children);
+    if (!children.length) return 1;
+    const firstTop = children[0].getBoundingClientRect().top;
+    const sameRow = children.findIndex((child) => Math.abs(child.getBoundingClientRect().top - firstTop) > GRID_ROW_TOP_TOLERANCE_PX);
+    return Math.max(1, sameRow === -1 ? children.length : sameRow);
+  };
+
+  const trimOldestGridRows = (grid, maxMounted) => {
+    const overflow = grid.children.length - maxMounted;
+    if (overflow <= 0) return 0;
+    const children = Array.from(grid.children);
+    const columns = gridColumnCount(grid);
+    const requestedCount = columns >= children.length ? overflow : Math.ceil(overflow / columns) * columns;
+    const removeCount = Math.min(children.length - 1, requestedCount);
+    const removed = children.slice(0, removeCount);
+    if (!removed.length || removed.some((child) => child.contains(document.activeElement))) {
+      return 0;
+    }
+    const anchor = children[removeCount] || null;
+    const anchorTop = anchor?.getBoundingClientRect().top ?? null;
+    for (const child of removed) child.remove();
+    if (anchor && anchorTop !== null) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
+    return removed.length;
+  };
+
+  const LIBRARY_GRID_SCHEMA_VERSION = 4;
   const LIBRARY_RESPONSE_SCHEMA_VERSION = 1;
   const libraryAssetVersion = () => {
     const scripts = Array.from(document.scripts);
@@ -399,14 +426,7 @@
 
     trimMountedPosters() {
       if (!this.grid) return;
-      while (this.grid.children.length > MAX_MOUNTED_POSTERS) {
-        const first = this.grid.firstElementChild;
-        if (!first || first.contains(document.activeElement)) return;
-        const height = first.getBoundingClientRect().height;
-        first.remove();
-        this.mountedStart += 1;
-        window.scrollBy(0, -height);
-      }
+      this.mountedStart += trimOldestGridRows(this.grid, MAX_MOUNTED_POSTERS);
     }
 
     saveState() {
@@ -644,13 +664,7 @@
 
     trimMountedCollections() {
       if (!this.grid) return;
-      while (this.grid.children.length > MAX_MOUNTED_POSTERS) {
-        const first = this.grid.firstElementChild;
-        if (!first || first.contains(document.activeElement)) return;
-        const height = first.getBoundingClientRect().height;
-        first.remove();
-        window.scrollBy(0, -height);
-      }
+      trimOldestGridRows(this.grid, MAX_MOUNTED_POSTERS);
     }
   }
 
@@ -1190,6 +1204,10 @@
 
     source(name) { return this.getAttribute(name); }
 
+    hasOpenDialog() {
+      return this.querySelector('dialog[open]') instanceof HTMLDialogElement;
+    }
+
     async fetchJson(source, suffix = '') {
       if (!source) throw new Error('Missing administration source');
       const response = await fetch(`${source}${suffix}`, {headers: {'Accept': 'application/json'}, credentials: 'same-origin', signal: this.abort?.signal});
@@ -1199,6 +1217,10 @@
 
     async load() {
       if (this.inFlight || document.visibilityState === 'hidden') return;
+      if (this.hasOpenDialog()) {
+        this.schedule();
+        return;
+      }
       this.inFlight = true;
       this.abort?.abort();
       this.abort = new AbortController();
@@ -1225,7 +1247,7 @@
         if (this.section === 'hierarchy') {
           this.hierarchy = await this.fetchJson(this.source('hierarchy-source'));
         }
-        this.render();
+        if (!this.hasOpenDialog()) this.render();
       } catch (error) {
         if (error?.name !== 'AbortError') this.renderError();
       } finally {
@@ -1287,6 +1309,7 @@
         ${this.statusRow('Last scan', adminDate(data.lastSuccessfulScanAt), '', '')}
         ${this.statusRow('Artwork cache', `${adminBytes(data.artworkCacheSizeBytes)} · ${data.artworkCacheFileCount || 0} files`, 'Maintain', '/administration/artwork')}
         <div class="k-admin-row"><span>Scan</span><button type="button" class="k-button k-button--primary" data-admin-operation="scan">Scan library</button></div>
+        <div class="k-admin-row"><span>Consistency</span><button type="button" class="k-button" data-admin-operation="library-consistency">Clean library</button></div>
         <div class="k-admin-provider-list">${providerRows}</div>
       </section>`;
       this.bindActions();
@@ -1358,7 +1381,10 @@
     }
 
     bindActions() {
-      this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => this.operation(button.dataset.adminOperation, {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null})));
+      this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => {
+        if (button.dataset.adminOperation === 'library-consistency' && !window.confirm('Clean the library catalogue? A database backup is created before hierarchy repair.')) return;
+        this.operation(button.dataset.adminOperation, {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null});
+      }));
       this.querySelector('[data-admin-hierarchy-dry]')?.addEventListener('click', () => this.operation('hierarchy-repair', {apply: false}));
       this.querySelector('[data-admin-hierarchy-apply]')?.addEventListener('click', () => {
         if (window.confirm('Apply the proposed hierarchy repair? A database backup will be created first.')) {
@@ -1436,7 +1462,9 @@
     rootDialog(root) {
       const dialog = this.querySelector('[data-admin-root-dialog]');
       if (!(dialog instanceof HTMLDialogElement)) return;
-      dialog.innerHTML = `<form method="dialog" class="k-picker" data-admin-root-form><div class="k-picker__header"><strong>${root ? 'Edit root' : 'Add root'}</strong></div><label class="k-control-shell k-input-shell"><input class="k-input" name="displayName" value="${escapeHtml(root?.displayName || '')}" placeholder="Name" aria-label="Root name"></label><label class="k-control-shell k-input-shell"><input class="k-input" name="path" placeholder="Path" aria-label="Root path"></label><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Root kind"><option value="movie"${root?.kind === 'movie' ? ' selected' : ''}>Movie</option><option value="series"${root?.kind === 'series' ? ' selected' : ''}>Series</option></select></label><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((root?.tags || []).join(', '))}" placeholder="Tags" aria-label="Root tags"></label><label class="k-control-shell k-check"><input type="checkbox" name="enabled"${root?.enabled !== false ? ' checked' : ''}> Enabled</label><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save</button><button type="button" class="k-button" data-admin-root-close>Cancel</button></div></form>`;
+      dialog.innerHTML = `<form method="dialog" class="k-picker k-admin-root-form" data-admin-root-form><div class="k-picker__header"><strong>${root ? 'Edit root' : 'Add root'}</strong></div><label class="k-control-shell k-input-shell"><input class="k-input" name="displayName" value="${escapeHtml(root?.displayName || '')}" placeholder="Name" aria-label="Root name"></label><div class="k-admin-root-path-row"><label class="k-control-shell k-input-shell"><input class="k-input" name="path" value="${escapeHtml(root?.path || '')}" placeholder="Path" aria-label="Root path" data-admin-root-path></label><button type="button" class="k-button" data-admin-root-browse>Browse</button></div><div class="k-directory-picker" data-admin-directory-picker hidden></div><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Root kind"><option value="movie"${root?.kind === 'movie' ? ' selected' : ''}>Movie</option><option value="series"${root?.kind === 'series' ? ' selected' : ''}>Series</option></select></label><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((root?.tags || []).join(', '))}" placeholder="Tags" aria-label="Root tags"></label><label class="k-control-shell k-check"><input type="checkbox" name="enabled"${root?.enabled !== false ? ' checked' : ''}> Enabled</label><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save</button><button type="button" class="k-button" data-admin-root-close>Cancel</button></div></form>`;
+      const pathInput = dialog.querySelector('[data-admin-root-path]');
+      dialog.querySelector('[data-admin-root-browse]')?.addEventListener('click', () => this.browseRootDirectory(dialog, pathInput));
       dialog.querySelector('[data-admin-root-close]')?.addEventListener('click', () => dialog.close());
       dialog.querySelector('[data-admin-root-form]')?.addEventListener('submit', (event) => {
         event.preventDefault();
@@ -1445,6 +1473,44 @@
         dialog.close();
       });
       dialog.showModal();
+    }
+
+    async browseRootDirectory(dialog, pathInput, path = null) {
+      if (!(dialog instanceof HTMLDialogElement)) return;
+      if (!(pathInput instanceof HTMLInputElement)) return;
+      const panel = dialog.querySelector('[data-admin-directory-picker]');
+      const source = this.source('directories-source');
+      if (!panel || !source) return;
+      const requested = path || pathInput.value || null;
+      panel.hidden = false;
+      panel.innerHTML = '<div class="k-picker__status">Loading directories…</div>';
+      try {
+        const suffix = requested ? `?path=${encodeURIComponent(requested)}` : '';
+        const response = await fetch(`${source}${suffix}`, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || 'Directory could not be loaded.');
+        this.renderDirectoryPicker(panel, pathInput, payload);
+      } catch (error) {
+        panel.innerHTML = `<div class="k-admin-status k-admin-status--error">${escapeHtml(error?.message || 'Directory could not be loaded.')}</div>`;
+      }
+    }
+
+    renderDirectoryPicker(panel, pathInput, listing) {
+      const entries = Array.isArray(listing.entries) ? listing.entries : [];
+      const path = typeof listing.path === 'string' ? listing.path : '';
+      const parent = typeof listing.parent_path === 'string' ? listing.parent_path : null;
+      const rows = entries.map((entry) => {
+        const entryPath = typeof entry.path === 'string' ? entry.path : '';
+        const name = typeof entry.name === 'string' ? entry.name : entryPath;
+        return `<button type="button" class="k-directory-picker__entry" data-admin-directory-open="${escapeHtml(entryPath)}">${escapeHtml(name)}</button>`;
+      }).join('');
+      panel.innerHTML = `<div class="k-directory-picker__header"><button type="button" class="k-button k-button--primary" data-admin-directory-use>Use this folder</button>${parent ? `<button type="button" class="k-button" data-admin-directory-parent="${escapeHtml(parent)}">Up</button>` : ''}<span class="k-directory-picker__path" title="${escapeHtml(path)}">${escapeHtml(path)}</span></div><div class="k-directory-picker__entries">${rows || '<div class="k-picker__status">No readable child directories.</div>'}</div>`;
+      panel.querySelector('[data-admin-directory-use]')?.addEventListener('click', () => {
+        pathInput.value = path;
+        panel.hidden = true;
+      });
+      panel.querySelector('[data-admin-directory-parent]')?.addEventListener('click', (event) => this.browseRootDirectory(pathInput.closest('dialog'), pathInput, event.currentTarget.dataset.adminDirectoryParent));
+      panel.querySelectorAll('[data-admin-directory-open]').forEach((button) => button.addEventListener('click', () => this.browseRootDirectory(pathInput.closest('dialog'), pathInput, button.dataset.adminDirectoryOpen)));
     }
 
     keyDown(event) {

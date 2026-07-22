@@ -70,12 +70,13 @@ class JobView(BaseModel):
 
 
 class LibraryRootView(BaseModel):
-    """Root configuration with no media-file paths or cache locations."""
+    """Root configuration for owner/admin controls with no media-file paths or cache locations."""
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     id: int = Field(gt=0)
     display_name: str | None = Field(default=None, max_length=200, alias="displayName")
+    path: str | None = Field(default=None, max_length=10_000)
     kind: str = Field(min_length=1, max_length=32)
     tags: tuple[str, ...] = ()
     enabled: bool
@@ -189,11 +190,12 @@ def job_view(job: BackgroundJob) -> JobView:
 
 
 def library_root_view(root: LibraryRootSummary) -> LibraryRootView:
-    """Drop the administration-only path before the root reaches browser code."""
+    """Keep only the configured root path; media-file paths stay server-side."""
 
     return LibraryRootView(
         id=root.id,
         displayName=root.display_name,
+        path=root.path,
         kind=root.expected_kind.value,
         tags=root.default_tags,
         enabled=root.enabled,

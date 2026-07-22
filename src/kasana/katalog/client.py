@@ -27,10 +27,12 @@ from kasana.katalog.api.contracts import (
     CollectionSummary,
     CollectionUpdate,
     ContinueWatchingEntry,
+    DirectoryListing,
     HealthResponse,
     HierarchyRepairPreview,
     HierarchyRepairRequest,
     JobSubmission,
+    LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
     LibraryItemKind,
@@ -615,6 +617,11 @@ class KatalogClient:
     async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
         return await self._send_model("POST", "/api/v1/library/roots", request, LibraryRootSummary)
 
+    async def browse_library_directories(self, path: str | None = None) -> DirectoryListing:
+        return await self._get_model(
+            "/api/v1/library/directories", DirectoryListing, params=_params(path=path)
+        )
+
     async def update_library_root(
         self, root_id: int, request: LibraryRootUpdate
     ) -> LibraryRootSummary:
@@ -729,6 +736,13 @@ class KatalogClient:
 
     async def submit_scan(self, request: ScanRequest) -> JobSubmission:
         return await self._send_model("POST", "/api/v1/scans", request, JobSubmission)
+
+    async def submit_library_consistency(
+        self, request: LibraryConsistencyRequest
+    ) -> JobSubmission:
+        return await self._send_model(
+            "POST", "/api/v1/library/consistency", request, JobSubmission
+        )
 
     async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobSubmission:
         return await self._send_model("POST", "/api/v1/artwork/fetch", request, JobSubmission)

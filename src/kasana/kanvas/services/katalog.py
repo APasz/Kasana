@@ -45,9 +45,11 @@ from kasana.katalog.public import (
     CollectionMembershipUpdate,
     CollectionRelationship,
     CollectionUpdate,
+    DirectoryListing,
     HierarchyRepairPreview,
     HierarchyRepairRequest,
     KatalogClient,
+    LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
     LibraryItemKind,
@@ -202,6 +204,10 @@ class KanvasKatalogService:
             roots = await client.list_library_roots()
         return tuple(library_root_view(root) for root in roots)
 
+    async def administration_directories(self, path: str | None) -> DirectoryListing:
+        async with self._client() as client:
+            return await client.browse_library_directories(path)
+
     async def metadata_review_items(
         self, *, cursor: str | None, limit: int = 50
     ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
@@ -260,6 +266,11 @@ class KanvasKatalogService:
     async def submit_scan(self, request: ScanRequest) -> JobView:
         async with self._client() as client:
             submission = await client.submit_scan(request)
+        return job_view(submission.job)
+
+    async def submit_library_consistency(self, request: LibraryConsistencyRequest) -> JobView:
+        async with self._client() as client:
+            submission = await client.submit_library_consistency(request)
         return job_view(submission.job)
 
     async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobView:

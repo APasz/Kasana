@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from pathlib import Path
 
 from pydantic import ValidationError
 
 from kasana.katalog.api.contracts import (
     BackgroundJob,
+    DirectoryEntry,
+    DirectoryListing,
     HierarchyRepairActionSummary,
     HierarchyRepairImpact,
     HierarchyRepairManualReview,
@@ -63,6 +66,9 @@ class KatalogApiRuntime:
 
     async def close(self) -> None:
         await self.jobs.close()
+
+    async def browse_directories(self, path: str | None, *, limit: int = 500) -> DirectoryListing:
+        return await run_blocking(_directory_listing, path, limit)
 
     async def match_item(self, item_id: int, provider: str, provider_id: str) -> None:
         async def operation(
@@ -226,6 +232,78 @@ class KatalogApiRuntime:
 
         return await self.jobs.submit("hierarchy-repair", repair, library_root_id=root_id)
 
+    async def submit_library_consistency(
+        self, *, root_id: int | None, include_unavailable: bool, dry_run: bool
+    ) -> BackgroundJob:
+        """Run filesystem reconciliation and safe structural repair as one durable job."""
+
+        async def consistency(context: JobContext) -> JobOutcome:
+            await context.report(
+                phase="scanning",
+                unit="files",
+                message="Reconciling catalogue records with media files.",
+            )
+            scanner = IncrementalScanner(
+                self.database,
+                video_extensions=self.settings.video_extensions,
+                probe_concurrency=self.settings.probe_concurrency,
+                ffprobe_executable=self.settings.ffprobe_executable,
+            )
+            scan = await run_blocking(
+                scanner.scan,
+                root_id=root_id,
+                include_unavailable=include_unavailable,
+                dry_run=dry_run,
+            )
+            await context.report(
+                phase="repairing",
+                current=scan.totals.discovered,
+                total=scan.totals.discovered,
+                unit="files",
+                message="Checking structural hierarchy consistency.",
+                force=True,
+            )
+            filters = HierarchyRepairFilters(root_id=root_id)
+            service = HierarchyRepairService(self.database)
+            if dry_run:
+                repair = await run_blocking(service.dry_run, filters)
+            else:
+                backup_path = repair_backup_path(self.database.database_path)
+                await run_blocking(self.database.backup_to, backup_path)
+                repair = await run_blocking(service.apply, filters, backup_path=backup_path)
+            action_count = len(repair.plan.actions)
+            await context.report(
+                phase="complete",
+                current=scan.totals.discovered,
+                total=scan.totals.discovered,
+                unit="files",
+                message="Library consistency check complete."
+                if dry_run
+                else "Library consistency repair complete.",
+                force=True,
+            )
+            counters = {
+                "discovered": scan.totals.discovered,
+                "added": scan.totals.added,
+                "changed": scan.totals.changed,
+                "moved": scan.totals.moved,
+                "unavailable": scan.totals.unavailable,
+                "failed": scan.totals.failed,
+                "hierarchy_actions": action_count,
+            }
+            return JobOutcome(
+                message=(
+                    f"Checked {scan.totals.discovered} files and proposed "
+                    f"{action_count} hierarchy actions."
+                    if dry_run
+                    else f"Reconciled {scan.totals.discovered} files and applied "
+                    f"{action_count} hierarchy actions."
+                ),
+                counters=counters,
+            )
+
+        return await self.jobs.submit("library-consistency", consistency, library_root_id=root_id)
+
     async def hierarchy_repair_preview(
         self, *, root_id: int | None, issue_id: int | None, item_id: int | None
     ) -> HierarchyRepairPreview:
@@ -296,3 +374,42 @@ def _provider(name: str, providers: tuple[MetadataProvider, ...]) -> MetadataPro
             return provider
     msg = f"Metadata provider {name!r} is not configured."
     raise MetadataProviderConfigurationError(msg)
+
+
+def _directory_listing(path: str | None, limit: int) -> DirectoryListing:
+    if not 1 <= limit <= 500:
+        msg = "Directory listing limit must be between 1 and 500."
+        raise ValueError(msg)
+    requested = Path(path).expanduser() if path else Path.cwd()
+    if not requested.is_absolute():
+        msg = "Directory picker path must be absolute."
+        raise ValueError(msg)
+    try:
+        current = requested.resolve(strict=True)
+    except OSError as error:
+        msg = f"Directory {requested} is not accessible."
+        raise ValueError(msg) from error
+    if not current.is_dir():
+        msg = f"Path {current} is not a directory."
+        raise ValueError(msg)
+
+    entries: list[DirectoryEntry] = []
+    try:
+        for child in current.iterdir():
+            if len(entries) >= limit:
+                break
+            try:
+                if child.is_dir():
+                    entries.append(DirectoryEntry(name=child.name, path=str(child.resolve(strict=True))))
+            except OSError:
+                continue
+    except OSError as error:
+        msg = f"Directory {current} is not readable."
+        raise ValueError(msg) from error
+    entries.sort(key=lambda entry: entry.name.casefold())
+    parent = current.parent if current.parent != current else None
+    return DirectoryListing(
+        path=str(current),
+        parent_path=str(parent) if parent is not None else None,
+        entries=tuple(entries),
+    )

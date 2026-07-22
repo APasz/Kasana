@@ -68,6 +68,7 @@ from kasana.katalog.public import (
     KatalogClient,
     KatalogClientError,
     KatalogClientErrorKind,
+    LibraryConsistencyRequest,
     LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootKind,
@@ -491,6 +492,21 @@ async def administration_roots_data(request: Request) -> JSONResponse:
     return JSONResponse({"items": [root.model_dump(by_alias=True, mode="json") for root in roots]})
 
 
+@app.get("/kanvas/data/administration/directories", include_in_schema=False)
+async def administration_directories_data(request: Request) -> JSONResponse:
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    path = _query_text(request, "path", maximum_length=10_000)
+    try:
+        listing = await KanvasKatalogService(_settings).administration_directories(path)
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not browse directories.")
+    return JSONResponse(listing.model_dump(by_alias=True, mode="json"))
+
+
 @app.get("/kanvas/data/administration/metadata", include_in_schema=False)
 async def administration_metadata_data(request: Request) -> JSONResponse:
     profile = await _data_profile(request)
@@ -544,6 +560,15 @@ async def administration_action(request: Request) -> JSONResponse:
         if operation == "scan":
             job = await service.submit_scan(
                 ScanRequest(
+                    library_root_id=_optional_integer(payload.get("rootId")),
+                    include_unavailable=payload.get("includeUnavailable") is True,
+                    dry_run=payload.get("dryRun") is True,
+                )
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "library-consistency":
+            job = await service.submit_library_consistency(
+                LibraryConsistencyRequest(
                     library_root_id=_optional_integer(payload.get("rootId")),
                     include_unavailable=payload.get("includeUnavailable") is True,
                     dry_run=payload.get("dryRun") is True,

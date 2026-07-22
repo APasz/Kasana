@@ -624,6 +624,17 @@ class LibraryRootSummary(APIModel):
     last_scan_summary: dict[str, int] = Field(default_factory=dict)
 
 
+class DirectoryEntry(APIModel):
+    name: str = Field(min_length=1, max_length=1_000)
+    path: str = Field(min_length=1, max_length=10_000)
+
+
+class DirectoryListing(APIModel):
+    path: str = Field(min_length=1, max_length=10_000)
+    parent_path: str | None = Field(default=None, max_length=10_000)
+    entries: tuple[DirectoryEntry, ...] = Field(default=(), max_length=500)
+
+
 class LibraryRootDeletion(APIModel):
     confirm: bool = False
 
@@ -810,6 +821,14 @@ class ScanRequest(APIModel):
     library_root_id: int | None = Field(default=None, gt=0)
     include_unavailable: bool = False
     dry_run: bool = False
+
+
+class LibraryConsistencyRequest(APIModel):
+    """Run filesystem reconciliation plus safe structural repair as one durable job."""
+
+    library_root_id: int | None = Field(default=None, gt=0)
+    include_unavailable: bool = False
+    dry_run: bool = True
 
 
 class ArtworkFetchRequest(APIModel):

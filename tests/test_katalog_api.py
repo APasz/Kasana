@@ -34,6 +34,7 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.public import JobStatus
+from kasana.katalog.repair import HierarchyRepairPlan, HierarchyRepairResult, RepairImpact
 from kasana.katalog.scanning import ScanResult, ScanTotals
 from kasana.katalog.services import (
     add_collection_membership,
@@ -73,6 +74,7 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
             path=library_path,
             expected_media_kind=ZaisanKind.MOVIE,
             default_tags=frozenset({"genre", "favourite"}),
+            display_name="Movies",
         )
         alpha = create_library_item(
             session,
@@ -219,6 +221,12 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
             "/api/v1/library/items", params={"watched": "watched", "user_id": 1}
         )
     ).json()["items"][0]["title"] == "Alpha"
+    assert [
+        item["title"]
+        for item in (
+            await api_fixture.client.get("/api/v1/library/items", params={"tag": "movies"})
+        ).json()["items"]
+    ] == ["Alpha", "Beta", "Gamma"]
 
 
 async def test_library_item_edit_is_audited_and_never_changes_media_files(
@@ -252,7 +260,7 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     assert response.status_code == 200
     payload = response.json()
     assert payload["item"]["title"] == "Edited Alpha"
-    assert payload["item"]["tags"] == ["anime", "favourite", "genre"]
+    assert payload["item"]["tags"] == ["anime", "favourite", "genre", "movies"]
     assert payload["item"]["selected_artwork"] == [{"kind": "poster", "artwork_id": 1}]
     assert set(payload["audit"]["changed_fields"]) >= {
         "title",
@@ -265,6 +273,7 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
         "anime",
         "favourite",
         "genre",
+        "movies",
     ]
     audit = await api_fixture.client.get("/api/v1/library/items/1/edit-audit")
     assert audit.status_code == 200
@@ -534,6 +543,82 @@ async def test_completed_scan_auto_matches_safe_candidates(
     assert completed.message == "Scanned 3 files. Automatically matched 1 items; 0 require review."
 
 
+async def test_library_consistency_job_scans_and_repairs(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    class FakeScanner:
+        def __init__(self, _database: KatalogDatabase, **_options: object) -> None:
+            pass
+
+        def scan(
+            self,
+            *,
+            root_id: int | None,
+            include_unavailable: bool,
+            dry_run: bool,
+        ) -> ScanResult:
+            calls.append("scan")
+            assert root_id == 1
+            assert include_unavailable is True
+            assert dry_run is False
+            return ScanResult(totals=ScanTotals(discovered=4, added=1, moved=2), findings=())
+
+    class FakeRepairService:
+        def __init__(self, _database: KatalogDatabase) -> None:
+            pass
+
+        def apply(
+            self,
+            _filters: object,
+            *,
+            backup_path: Path,
+        ) -> HierarchyRepairResult:
+            calls.append("repair")
+            assert backup_path.name.startswith("katalog.sqlite3.hierarchy-repair-")
+            return HierarchyRepairResult(
+                runId="run-1",
+                applied=True,
+                backupPath=str(backup_path),
+                plan=HierarchyRepairPlan(
+                    actions=(),
+                    manualReviews=(),
+                    impact=RepairImpact(
+                        playbackStates=0,
+                        metadataBindings=0,
+                        collectionMemberships=0,
+                        watchOrderEntries=0,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr("kasana.katalog.api.runtime.IncrementalScanner", FakeScanner)
+    monkeypatch.setattr("kasana.katalog.api.runtime.HierarchyRepairService", FakeRepairService)
+
+    def fake_backup(_path: Path) -> None:
+        calls.append("backup")
+
+    monkeypatch.setattr(api_fixture.database, "backup_to", fake_backup)
+
+    response = await api_fixture.client.post(
+        "/api/v1/library/consistency",
+        json={"library_root_id": 1, "include_unavailable": True, "dry_run": False},
+    )
+    job_id = response.json()["job"]["id"]
+    task = api_fixture.runtime.jobs._tasks[job_id]  # pyright: ignore[reportPrivateUsage]
+    await task
+    completed = await api_fixture.runtime.jobs.get(job_id)
+
+    assert response.status_code == 202
+    assert calls == ["scan", "backup", "repair"]
+    assert completed.status is JobStatus.COMPLETED
+    assert completed.kind == "library-consistency"
+    assert completed.result_counters["discovered"] == 4
+    assert completed.result_counters["moved"] == 2
+    assert completed.message == "Reconciled 4 files and applied 0 hierarchy actions."
+
+
 async def test_failed_background_job_is_logged(
     api_fixture: ApiFixture, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -671,8 +756,43 @@ async def test_openapi_uses_versioned_stable_operation_ids(api_fixture: ApiFixtu
         == "v1_list_recently_added_catalogue_items"
     )
     assert schema["paths"]["/api/v1/users"]["get"]["operationId"] == "v1_list_users"
+    assert (
+        schema["paths"]["/api/v1/library/directories"]["get"]["operationId"]
+        == "v1_browse_library_directories"
+    )
     assert schema["paths"]["/api/v1/scans"]["post"]["operationId"] == "v1_submit_scan"
+    assert (
+        schema["paths"]["/api/v1/library/consistency"]["post"]["operationId"]
+        == "v1_submit_library_consistency"
+    )
     assert "APIError" in schema["components"]["schemas"]
+
+
+async def test_library_directory_browser_lists_server_directories(
+    api_fixture: ApiFixture, tmp_path: Path
+) -> None:
+    library_path = tmp_path / "library"
+    (library_path / "Movies").mkdir()
+    (library_path / "Series").mkdir()
+    (library_path / "alpha.mkv").write_text("not a directory", encoding="utf-8")
+
+    response = await api_fixture.client.get(
+        "/api/v1/library/directories", params={"path": str(library_path)}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["path"] == str(library_path)
+    assert payload["parent_path"] == str(tmp_path)
+    assert [(entry["name"], entry["path"]) for entry in payload["entries"]] == [
+        ("Movies", str(library_path / "Movies")),
+        ("Series", str(library_path / "Series")),
+    ]
+    invalid = await api_fixture.client.get(
+        "/api/v1/library/directories", params={"path": "relative"}
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "validation_error"
 
 
 async def test_typed_aiohttp_client_round_trip_and_cancellation(
@@ -692,6 +812,7 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             await asyncio.sleep(0.001)
         async with KatalogClient(f"http://127.0.0.1:{port}") as client:
             assert (await client.health()).status == "ok"
+            assert (await client.browse_library_directories()).path
             assert (await client.list_users())[0].username == "tester"
             assert [item.title async for item in client.iter_library_items(limit=2)] == [
                 "Alpha",

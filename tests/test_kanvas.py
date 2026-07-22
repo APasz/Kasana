@@ -45,6 +45,7 @@ from kasana.kanvas.components.shell import (
 from kasana.kanvas.dashboard import (
     administration_action,
     administration_artwork_page,
+    administration_directories_data,
     administration_jobs_data,
     administration_jobs_page,
     administration_libraries_page,
@@ -136,10 +137,13 @@ from kasana.katalog.public import (
     BackgroundJob,
     CollectionDetail,
     CollectionMembership,
+    DirectoryEntry,
+    DirectoryListing,
     JobProgress,
     JobStatus,
     KatalogClientError,
     KatalogClientErrorKind,
+    LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
     LibraryItemKind,
@@ -1091,6 +1095,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     root = LibraryRootView(
         id=1,
         displayName="Films",
+        path="/media",
         kind="movie",
         enabled=True,
         available=True,
@@ -1130,6 +1135,14 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         async def administration_roots(self) -> tuple[LibraryRootView, ...]:
             return (root,)
 
+        async def administration_directories(self, path: str | None) -> DirectoryListing:
+            assert path == "/media"
+            return DirectoryListing(
+                path="/media",
+                parent_path="/",
+                entries=(DirectoryEntry(name="Movies", path="/media/Movies"),),
+            )
+
         async def metadata_review_items(
             self, *, cursor: str | None
         ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
@@ -1138,6 +1151,15 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
 
         async def submit_scan(self, _request: object) -> JobView:
             calls.append("scan")
+            return _admin_job()
+
+        async def submit_library_consistency(
+            self, request: LibraryConsistencyRequest
+        ) -> JobView:
+            calls.append("consistency")
+            assert request.library_root_id == 1
+            assert request.include_unavailable is True
+            assert request.dry_run is False
             return _admin_job()
 
         async def submit_artwork_fetch(self, _request: object) -> JobView:
@@ -1200,11 +1222,15 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         Request({"type": "http", "query_string": b"", "headers": []})
     )
     roots_response = await administration_roots_data(request)
+    directories_response = await administration_directories_data(
+        Request({"type": "http", "query_string": b"path=/media", "headers": []})
+    )
     metadata_response = await administration_metadata_data(
         Request({"type": "http", "query_string": b"", "headers": []})
     )
     payloads: tuple[dict[str, object], ...] = (
         {"operation": "scan", "rootId": 1, "dryRun": True},
+        {"operation": "library-consistency", "rootId": 1, "includeUnavailable": True},
         {"operation": "artwork-fetch"},
         {"operation": "cancel-job", "jobId": "job-1"},
         {"operation": "match", "itemId": 7, "provider": "tmdb", "providerId": "42"},
@@ -1222,10 +1248,13 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     assert json.loads(bytes(overview_response.body))["connected"] is True
     assert json.loads(bytes(jobs_response.body))["nextCursor"] == "next"
     assert json.loads(bytes(roots_response.body))["items"][0]["displayName"] == "Films"
+    assert json.loads(bytes(roots_response.body))["items"][0]["path"] == "/media"
+    assert json.loads(bytes(directories_response.body))["entries"][0]["path"] == "/media/Movies"
     assert json.loads(bytes(metadata_response.body))["items"][0]["itemId"] == 7
     assert all(response.status_code == 200 for response in actions)
     assert calls == [
         "scan",
+        "consistency",
         "artwork",
         "cancel",
         "match",
@@ -1307,6 +1336,10 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         async def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
             return (root,)
 
+        async def browse_library_directories(self, path: str | None) -> DirectoryListing:
+            assert path == "/media"
+            return DirectoryListing(path="/media", entries=())
+
         async def metadata_review(
             self, *, cursor: str | None = None, limit: int = 50
         ) -> PaginatedResponse[MetadataReviewCandidate]:
@@ -1339,6 +1372,10 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
             calls.append("scan")
             return SimpleNamespace(job=job)
 
+        async def submit_library_consistency(self, *_args: object) -> SimpleNamespace:
+            calls.append("consistency")
+            return SimpleNamespace(job=job)
+
         async def submit_artwork_fetch(self, *_args: object) -> SimpleNamespace:
             calls.append("artwork")
             return SimpleNamespace(job=job)
@@ -1368,12 +1405,14 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
     overview = await service.administration_overview()
     jobs, next_jobs = await service.administration_jobs(cursor="jobs")
     roots = await service.administration_roots()
+    directories = await service.administration_directories("/media")
     review, next_review = await service.metadata_review_items(cursor="review")
     await service.match_metadata_candidate(7, provider="tmdb", provider_id="42")
     await service.reject_metadata_candidate(7, provider="tmdb", provider_id="42")
     await service.ignore_metadata_item(7)
     await service.refresh_metadata_item(7)
     await service.submit_scan(ScanRequest(library_root_id=1))
+    await service.submit_library_consistency(LibraryConsistencyRequest(library_root_id=1))
     await service.submit_artwork_fetch(ArtworkFetchRequest(library_root_id=1))
     await service.cancel_job("job-1")
     await service.create_library_root(
@@ -1385,6 +1424,8 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
     assert overview.unresolved_metadata_count == 1
     assert (jobs[0].phase, next_jobs) == ("scan", "jobs")
     assert roots[0].display_name == "Films"
+    assert roots[0].path == "media"
+    assert directories.path == "/media"
     assert (review[0].title, review[0].candidates[0].provider_id, next_review) == (
         "Local title",
         "42",
@@ -1396,6 +1437,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         "ignore",
         "refresh",
         "scan",
+        "consistency",
         "artwork",
         "cancel",
         "create-root",
@@ -1982,9 +2024,18 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives(
             assert "k-select" in _element_classes(select)
             assert "k-control-shell" in _element_classes(_parent_element(select))
             assert "k-select-wrap" in _element_classes(_parent_element(select))
-        tags = _select_named(library_client, "tag")
-        assert _element_props(tags)["multiple"] is True
-        assert "k-select--tags" in _element_classes(tags)
+        tag_inputs = [
+            element
+            for element in library_client.elements.values()
+            if element.tag == "input" and _element_props(element).get("name") == "tag"
+        ]
+        tag_menu = _parent_element(_parent_element(_parent_element(tag_inputs[0])))
+        assert {str(_element_props(tag)["value"]) for tag in tag_inputs} == {
+            "anime",
+            "favourite",
+        }
+        assert any(_element_props(tag).get("checked") is True for tag in tag_inputs)
+        assert "k-check-menu" in _element_classes(tag_menu)
         apply_button = next(
             element
             for element in library_client.elements.values()
@@ -2303,7 +2354,13 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert ".k-input:focus-visible { outline: none; }" in css
     assert ".k-select:focus-visible { outline: none; }" in css
     assert ".k-check input:focus-visible { outline: none; }" in css
+    assert ".k-check-menu__summary" in css
+    assert ".k-check-menu__option" in css
     assert ".k-control-shell:focus-within::after" in css
+    assert ".k-admin-root-form .k-select-wrap" in css
+    assert ".k-admin-root-form .k-check { width: fit-content; }" in css
+    assert ".k-admin-root-path-row" in css
+    assert ".k-directory-picker__entry" in css
     assert "background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%" in css
     assert "IntersectionObserver" in javascript
     assert "MAX_MOUNTED_POSTERS" in javascript
@@ -2323,6 +2380,11 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "LIBRARY_GRID_SCHEMA_VERSION" in javascript
     assert "libraryGridPayload" in javascript
     assert "AbortController" in javascript
+    assert "k-picker k-admin-root-form" in javascript
+    assert 'name="path" value="${escapeHtml(root?.path || \'\')}"' in javascript
+    assert "directories-source" in javascript
+    assert "data-admin-root-browse" in javascript
+    assert "browseRootDirectory" in javascript
     assert "normalisedGridSource" in javascript
     assert "kanvas-onboarding" in javascript
     assert "const jobDetail" in javascript
