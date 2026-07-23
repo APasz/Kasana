@@ -28,7 +28,7 @@ from kasana.katalog.repair import (
     HierarchyRepairService,
     repair_backup_path,
 )
-from kasana.katalog.scanning import IncrementalScanner
+from kasana.katalog.scanning import IncrementalScanner, ScanResult
 from kasana.katalog.settings import KatalogSettings
 from kasana.katalog.user_configuration import UserConfigurationStore
 from kasana.kourier.settings import TMDBSettings
@@ -130,7 +130,11 @@ class KatalogApiRuntime:
                 dry_run=dry_run,
             )
             counters = {"discovered": result.totals.discovered}
+            counters.update(_scan_issue_counters(result))
             message = f"Scanned {result.totals.discovered} files."
+            issue_summary = _scan_issue_summary(result)
+            if issue_summary is not None:
+                message += f" {issue_summary}"
             if not dry_run:
                 await context.report(
                     phase="matching",
@@ -391,6 +395,33 @@ def _provider(name: str, providers: tuple[MetadataProvider, ...]) -> MetadataPro
             return provider
     msg = f"Metadata provider {name!r} is not configured."
     raise MetadataProviderConfigurationError(msg)
+
+
+def _scan_issue_counters(result: ScanResult) -> dict[str, int]:
+    counters: dict[str, int] = {}
+    if result.totals.failed:
+        counters["failed"] = result.totals.failed
+    if result.totals.unavailable:
+        counters["unavailable"] = result.totals.unavailable
+    return counters
+
+
+def _scan_issue_summary(result: ScanResult) -> str | None:
+    parts: list[str] = []
+    if result.totals.failed:
+        parts.append(_plural(result.totals.failed, "scan issue", "scan issues"))
+    if result.totals.unavailable:
+        parts.append(
+            f"marked {_plural(result.totals.unavailable, 'file', 'files')} unavailable"
+        )
+    if not parts:
+        return None
+    return f"Recorded {' and '.join(parts)}."
+
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    noun = singular if count == 1 else plural
+    return f"{count} {noun}"
 
 
 def _directory_listing(path: str | None, limit: int) -> DirectoryListing:

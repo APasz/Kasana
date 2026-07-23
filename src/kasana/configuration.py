@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any, cast
 
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
@@ -37,6 +39,43 @@ def user_configuration_directory() -> Path:
     """Return the directory whose numeric children represent user IDs."""
 
     return configuration_directory() / "users"
+
+
+def kanvas_session_secret() -> str:
+    """Load Kanvas's persistent session-signing secret, creating it privately once.
+
+    An environment setting remains available for managed deployments.  The local
+    fallback is deliberately outside the JSON preference documents: those are
+    non-secret and may be copied or inspected during normal administration.
+    """
+
+    path = configuration_directory() / "kanvas.session-secret"
+    try:
+        secret = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return _create_kanvas_session_secret(path)
+    _require_owner_only_file(path)
+    if len(secret) < 32:
+        raise ValueError(f"Kanvas session secret at {path} must be at least 32 characters.")
+    return secret
+
+
+def _create_kanvas_session_secret(path: Path) -> str:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    secret = token_urlsafe(32)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return kanvas_session_secret()
+    with os.fdopen(descriptor, "w", encoding="utf-8") as secret_file:
+        secret_file.write(f"{secret}\n")
+    return secret
+
+
+def _require_owner_only_file(path: Path) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o600:
+        raise ValueError(f"Kanvas session secret at {path} must have mode 0600, not {mode:04o}.")
 
 
 def configured_katalog_api_url() -> str:

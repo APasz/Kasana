@@ -764,6 +764,8 @@ class User(Base):
         server_default=UserRole.USER.value,
     )
     is_disabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default=false())
+    # Kept only to import pre-profile-configuration databases. New writes keep
+    # this compatibility column empty; UserConfigurationStore owns PIN values.
     pin: Mapped[str | None] = mapped_column(String)
 
     playback_states: Mapped[list[PlaybackState]] = orm_relationship(

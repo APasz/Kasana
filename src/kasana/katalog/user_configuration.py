@@ -57,7 +57,11 @@ class UserConfiguration(BaseModel):
 
 
 class UserConfigurationStore:
-    """Stores profiles as ``<users>/<id>/configuration.json`` documents."""
+    """Authoritatively stores profiles and trusted-LAN PIN gates on disk.
+
+    SQLite user rows are only a synchronised projection for relationships and
+    legacy migration; profile PINs are read and written exclusively here.
+    """
 
     def __init__(self, directory: Path | None = None) -> None:
         self._directory = directory or user_configuration_directory()
@@ -91,9 +95,12 @@ class UserConfigurationStore:
                 if user.is_disabled
                 else UserConfigurationState.ACTIVE
             ),
+            # A pre-configuration database may contain a legacy PIN. Import it
+            # once, then clear the SQLite projection during synchronisation.
             pin=user.pin,
         )
         self.save(user.id, configuration)
+        user.pin = None
         return configuration
 
     def save(self, user_id: int, configuration: UserConfiguration) -> None:
@@ -142,7 +149,7 @@ class UserConfigurationStore:
             user.display_name = configuration.name
             user.role = UserRole(configuration.level.value)
             user.is_disabled = configuration.state is UserConfigurationState.DISABLED
-            user.pin = configuration.pin
+            user.pin = None
         session.flush()
 
     def _configuration_path(self, user_id: int) -> Path:

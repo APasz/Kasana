@@ -39,3 +39,15 @@ def test_migration_head_matches_katalog_orm_metadata(tmp_path: Path) -> None:
 
     assert revision == head_revision
     assert differences == []
+
+
+def test_initial_migration_is_immutable_and_does_not_import_runtime_metadata() -> None:
+    migration = (
+        Path(__file__).parents[1] / "alembic" / "versions" / "20260722_0013_folded_katalog.py"
+    )
+    source = migration.read_text(encoding="utf-8")
+
+    assert "from kasana.katalog.models import" not in source
+    assert "metadata.create_all" not in source
+    assert "metadata.drop_all" not in source
+    assert "op.create_table(" in source

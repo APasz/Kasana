@@ -1,11 +1,9 @@
 """Kanvas process configuration."""
 
-from secrets import token_urlsafe
-
 from pydantic import Field, HttpUrl
 from pydantic_settings import SettingsConfigDict
 
-from kasana.configuration import configured_katalog_api_url
+from kasana.configuration import configured_katalog_api_url, kanvas_session_secret
 from kasana.shared.profile_rules import (
     PROFILE_ACCENT_COLOUR_DEFAULT,
     PROFILE_ACCENT_COLOUR_PATTERN,
@@ -24,9 +22,9 @@ class Kanvas_Settings(KSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=5370, ge=1, le=65535)
     katalog_url: HttpUrl = Field(default_factory=lambda: HttpUrl(configured_katalog_api_url()))
-    session_secret: str = Field(default_factory=lambda: token_urlsafe(32), min_length=32)
+    session_secret: str = Field(default_factory=kanvas_session_secret, min_length=32, repr=False)
     session_cookie_secure: bool = False
-    design_route_enabled: bool = True
+    design_route_enabled: bool = False
     auto_browser_open: bool = False
     development_mode: bool = False
     accent_colour: str = Field(

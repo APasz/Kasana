@@ -30,11 +30,16 @@ Non-secret application preferences live in one domain file per component:
 `config.kestrel.json`, `config.kourier.json`, and `config.tmdb.json`. Each
 created profile is stored independently at `configs/users/<user-id>/configuration.json`;
 the numeric directory is its user ID and contains the profile name, level, state,
-optional local PIN, and UI accent colour. User documents are deliberately ignored by Git. Kestrel,
+optional local PIN, and UI accent colour. User documents are deliberately ignored by Git. The
+per-user configuration document is the single source of truth for profile data, including a PIN.
+PINs are intentionally stored in plaintext as trusted-LAN convenience gates: they are not
+passwords, are never returned by Kasana, and must never be logged. Kestrel,
 Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
 `api_host` and `api_port`. Keep only secrets (for example
 `KASANA_KOURIER_TMDB_API_TOKEN`) in `.env`; environment variables can still
-temporarily override non-secret preferences for deployment.
+temporarily override non-secret preferences for deployment. Kanvas generates a persistent
+`configs/kanvas.session-secret` with mode `0600` on its first start (or accepts
+`KASANA_KANVAS_SESSION_SECRET` for managed deployments); preserve that secret across restarts.
 
 Start the API with `uv run kasana-katalog-api`; its documentation is at
 <http://127.0.0.1:5373/api/v1/docs>. Change its bind address in

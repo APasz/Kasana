@@ -152,7 +152,10 @@ global.IntersectionObserver = class {
 global.requestAnimationFrame = (callback) => callback();
 console.error = (...values) => consoleErrors.push(values);
 
-const source = fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8');
+const source = [
+  fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8'),
+  fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8')
+].join('\n');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
   "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, libraryGridPayload};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"

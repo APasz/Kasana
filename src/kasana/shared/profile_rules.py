@@ -1,4 +1,9 @@
-"""Shared profile validation rules used by Katalog and Kanvas."""
+"""Shared trusted-LAN profile gate rules used by Katalog and Kanvas.
+
+Profile PINs are intentionally plaintext convenience gates, not passwords or
+network authentication. ``UserConfigurationStore`` is their sole source of
+truth; callers must never return or log a PIN.
+"""
 
 from __future__ import annotations
 

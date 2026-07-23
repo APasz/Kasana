@@ -296,8 +296,13 @@ class KatalogQueryService:
     ) -> StatusResponse:
         def load(session: Session) -> StatusResponse:
             revision = self._database_revision()
+            roots = tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
             return StatusResponse(
                 database_revision=revision,
+                enabled_root_count=sum(root.enabled for root in roots),
+                unavailable_root_count=sum(
+                    root.enabled and not _library_root_available(root) for root in roots
+                ),
                 item_count=_count(session, Zaisan),
                 media_file_count=_count(session, MediaFile),
                 available_file_count=session.scalar(
@@ -348,7 +353,7 @@ class KatalogQueryService:
                 display_name=request.display_name,
                 role=ModelUserRole(request.role.value),
                 is_disabled=False,
-                pin=request.pin,
+                pin=None,
             )
             session.add(user)
             session.flush()
@@ -391,8 +396,7 @@ class KatalogQueryService:
                     update={"level": ModelUserRole(request.role.value)}
                 )
             if "pin" in values:
-                user.pin = request.pin
-                configuration = configuration.model_copy(update={"pin": user.pin})
+                configuration = configuration.model_copy(update={"pin": request.pin})
             if request.accent_colour is not None:
                 configuration = configuration.model_copy(
                     update={"accent_colour": request.accent_colour}
@@ -3288,11 +3292,15 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
         expected_kind=LibraryRootKind(root.expected_media_kind.value),
         default_tags=tuple(root.default_tags),
         enabled=root.enabled,
-        available=Path(root.path).is_dir(),
+        available=_library_root_available(root),
         item_count=item_count,
         media_file_count=media_file_count,
         last_scan_completed_at=root.last_scan_completed_at,
     )
+
+
+def _library_root_available(root: Kura) -> bool:
+    return Path(root.path).is_dir()
 
 
 def _page_limit(limit: int) -> int:

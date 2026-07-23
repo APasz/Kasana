@@ -1520,6 +1520,8 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         async def status(self) -> StatusResponse:
             return StatusResponse(
                 database_revision="revision",
+                enabled_root_count=1,
+                unavailable_root_count=0,
                 item_count=3,
                 media_file_count=4,
                 available_file_count=4,
@@ -2407,8 +2409,10 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
 def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> None:
     css_path = tmp_path / "kanvas.css"
     javascript_path = tmp_path / "kanvas.js"
+    administration_javascript_path = tmp_path / "kanvas-administration.js"
     css_path.write_text(".k-app { color: white; }", encoding="utf-8")
     javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
+    administration_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
 
     initial_versions = kanvas_asset_versions(tmp_path)
     head = kanvas_head_html(initial_versions)
@@ -2416,16 +2420,25 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     assert f"/_kanvas/kanvas.css?v={initial_versions.css}" in head
     assert "/_kanvas/theme.css" in head
     assert f"/_kanvas/kanvas.js?v={initial_versions.javascript}" in head
+    assert (
+        f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}"
+        in head
+    )
 
     css_path.write_text(".k-app { color: black; }", encoding="utf-8")
 
     assert kanvas_asset_versions(tmp_path).css != initial_versions.css
     assert kanvas_asset_versions(tmp_path).javascript == initial_versions.javascript
+    assert (
+        kanvas_asset_versions(tmp_path).administration_javascript
+        == initial_versions.administration_javascript
+    )
 
 
 def test_development_mode_disables_static_asset_caching() -> None:
     assert Kanvas_Settings().static_max_cache_age == 3600
     assert Kanvas_Settings(development_mode=True).static_max_cache_age == 0
+    assert Kanvas_Settings.model_fields["design_route_enabled"].default is False
 
 
 def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -> None:
@@ -2579,7 +2592,12 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert keyboard_action("Unknown") is None
     static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
     css = (static_root / "kanvas.css").read_text()
-    javascript = (static_root / "kanvas.js").read_text()
+    javascript = "\n".join(
+        (
+            (static_root / "kanvas.js").read_text(),
+            (static_root / "kanvas-administration.js").read_text(),
+        )
+    )
     assert "prefers-reduced-motion: reduce" in css
     assert ".k-control-shell" in css
     assert ".k-input-shell" in css
@@ -2645,6 +2663,8 @@ def test_administration_overview_transformation_and_adaptive_polling() -> None:
     overview = overview_from_status(
         StatusResponse(
             database_revision="20260719_0010",
+            enabled_root_count=2,
+            unavailable_root_count=1,
             item_count=4,
             media_file_count=5,
             available_file_count=4,
@@ -2655,7 +2675,6 @@ def test_administration_overview_transformation_and_adaptive_polling() -> None:
             artwork_cache_size_bytes=123,
             artwork_cache_file_count=2,
         ),
-        unavailable_root_count=1,
         unresolved_metadata_count=2,
     )
 

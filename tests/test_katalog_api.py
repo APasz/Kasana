@@ -11,10 +11,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 import uvicorn
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,7 @@ from kasana.katalog.models import (
     KeiroKind,
     MetadataCandidate,
     MetadataCandidateStatus,
+    User,
     Zaisan,
     ZaisanKind,
 )
@@ -67,6 +70,7 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
     library_path.mkdir()
     artwork_path.mkdir()
     (artwork_path / "poster.jpg").write_bytes(b"poster")
+    (library_path / "alpha [Extended].mkv").write_bytes(b"seeded media")
     database = KatalogDatabase(database_path)
     database.create_schema()
     with database.transaction() as session:
@@ -229,6 +233,44 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
             await api_fixture.client.get("/api/v1/library/items", params={"tag": "movies"})
         ).json()["items"]
     ] == ["Alpha", "Beta", "Gamma"]
+
+
+async def test_missing_library_root_is_status_only_and_recovers(api_fixture: ApiFixture) -> None:
+    missing_path = api_fixture.settings.database_path.parent / "offline-root"
+    created = await api_fixture.client.post(
+        "/api/v1/library/roots",
+        json={
+            "path": str(missing_path),
+            "expected_kind": "movie",
+            "enabled": True,
+        },
+    )
+
+    assert created.status_code == 201
+    created_root = created.json()
+    assert created_root["available"] is False
+
+    status = (await api_fixture.client.get("/api/v1/status")).json()
+    assert status["enabled_root_count"] == 2
+    assert status["unavailable_root_count"] == 1
+    roots = (await api_fixture.client.get("/api/v1/library/roots")).json()
+    assert {root["path"]: root["available"] for root in roots}[str(missing_path)] is False
+
+    job = await api_fixture.runtime.submit_scan(
+        root_id=created_root["id"], include_unavailable=False, dry_run=False
+    )
+    await api_fixture.runtime.jobs._tasks[job.id]  # pyright: ignore[reportPrivateUsage]
+    completed = await api_fixture.runtime.jobs.get(job.id)
+    assert completed.status is JobStatus.COMPLETED
+    assert completed.result_counters["failed"] == 1
+    assert completed.message is not None
+    assert "scan issue" in completed.message
+
+    missing_path.mkdir()
+    recovered_status = (await api_fixture.client.get("/api/v1/status")).json()
+    assert recovered_status["unavailable_root_count"] == 0
+    recovered_roots = (await api_fixture.client.get("/api/v1/library/roots")).json()
+    assert {root["path"]: root["available"] for root in recovered_roots}[str(missing_path)] is True
 
 
 async def test_library_summaries_include_safe_context_labels(api_fixture: ApiFixture) -> None:
@@ -619,6 +661,88 @@ async def test_completed_scan_auto_matches_safe_candidates(
     assert completed.message == "Scanned 3 files. Automatically matched 1 items; 0 require review."
 
 
+async def test_seeded_library_deployment_smoke_path(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the shipped API path from scan through administration on seeded media."""
+
+    matched: list[tuple[int, str, str]] = []
+
+    class FakeScanner:
+        def __init__(self, _database: KatalogDatabase, **_options: object) -> None:
+            pass
+
+        def scan(
+            self,
+            *,
+            root_id: int | None,
+            include_unavailable: bool,
+            dry_run: bool,
+        ) -> ScanResult:
+            assert (root_id, include_unavailable, dry_run) == (1, False, False)
+            return ScanResult(totals=ScanTotals(discovered=3), findings=())
+
+    class FakeWorkflow:
+        async def auto_match(
+            self, _providers: tuple[MetadataProvider, ...], *, root_id: int | None
+        ) -> tuple[SearchOutcome, ...]:
+            assert root_id == 1
+            return ()
+
+        async def match_item(
+            self, item_id: int, _provider: object, provider_id: str, *, actor: str
+        ) -> None:
+            matched.append((item_id, provider_id, actor))
+
+        async def fetch_posters(
+            self, _providers: tuple[MetadataProvider, ...], *, root_id: int | None
+        ) -> tuple[object, ...]:
+            assert root_id == 1
+            return (object(),)
+
+    async def with_fake_provider(operation: Callable[..., Awaitable[object]]) -> object:
+        return await operation(FakeWorkflow(), (SimpleNamespace(provider_name="fixture"),))
+
+    monkeypatch.setattr("kasana.katalog.api.runtime.IncrementalScanner", FakeScanner)
+    monkeypatch.setattr(api_fixture.runtime, "_with_provider", with_fake_provider)
+
+    scan = await api_fixture.client.post("/api/v1/scans", json={"library_root_id": 1})
+    assert scan.status_code == 202
+    await api_fixture.runtime.jobs._tasks[scan.json()["job"]["id"]]  # pyright: ignore[reportPrivateUsage]
+
+    metadata_match = await api_fixture.client.post(
+        "/api/v1/metadata/items/1/match",
+        json={"provider": "fixture", "provider_id": "alpha"},
+    )
+    assert metadata_match.status_code == 200
+    assert matched == [(1, "alpha", "api")]
+
+    artwork = await api_fixture.client.post(
+        "/api/v1/artwork/fetch", json={"library_root_id": 1}
+    )
+    assert artwork.status_code == 202
+    await api_fixture.runtime.jobs._tasks[artwork.json()["job"]["id"]]  # pyright: ignore[reportPrivateUsage]
+
+    browse = await api_fixture.client.get("/api/v1/library/items", params={"search": "Alpha"})
+    assert [item["title"] for item in browse.json()["items"]] == ["Alpha"]
+
+    plan = await api_fixture.client.post(
+        "/api/v1/playback/plans",
+        json={"user_id": 1, "context": {"kind": "standalone", "item_id": 1}},
+    )
+    assert plan.status_code == 201
+    progress = await api_fixture.client.put(
+        "/api/v1/users/1/items/1/progress",
+        json={"position_seconds": 30, "duration_seconds": 120, "completed": False},
+    )
+    assert progress.status_code == 200
+    assert progress.json()["position_seconds"] == 30
+
+    administration = await api_fixture.client.get("/api/v1/status")
+    assert administration.status_code == 200
+    assert (await api_fixture.client.get("/api/v1/jobs")).status_code == 200
+
+
 async def test_library_consistency_job_scans_and_repairs(
     api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -742,6 +866,10 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     assert configuration["state"] == "active"
     assert configuration["username"] == "profile"
     assert configuration["pin"] == "2468"
+    database_pin = api_fixture.database.run_transaction(
+        lambda session: session.scalar(select(User.pin).where(User.id == user["id"]))
+    )
+    assert database_pin is None
     configuration["level"] = "user"
     configuration["accent_colour"] = "#336699"
     configuration_path.write_text(json.dumps(configuration), encoding="utf-8")
@@ -783,11 +911,11 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
     }
 
-    assert (
-        await api_fixture.client.post(
-            f"/api/v1/users/{user['id']}/authenticate", json={"pin": "0000"}
-        )
-    ).status_code == 422
+    rejected_pin = await api_fixture.client.post(
+        f"/api/v1/users/{user['id']}/authenticate", json={"pin": "0000"}
+    )
+    assert rejected_pin.status_code == 422
+    assert "0000" not in rejected_pin.text
     assert (
         await api_fixture.client.patch(
             f"/api/v1/users/{user['id']}",

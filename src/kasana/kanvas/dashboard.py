@@ -198,8 +198,8 @@ async def update_current_profile(request: Request) -> JSONResponse:
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(profile.user.id, update)
-    except (KatalogClientError, ValueError) as error:
-        return _invalid_action(str(error))
+    except (KatalogClientError, ValueError):
+        return _invalid_action("Profile settings could not be saved.")
     return JSONResponse(user.model_dump(mode="json"))
 
 
@@ -215,10 +215,8 @@ async def update_kanvas_preferences(request: Request) -> JSONResponse:
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(profile.user.id, update)
-    except ValidationError as error:
-        return _invalid_action(str(error))
-    except (KatalogClientError, ValueError) as error:
-        return _invalid_action(str(error))
+    except (ValidationError, KatalogClientError, ValueError):
+        return _invalid_action("Profile settings could not be saved.")
     return JSONResponse({"accentColour": user.accent_colour})
 
 
@@ -244,8 +242,8 @@ async def create_profile_user(request: Request) -> JSONResponse:
                     pin=_optional_string(payload.get("pin"), maximum_length=16),
                 )
             )
-    except (KatalogClientError, ValueError) as error:
-        return _invalid_action(str(error))
+    except (KatalogClientError, ValueError):
+        return _invalid_action("Profile could not be created.")
     return JSONResponse(user.model_dump(mode="json"), status_code=201)
 
 
@@ -262,8 +260,8 @@ async def update_profile_user(user_id: int, request: Request) -> JSONResponse:
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(user_id, update)
-    except (KatalogClientError, ValueError) as error:
-        return _invalid_action(str(error))
+    except (KatalogClientError, ValueError):
+        return _invalid_action("Profile could not be updated.")
     return JSONResponse(user.model_dump(mode="json"))
 
 

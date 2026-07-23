@@ -6,7 +6,7 @@ from collections.abc import Generator, Sequence
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.cli import app as katalog_cli
@@ -14,6 +14,7 @@ from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import (
     AuditCategory,
+    AuditIssue,
     AvailabilityState,
     Kura,
     MediaFile,
@@ -186,6 +187,59 @@ def test_incremental_scan_detects_add_change_move_and_missing(
         return persisted_file.availability
 
     assert database.run_transaction(read_availability) is AvailabilityState.UNAVAILABLE
+
+
+def test_scan_handles_missing_library_root_and_recovers(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    film = movies / "1990s" / "Stargate.mkv"
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"first")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+    scanner = _run_scan(database, fake_client)
+
+    first = scanner.scan()
+    assert first.totals.added == 1
+
+    film.unlink()
+    film.parent.rmdir()
+    movies.rmdir()
+    missing = scanner.scan()
+
+    assert missing.totals.failed == 1
+    assert missing.totals.unavailable == 1
+    assert missing.findings[0].path == movies
+    assert "library root" in missing.findings[0].message
+    assert len(fake_client.calls) == 1
+
+    def unavailable_state(session: Session) -> tuple[AvailabilityState, tuple[str, ...]]:
+        persisted_file = session.scalar(select(MediaFile))
+        assert persisted_file is not None
+        issues = session.scalars(select(AuditIssue).order_by(AuditIssue.id)).all()
+        return persisted_file.availability, tuple(issue.message for issue in issues)
+
+    availability, issue_messages = database.run_transaction(unavailable_state)
+    assert availability is AvailabilityState.UNAVAILABLE
+    assert issue_messages == ("The configured library root is not an accessible directory.",)
+
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"first")
+    recovered = scanner.scan()
+
+    assert recovered.totals.failed == 0
+    assert recovered.findings == ()
+
+    def recovered_state(session: Session) -> tuple[AvailabilityState, int]:
+        persisted_file = session.scalar(select(MediaFile))
+        assert persisted_file is not None
+        issue_count = session.scalar(select(func.count()).select_from(AuditIssue))
+        return persisted_file.availability, issue_count or 0
+
+    recovered_availability, issue_count = database.run_transaction(recovered_state)
+    assert recovered_availability is AvailabilityState.AVAILABLE
+    assert issue_count == 0
 
 
 def test_real_library_layouts_never_materialise_organisational_folders(

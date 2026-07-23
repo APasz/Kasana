@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from _pytest.monkeypatch import MonkeyPatch
@@ -57,3 +58,31 @@ def test_environment_configuration_overrides_non_secret_file_preferences(
     monkeypatch.setenv("KASANA_KANVAS_PORT", "5499")
 
     assert Kanvas_Settings().port == 5499
+
+
+def test_kanvas_session_secret_persists_in_an_owner_only_configuration_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration_directory = tmp_path / "configs"
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(configuration_directory))
+    monkeypatch.delenv("KASANA_KANVAS_SESSION_SECRET", raising=False)
+
+    first = Kanvas_Settings().session_secret
+    second = Kanvas_Settings().session_secret
+    secret_path = configuration_directory / "kanvas.session-secret"
+
+    assert first == second
+    assert secret_path.read_text(encoding="utf-8").strip() == first
+    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
+
+
+def test_kanvas_session_secret_can_be_supplied_by_managed_deployment(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration_directory = tmp_path / "configs"
+    configured_secret = "managed-session-secret-that-is-long-enough"
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(configuration_directory))
+    monkeypatch.setenv("KASANA_KANVAS_SESSION_SECRET", configured_secret)
+
+    assert Kanvas_Settings().session_secret == configured_secret
+    assert not (configuration_directory / "kanvas.session-secret").exists()

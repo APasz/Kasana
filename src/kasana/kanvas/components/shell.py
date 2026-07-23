@@ -21,6 +21,7 @@ class KanvasAssetVersions:
 
     css: str
     javascript: str
+    administration_javascript: str
 
 
 def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
@@ -29,6 +30,7 @@ def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
     return KanvasAssetVersions(
         css=_asset_version(static_directory / "kanvas.css"),
         javascript=_asset_version(static_directory / "kanvas.js"),
+        administration_javascript=_asset_version(static_directory / "kanvas-administration.js"),
     )
 
 
@@ -39,6 +41,9 @@ def _asset_version(asset_path: Path) -> str:
 def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
     """Build the static document head with content-addressed local asset URLs."""
 
+    administration_script = (
+        f"/_kanvas/kanvas-administration.js?v={asset_versions.administration_javascript}"
+    )
     return f"""
         <meta name="color-scheme" content="dark">
         <meta name="theme-color" content="#000000">
@@ -49,6 +54,7 @@ def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
         <link rel="stylesheet" href="/_kanvas/kanvas.css?v={asset_versions.css}">
         <link rel="stylesheet" href="/_kanvas/theme.css">
         <script defer src="/_kanvas/kanvas.js?v={asset_versions.javascript}"></script>
+        <script defer src="{administration_script}"></script>
         """
 
 
