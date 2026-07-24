@@ -28,7 +28,6 @@ from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import page_title, quiet_copy, section_title
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
-from kasana.kanvas.services.playback import KanvasPlaybackService
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.collections import CollectionDetailView, WatchOrderEditorView
 from kasana.katalog.public import (
@@ -239,7 +238,7 @@ async def render_watch_order(
             return
         page_title(editor.name)
         watch_order_header(editor)
-        _watch_order_playback_actions(settings, profile, editor.id)
+        _watch_order_playback_actions(editor.id)
         if editable:
             _watch_order_edit_form(editor)
             item_picker_overlay(
@@ -308,27 +307,11 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
                 action_button("Remove", button_type=ButtonType.SUBMIT)
 
 
-def _watch_order_playback_actions(
-    settings: Kanvas_Settings, profile: SessionProfile, watch_order_id: int
-) -> None:
-    status = ui.label("").classes("k-action-status").props('aria-live="polite"')
-    playback = KanvasPlaybackService(settings, profile.user.id)
-    catalogue = KanvasKatalogService(settings, profile.user.id)
-
-    async def launch(*, resume: bool) -> None:
-        status.set_text("Opening player…")
-        try:
-            start_item_id = (
-                await catalogue.watch_order_resume_item_id(watch_order_id) if resume else None
-            )
-            uri = await playback.create_watch_order_launch_uri(
-                watch_order_id, start_item_id=start_item_id
-            )
-            await ui.run_javascript(f"window.kanvas.launch({uri!r})")
-        except KatalogClientError, TimeoutError:
-            status.set_text("Could not create a watch-order playback plan.")
-            return
-        status.set_text("Player launch requested.")
+def _watch_order_playback_actions(watch_order_id: int) -> None:
+    def launch(*, resume: bool) -> None:
+        ui.navigate.to(
+            f"/play/watch-orders/{watch_order_id}?resume={'true' if resume else 'false'}"
+        )
 
     with ui.element("div").classes("k-action-row"):
         action_button("Play", lambda: launch(resume=False), primary=True)

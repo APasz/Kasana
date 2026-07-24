@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypedDict, Unpack, cast
@@ -77,10 +78,25 @@ from kasana.katalog.api.contracts import (
 )
 
 _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+_MEDIA_TRANSFER_HEADER_NAMES = frozenset(
+    {
+        "accept-ranges",
+        "cache-control",
+        "content-disposition",
+        "content-length",
+        "content-range",
+        "content-type",
+        "etag",
+        "last-modified",
+    }
+)
 _ITEM_DETAIL_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDetail)
 _LIBRARY_TAGS_ADAPTER: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...])
 _ITEM_EDIT_AUDIT_ADAPTER: TypeAdapter[tuple[LibraryItemEditAudit, ...]] = TypeAdapter(
     tuple[LibraryItemEditAudit, ...]
+)
+_PLAYBACK_STATE_ADAPTER: TypeAdapter[PlaybackStateResponse | None] = TypeAdapter(
+    PlaybackStateResponse | None
 )
 
 
@@ -138,6 +154,15 @@ class ConditionalItem:
 
 
 @dataclass(frozen=True)
+class MediaTransfer:
+    """A Katalog media response suitable for a same-origin streaming proxy."""
+
+    status_code: int
+    headers: Mapping[str, str]
+    chunks: AsyncIterator[bytes]
+
+
+@dataclass(frozen=True)
 class ArtworkContent:
     content: bytes
     content_type: str
@@ -172,6 +197,12 @@ class KatalogClient:
         self._base_url = base_url.rstrip("/")
         self._bearer_token = bearer_token
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        self._media_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=timeout_seconds,
+            sock_connect=timeout_seconds,
+            sock_read=timeout_seconds,
+        )
         self._max_idempotent_retries = max_idempotent_retries
         self._session = session
         self._owns_session = session is None
@@ -217,7 +248,9 @@ class KatalogClient:
         return await self._send_model("POST", "/api/v1/users", request, UserSummary)
 
     async def update_user(self, user_id: int, request: UserUpdate) -> UserSummary:
-        return await self._send_model("PATCH", f"/api/v1/users/{user_id}", request, UserSummary)
+        return await self._send_model(
+            "PATCH", f"/api/v1/users/{user_id}", request, UserSummary, exclude_unset=True
+        )
 
     async def disable_user(self, user_id: int) -> UserSummary:
         return await self._send_model("POST", f"/api/v1/users/{user_id}/disable", None, UserSummary)
@@ -680,18 +713,38 @@ class KatalogClient:
     async def stream_media(
         self, stream_url: str, *, range_header: str | None = None
     ) -> AsyncIterator[bytes]:
-        async for chunk in self._stream_transfer(
-            stream_url, range_header=range_header, download=False
-        ):
-            yield chunk
+        async with self.open_stream_media(stream_url, range_header=range_header) as transfer:
+            async for chunk in transfer.chunks:
+                yield chunk
 
     async def download_media(
         self, download_url: str, *, range_header: str | None = None
     ) -> AsyncIterator[bytes]:
-        async for chunk in self._stream_transfer(
+        async with self.open_download_media(download_url, range_header=range_header) as transfer:
+            async for chunk in transfer.chunks:
+                yield chunk
+
+    @asynccontextmanager
+    async def open_stream_media(
+        self, stream_url: str, *, range_header: str | None = None
+    ) -> AsyncGenerator[MediaTransfer]:
+        """Open a streaming response while preserving its range semantics and metadata."""
+
+        async with self._open_media_transfer(
+            stream_url, range_header=range_header, download=False
+        ) as transfer:
+            yield transfer
+
+    @asynccontextmanager
+    async def open_download_media(
+        self, download_url: str, *, range_header: str | None = None
+    ) -> AsyncGenerator[MediaTransfer]:
+        """Open a download response while preserving its range semantics and metadata."""
+
+        async with self._open_media_transfer(
             download_url, range_header=range_header, download=True
-        ):
-            yield chunk
+        ) as transfer:
+            yield transfer
 
     async def update_progress(
         self, user_id: int, item_id: int, update: ProgressUpdate
@@ -702,6 +755,15 @@ class KatalogClient:
             update,
             PlaybackStateResponse,
         )
+
+    async def playback_state(self, user_id: int, item_id: int) -> PlaybackStateResponse | None:
+        response = await self._request("GET", f"/api/v1/users/{user_id}/items/{item_id}/progress")
+        try:
+            return _PLAYBACK_STATE_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned an invalid playback state.", response.request_id
+            ) from error
 
     async def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         return await self._send_model(
@@ -775,12 +837,22 @@ class KatalogClient:
         return _validate_response(model, response.payload, response.request_id)
 
     async def _send_model[ModelT: BaseModel](
-        self, method: str, path: str, body: BaseModel | None, model: type[ModelT]
+        self,
+        method: str,
+        path: str,
+        body: BaseModel | None,
+        model: type[ModelT],
+        *,
+        exclude_unset: bool = False,
     ) -> ModelT:
         response = await self._request(
             method,
             path,
-            json=body.model_dump(mode="json") if body is not None else None,
+            json=(
+                body.model_dump(mode="json", exclude_unset=exclude_unset)
+                if body is not None
+                else None
+            ),
         )
         return _validate_response(model, response.payload, response.request_id)
 
@@ -836,9 +908,10 @@ class KatalogClient:
         msg = "Katalog request retry handling exhausted unexpectedly."
         raise RuntimeError(msg)
 
-    async def _stream_transfer(
+    @asynccontextmanager
+    async def _open_media_transfer(
         self, path: str, *, range_header: str | None, download: bool
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[MediaTransfer]:
         expected_prefix = "/api/v1/downloads/" if download else "/api/v1/media/"
         if not path.startswith(expected_prefix):
             msg = f"Media URLs must begin with {expected_prefix!r}."
@@ -852,14 +925,19 @@ class KatalogClient:
         if self._bearer_token is not None:
             headers["Authorization"] = f"Bearer {self._bearer_token}"
         try:
-            async with session.get(self._base_url + path, headers=headers) as response:
+            async with session.get(
+                self._base_url + path, headers=headers, timeout=self._media_timeout
+            ) as response:
                 request_id = response.headers.get("X-Request-ID")
                 if response.status >= 400:
                     content = await response.read()
                     payload = _decode_json(content, request_id) if content else None
                     raise _api_error(response.status, payload, request_id)
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    yield chunk
+                yield MediaTransfer(
+                    status_code=response.status,
+                    headers=_media_transfer_headers(response.headers),
+                    chunks=_media_chunks(response),
+                )
         except asyncio.CancelledError:
             raise
         except (TimeoutError, aiohttp.ClientError) as error:
@@ -888,6 +966,30 @@ class _ClientResponse:
 
 def _params(**values: str | int | None) -> list[tuple[str, str | int]]:
     return [(name, value) for name, value in values.items() if value is not None]
+
+
+def _media_transfer_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Copy only media-delivery headers that a browser must receive from the proxy."""
+
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.casefold() in _MEDIA_TRANSFER_HEADER_NAMES
+    }
+
+
+async def _media_chunks(response: aiohttp.ClientResponse) -> AsyncIterator[bytes]:
+    """Yield media bytes while translating transport failures into client errors."""
+
+    try:
+        async for chunk in response.content.iter_chunked(64 * 1024):
+            yield chunk
+    except asyncio.CancelledError:
+        raise
+    except (TimeoutError, aiohttp.ClientError) as error:
+        raise KatalogClientError(
+            KatalogClientErrorKind.TRANSPORT, "Media transfer from Katalog was interrupted."
+        ) from error
 
 
 def _validate_opaque_token(token: str, name: str) -> None:

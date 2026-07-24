@@ -19,7 +19,7 @@ class Kanvas_Settings(KSettings):
         env_prefix="KASANA_KANVAS_",
     )
 
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = Field(default=5370, ge=1, le=65535)
     katalog_url: HttpUrl = Field(default_factory=lambda: HttpUrl(configured_katalog_api_url()))
     session_secret: str = Field(default_factory=kanvas_session_secret, min_length=32, repr=False)

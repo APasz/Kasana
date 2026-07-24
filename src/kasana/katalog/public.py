@@ -103,6 +103,7 @@ from kasana.katalog.client import (
     KatalogClient,
     KatalogClientError,
     KatalogClientErrorKind,
+    MediaTransfer,
 )
 
 __all__ = [
@@ -153,6 +154,7 @@ __all__ = [
     "ManualQueuePlaybackContext",
     "MediaStreamSummary",
     "MediaTechnicalSummary",
+    "MediaTransfer",
     "MetadataField",
     "MetadataMatchRequest",
     "MetadataRejectRequest",

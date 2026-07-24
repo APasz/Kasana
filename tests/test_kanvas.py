@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from asyncio import CancelledError
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from pydantic import TypeAdapter
 from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.routing import Route
+from starlette.types import Message
 
 from kasana.kanvas import __main__ as kanvas_main
 from kasana.kanvas import dashboard
@@ -313,6 +315,7 @@ def _item_detail_client(
     item: LibraryItemDetail,
     child_responses: Mapping[int, tuple[LibraryItemSummary, ...]],
     child_requests: list[int],
+    playback: PlaybackStateResponse | None = None,
 ) -> type[object]:
     class FakeClient:
         def __init__(self, *_arguments: object, **_keywords: object) -> None:
@@ -344,10 +347,12 @@ def _item_detail_client(
                 items=child_responses[item_id], next_cursor=None, limit=limit
             )
 
-        async def continue_watching(self, user_id: int, *, limit: int) -> SimpleNamespace:
+        async def playback_state(
+            self, user_id: int, requested_item_id: int
+        ) -> PlaybackStateResponse | None:
             assert user_id == 1
-            assert limit == 100
-            return SimpleNamespace(items=())
+            assert requested_item_id == item.id
+            return playback
 
     return FakeClient
 
@@ -523,6 +528,51 @@ def test_playback_plan_request_and_one_use_uri_do_not_contain_media_locations() 
     assert series_request.context.resume is True
     assert uri == f"kasana://play/{'A' * 32}"
     assert "/api/v1/media/" not in uri
+
+
+def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri() -> None:
+    script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
+        encoding="utf-8"
+    )
+    card = (Path(__file__).parents[1] / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "kanvas-playback-player" in script
+    assert "/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress" in script
+    assert "let reporting = false;" in script
+    assert "data-player-native-controls" in script
+    assert '"toggle", "Play"' in card
+    assert 'data-player-rate="{rate:g}"' in card
+    assert "controls autoplay" not in card
+    assert "entry.display_title" not in card
+    assert "kasana://play/" not in script
+
+
+def test_playback_proxy_does_not_forward_a_fixed_body_length() -> None:
+    headers = dashboard._stream_response_headers(  # pyright: ignore[reportPrivateUsage]
+        {"Content-Length": "1048576", "Content-Range": "bytes 0-9/1048576"}
+    )
+
+    assert headers == {"Content-Range": "bytes 0-9/1048576"}
+
+
+async def test_playback_stream_response_ends_quietly_when_canceled() -> None:
+    async def content() -> AsyncIterator[bytes]:
+        yield b"media"
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            raise CancelledError
+
+    response = dashboard.PlaybackStreamingResponse(content())
+
+    await response(
+        {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
+    )
 
 
 def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_here() -> None:
@@ -706,6 +756,22 @@ async def test_item_detail_keeps_multiple_series_seasons(monkeypatch: MonkeyPatc
     assert detail.child_section_title == "Seasons"
     assert [child.title for child in detail.children] == ["Season 1", "Season 2"]
     assert child_requests == [7]
+
+
+async def test_item_detail_reads_completed_watched_state_directly(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    movie = _library_detail(item_id=7, title="Movie", kind=LibraryItemKind.MOVIE)
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(movie, {7: ()}, child_requests, _playback(completed=True)),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.watched is True
+    assert detail.progress_percent is None
 
 
 @pytest.mark.parametrize(
@@ -1130,18 +1196,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
         async def json(self) -> object:
             return self._payload
 
-    class FakePlayback:
-        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
-            pass
-
-        async def create_watch_order_launch_uri(
-            self, watch_order_id: int, *, start_item_id: int | None
-        ) -> str:
-            assert (watch_order_id, start_item_id) == (9, 7)
-            return "kasana://play/" + "A" * 32
-
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalogue)
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasPlaybackService", FakePlayback)
 
     picker_response = await collection_picker_data(
         4,
@@ -1182,7 +1237,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
 
     assert json.loads(bytes(picker_response.body))["nextCursor"] == "next"
     assert json.loads(bytes(rows_response.body))["revision"] == 6
-    assert json.loads(bytes(launched.body))["launchUri"] == "kasana://play/" + "A" * 32
+    assert json.loads(bytes(launched.body))["playbackUrl"] == "/play/watch-orders/9?itemId=7"
     assert [
         json.loads(bytes(response.body))["revision"] for response in (add, move, boundary, removed)
     ] == [
@@ -2463,6 +2518,8 @@ def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -
     kanvas_main.console_main()
 
     assert [options["show"] for options in run_options] == [False, True]
+    assert all(options["host"] == "0.0.0.0" for options in run_options)
+    assert all(options["log_config"] is None for options in run_options)
 
 
 async def test_service_transforms_real_public_contracts_through_one_fake_client(

@@ -877,10 +877,6 @@ async def _item_children_view(
 async def _playback_for_item(
     client: KatalogClient, user_id: int, item_id: int
 ) -> PlaybackStateResponse | None:
-    """Use the existing progress query without turning a missing state into an error."""
+    """Return this user's saved playback state for one item, if present."""
 
-    page = await client.continue_watching(user_id, limit=100)
-    for entry in page.items:
-        if entry.item.id == item_id:
-            return entry.playback
-    return None
+    return await client.playback_state(user_id, item_id)

@@ -26,7 +26,7 @@ from kasana.katalog.api.service import (
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.settings import KatalogSettings
 from kasana.katalog.user_configuration import UserConfigurationStore
-from kasana.shared import SharedSettings, configure_logging
+from kasana.shared import LogDomain, SharedSettings, configure_logging
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ def configure(
         typer.echo(f"Configuration error: {error}", err=True)
         raise typer.Exit(2) from error
     shared_settings = SharedSettings()
-    configure_logging(shared_settings.log_level, shared_settings.log_file)
+    configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
     context.obj = CLIContext(settings=settings, json_output=json_output, debug=debug)
     if context.invoked_subcommand is None:
         LOGGER.info("Katalog CLI configured; run with --help to list commands.")

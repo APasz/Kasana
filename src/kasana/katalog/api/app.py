@@ -1047,6 +1047,19 @@ def create_app(
             completed=update.completed,
         )
 
+    @app.get(
+        "/api/v1/users/{user_id}/items/{item_id}/progress",
+        response_model=PlaybackStateResponse | None,
+        operation_id="v1_get_playback_progress",
+        responses=_ERROR_RESPONSES,
+    )
+    async def playback_state(
+        user_id: Annotated[int, Path(gt=0)],
+        item_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackStateResponse | None:
+        return await run_blocking(runtime.queries.playback_state, user_id, item_id)
+
     @app.post(
         "/api/v1/users/{user_id}/items/{item_id}/watched",
         response_model=PlaybackStateResponse,

@@ -6,6 +6,7 @@ import json
 from enum import StrEnum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
@@ -69,13 +70,20 @@ class UserConfigurationStore:
     def load(self, user_id: int) -> UserConfiguration:
         path = self._configuration_path(user_id)
         try:
-            document = json.loads(path.read_text(encoding="utf-8"))
+            raw_document: object = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
             raise ValueError(f"User configuration for ID {user_id} does not exist.") from error
         except json.JSONDecodeError as error:
             raise ValueError(f"Invalid JSON in user configuration {path}.") from error
-        if not isinstance(document, dict):
+        if not isinstance(raw_document, dict):
             raise ValueError(f"User configuration {path} must be an object.")
+        document = cast(dict[str, object], raw_document)
+        pin = document.get("pin")
+        if isinstance(pin, int) and not isinstance(pin, bool):
+            document = {**document, "pin": _legacy_pin(pin)}
+            configuration = UserConfiguration.model_validate(document)
+            self.save(user_id, configuration)
+            return configuration
         return UserConfiguration.model_validate(document)
 
     def load_or_migrate(self, user: User) -> UserConfiguration:
@@ -96,8 +104,10 @@ class UserConfigurationStore:
                 else UserConfigurationState.ACTIVE
             ),
             # A pre-configuration database may contain a legacy PIN. Import it
-            # once, then clear the SQLite projection during synchronisation.
-            pin=user.pin,
+            # once as a string, then clear the SQLite projection during
+            # synchronisation. Older SQLite databases could retain this value
+            # with integer affinity despite the original column declaration.
+            pin=_legacy_pin(user.pin),
         )
         self.save(user.id, configuration)
         user.pin = None
@@ -156,3 +166,13 @@ class UserConfigurationStore:
         if user_id <= 0:
             raise ValueError("User IDs must be positive.")
         return self._directory / str(user_id) / _CONFIGURATION_FILENAME
+
+
+def _legacy_pin(value: object) -> str | None:
+    """Convert only historic SQLite integer PINs to the current string form."""
+
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    raise ValueError("Legacy profile PIN must be a string or integer.")

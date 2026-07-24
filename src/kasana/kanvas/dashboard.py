@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from asyncio import gather
+from asyncio import CancelledError, gather
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
@@ -14,7 +15,8 @@ from pydantic import ValidationError
 from starlette.datastructures import FormData, UploadFile
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from kasana.kanvas.components.collections import (
     collection_tile,
@@ -74,6 +76,7 @@ from kasana.katalog.public import (
     LibraryRootKind,
     LibraryRootUpdate,
     ScanRequest,
+    SessionProgressUpdate,
     UserCreate,
     UserRole,
     UserUpdate,
@@ -93,6 +96,16 @@ _LOGGER = logging.getLogger(__name__)
 # producing `const dark = True;`. This lower-case JavaScript literal keeps the
 # page bootstrap valid until the upstream template serialises the value as JSON.
 _JAVASCRIPT_DARK_TRUE = cast(bool, "true")
+
+
+class PlaybackStreamingResponse(StreamingResponse):
+    """End a media response quietly when its browser or server is shutting down."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        except CancelledError:
+            return
 
 
 async def _data_profile(request: Request) -> SessionProfile | None:
@@ -186,8 +199,7 @@ async def update_current_profile(request: Request) -> JSONResponse:
         values["display_name"] = _optional_string(payload["displayName"], maximum_length=200)
     if "pin" in payload:
         pin = _optional_string(payload["pin"], maximum_length=16)
-        if pin is not None:
-            values["pin"] = pin
+        values["pin"] = pin
     if "accent_colour" in payload:
         values["accent_colour"] = _optional_string(
             payload["accent_colour"], maximum_length=7
@@ -841,21 +853,120 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}/launch", include_in_schema=False)
 async def watch_order_launch_action(watch_order_id: int, request: Request) -> JSONResponse:
-    """Create a watch-order-context playback URI for play-from-here controls."""
+    """Return a same-origin browser playback route for a watch-order entry."""
 
     profile = await _data_profile(request)
     if profile is None:
         return JSONResponse({"error": "Select a profile."}, status_code=401)
     payload = await _json_object(request)
     try:
-        launch_uri = await KanvasPlaybackService(
-            _settings, profile.user.id
-        ).create_watch_order_launch_uri(
-            watch_order_id, start_item_id=_optional_integer(payload.get("itemId"))
+        item_id = _integer(payload, "itemId")
+    except ValueError as error:
+        return _invalid_action(str(error))
+    return JSONResponse({"playbackUrl": f"/play/watch-orders/{watch_order_id}?itemId={item_id}"})
+
+
+@app.api_route(
+    "/kanvas/playback/sessions/{session_id}/entries/{entry_position}/media",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def playback_media(session_id: str, entry_position: int, request: Request) -> Response:
+    """Proxy one owned Katalog media capability through Kanvas's browser session."""
+
+    profile = await _require_profile(request)
+    try:
+        session = await KanvasPlaybackService(_settings, profile.user.id).playback_session(
+            session_id
         )
-    except KatalogClientError, TimeoutError:
-        return JSONResponse({"error": "Could not create a playback plan."}, status_code=503)
-    return JSONResponse({"launchUri": launch_uri})
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Playback media is unavailable.") from error
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback media is unavailable.")
+    entry = session.current_item
+    if entry is None or entry.position != entry_position:
+        raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    catalogue = KatalogClient(
+        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+    )
+    transfer_context = catalogue.open_stream_media(
+        entry.stream_url, range_header=request.headers.get("range")
+    )
+    try:
+        transfer = await transfer_context.__aenter__()
+    except KatalogClientError as error:
+        await catalogue.close()
+        return _katalog_data_error(error, "Playback media is unavailable.")
+    if request.method == "HEAD":
+        await transfer_context.__aexit__(None, None, None)
+        await catalogue.close()
+        return Response(
+            status_code=transfer.status_code,
+            headers=_stream_response_headers(transfer.headers),
+        )
+
+    async def stream() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in transfer.chunks:
+                yield chunk
+        except KatalogClientError as error:
+            _LOGGER.warning("Browser media stream ended early: %s", error)
+        finally:
+            await transfer_context.__aexit__(None, None, None)
+            await catalogue.close()
+
+    return PlaybackStreamingResponse(
+        stream(),
+        status_code=transfer.status_code,
+        headers=_stream_response_headers(transfer.headers),
+    )
+
+
+@app.put("/kanvas/playback/sessions/{session_id}/progress", include_in_schema=False)
+async def playback_progress(session_id: str, request: Request) -> Response:
+    """Persist a throttled browser progress sample for its owning profile."""
+
+    profile = await _require_profile(request)
+    payload = await _json_object(request)
+    try:
+        update = SessionProgressUpdate.model_validate(
+            {
+                "position_seconds": payload.get("positionSeconds"),
+                "seek": payload.get("seek", False),
+            }
+        )
+        await KanvasPlaybackService(_settings, profile.user.id).report_playback_progress(
+            session_id, update
+        )
+    except ValidationError:
+        return _invalid_action("Playback progress is invalid.")
+    except ValueError:
+        return _invalid_action("Playback session is invalid.")
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback progress could not be saved.")
+    return Response(status_code=204)
+
+
+@app.post("/kanvas/playback/sessions/{session_id}/complete", include_in_schema=False)
+async def complete_playback(session_id: str, request: Request) -> JSONResponse:
+    """Complete the current browser entry and return the next queue page when available."""
+
+    profile = await _require_profile(request)
+    try:
+        next_session = await KanvasPlaybackService(
+            _settings, profile.user.id
+        ).complete_playback_entry(session_id)
+    except ValueError:
+        return _invalid_action("Playback session is invalid.")
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback completion could not be saved.")
+    next_item = next_session.current_item if next_session is not None else None
+    next_url = (
+        f"/item/{next_item.item_id}?playbackSession={next_session.id}"
+        if next_item is not None and next_session is not None
+        else None
+    )
+    return JSONResponse({"nextUrl": next_url})
 
 
 @app.post("/kanvas/actions/collections", include_in_schema=False)
@@ -1054,6 +1165,40 @@ def _query_text(request: Request, name: str, *, maximum_length: int) -> str | No
     if len(cleaned) > maximum_length:
         raise HTTPException(status_code=422, detail=f"{name} is too long.")
     return cleaned
+
+
+def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Drop fixed entity lengths so canceled browser streams remain valid ASGI responses."""
+
+    return {name: value for name, value in headers.items() if name.casefold() != "content-length"}
+
+
+def _query_boolean(request: Request, name: str, *, default: bool) -> bool:
+    """Read one explicit boolean query parameter without accepting ambiguous values."""
+
+    value = request.query_params.get(name)
+    if value is None:
+        return default
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise HTTPException(status_code=422, detail=f"{name} must be true or false.")
+
+
+def _query_positive_integer(request: Request, name: str) -> int | None:
+    """Read one optional positive integer query parameter."""
+
+    value = request.query_params.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=f"{name} must be an integer.") from error
+    if parsed <= 0:
+        raise HTTPException(status_code=422, detail=f"{name} must be positive.")
+    return parsed
 
 
 async def _json_object(request: Request) -> dict[str, object]:
@@ -1367,6 +1512,8 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     _kanvas_page("/", "Kanvas")(home_page)
     _kanvas_page("/library", "Kanvas · Library")(library_page)
     _kanvas_page("/item/{item_id}", "Kanvas · Item")(item_page)
+    _kanvas_page("/play/item/{item_id}", "Kanvas · Playback")(play_item_page)
+    _kanvas_page("/play/watch-orders/{watch_order_id}", "Kanvas · Playback")(play_watch_order_page)
     _kanvas_page("/collections", "Kanvas · Collections")(collections_page)
     _kanvas_page("/collections/new", "Kanvas · New collection")(collection_new_page)
     _kanvas_page("/collections/{collection_id}/edit", "Kanvas · Edit collection")(
@@ -1457,7 +1604,86 @@ async def item_page(item_id: int, request: Request) -> Response | None:
     profile = await _page_profile(request)
     if isinstance(profile, RedirectResponse):
         return profile
-    await render_item(_settings, profile, item_id)
+    session_id = request.query_params.get("playbackSession")
+    playback_session = None
+    if session_id is not None:
+        try:
+            playback_session = await KanvasPlaybackService(
+                _settings, profile.user.id
+            ).playback_session(session_id)
+        except (KatalogClientError, ValueError):
+            with page_shell(_settings, "/library", "Playback", profile):
+                feedback_state(
+                    "Playback unavailable", "This playback session is no longer available."
+                )
+            return
+        current_item = playback_session.current_item
+        if current_item is None:
+            with page_shell(_settings, "/library", "Playback", profile):
+                feedback_state(
+                    "Playback unavailable", "This playback session has no current media item."
+                )
+            return
+        if current_item.item_id != item_id:
+            return RedirectResponse(
+                f"/item/{current_item.item_id}?playbackSession={playback_session.id}",
+                status_code=303,
+            )
+    await render_item(_settings, profile, item_id, playback_session)
+
+
+async def play_item_page(item_id: int, request: Request) -> Response | None:
+    """Create a browser playback session for an item, then render its current entry."""
+
+    profile = await _page_profile(request)
+    if isinstance(profile, RedirectResponse):
+        return profile
+    resume = _query_boolean(request, "resume", default=False)
+    try:
+        session = await KanvasPlaybackService(
+            _settings, profile.user.id
+        ).create_item_playback_session(item_id, resume=resume)
+    except KatalogClientError:
+        with page_shell(_settings, "/library", "Playback", profile):
+            feedback_state("Playback unavailable", "Could not start a browser playback session.")
+        return
+    current_item = session.current_item
+    if current_item is None:
+        with page_shell(_settings, "/library", "Playback", profile):
+            feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
+        return
+    return RedirectResponse(
+        f"/item/{current_item.item_id}?playbackSession={session.id}", status_code=303
+    )
+
+
+async def play_watch_order_page(watch_order_id: int, request: Request) -> Response | None:
+    """Create browser playback from a watch order at its requested start point."""
+
+    profile = await _page_profile(request)
+    if isinstance(profile, RedirectResponse):
+        return profile
+    resume = _query_boolean(request, "resume", default=False)
+    try:
+        catalogue = KanvasKatalogService(_settings, profile.user.id)
+        start_item_id = _query_positive_integer(request, "itemId")
+        if start_item_id is None and resume:
+            start_item_id = await catalogue.watch_order_resume_item_id(watch_order_id)
+        session = await KanvasPlaybackService(
+            _settings, profile.user.id
+        ).create_watch_order_playback_session(watch_order_id, start_item_id=start_item_id)
+    except KatalogClientError:
+        with page_shell(_settings, "/collections", "Playback", profile):
+            feedback_state("Playback unavailable", "Could not start this watch order.")
+        return
+    current_item = session.current_item
+    if current_item is None:
+        with page_shell(_settings, "/collections", "Playback", profile):
+            feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
+        return
+    return RedirectResponse(
+        f"/item/{current_item.item_id}?playbackSession={session.id}", status_code=303
+    )
 
 
 async def collections_page(request: Request) -> Response | None:

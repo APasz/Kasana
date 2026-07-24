@@ -21,7 +21,7 @@ from kasana.kestrel.doctor import DoctorReport, run_doctor
 from kasana.kestrel.presentation import doctor_table
 from kasana.kestrel.settings import KestrelSettings
 from kasana.kourier.settings import KourierSettings
-from kasana.shared import SharedSettings, configure_logging
+from kasana.shared import LogDomain, SharedSettings, configure_logging, log_file_path
 
 app: Typer = typer.Typer(
     name="kasana",
@@ -51,7 +51,7 @@ def configure() -> None:
     """Kasana component convenience commands."""
 
     shared_settings = SharedSettings()
-    configure_logging(shared_settings.log_level, shared_settings.log_file)
+    configure_logging(shared_settings.log_level, LogDomain.KASANA, shared_settings.log_directory)
 
 
 @app.command()
@@ -96,7 +96,7 @@ def show_config(
         kestrel_katalog_url=kestrel.katalog_url,
         kourier_katalog_url=str(kourier.katalog_url),
         mpv_executable=kestrel.mpv_executable,
-        log_file=str(shared.log_file) if shared.log_file is not None else None,
+        log_file=str(log_file_path(shared.log_directory, LogDomain.KASANA)),
     )
     if json_output:
         typer.echo(

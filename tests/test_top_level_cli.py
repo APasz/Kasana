@@ -18,7 +18,7 @@ def test_config_show_reports_aligned_non_secret_defaults() -> None:
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
     assert report["katalog_api_url"] == "http://127.0.0.1:5373"
-    assert report["kanvas_url"] == "http://127.0.0.1:5370"
+    assert report["kanvas_url"] == "http://0.0.0.0:5370"
     assert report["kestrel_katalog_url"] == report["katalog_api_url"]
     assert report["kourier_katalog_url"] == "http://127.0.0.1:5373/"
     assert report["log_file"] == "logs/kasana.log"

@@ -39,6 +39,7 @@ def test_non_secret_application_preferences_load_from_configuration_file(
     assert katalog.api_port == 5399
     assert katalog.database_path == Path("catalogue.sqlite3")
     assert katalog.user_configuration_directory == configuration_directory / "users"
+    assert kanvas.host == "0.0.0.0"
     assert kanvas.port == 5398
     assert kanvas.accent_colour == "#123456"
     assert str(kanvas.katalog_url) == "http://127.0.0.1:5399/"

@@ -8,9 +8,13 @@ from kasana.kanvas.services.katalog import is_series_like
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.public import (
     KatalogClient,
+    KatalogClientError,
+    KatalogClientErrorKind,
     LibraryItemDetail,
     PlaybackPlanRequest,
+    PlaybackSessionResponse,
     SeriesPlaybackContext,
+    SessionProgressUpdate,
     StandalonePlaybackContext,
     WatchOrderPlaybackContext,
 )
@@ -54,6 +58,93 @@ class KanvasPlaybackService:
                 )
             )
         return launch_uri(launch.launch_token)
+
+    async def create_item_playback_session(
+        self, item_id: int, *, resume: bool
+    ) -> PlaybackSessionResponse:
+        """Create and consume a browser-owned playback plan for one item or series."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            conditional_item = await client.get_library_item(item_id)
+            if conditional_item.item is None:
+                msg = "Katalog returned an unexpected empty item response."
+                raise RuntimeError(msg)
+            launch = await client.create_playback_plan(
+                playback_plan_request(conditional_item.item, user_id=self._user_id, resume=resume)
+            )
+            return await client.launch_playback_plan(launch.launch_token)
+
+    async def create_watch_order_playback_session(
+        self, watch_order_id: int, *, start_item_id: int | None = None
+    ) -> PlaybackSessionResponse:
+        """Create and consume a browser-owned watch-order playback plan."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            launch = await client.create_playback_plan(
+                watch_order_playback_plan_request(
+                    watch_order_id,
+                    user_id=self._user_id,
+                    start_item_id=start_item_id,
+                )
+            )
+            return await client.launch_playback_plan(launch.launch_token)
+
+    async def playback_session(self, session_id: str) -> PlaybackSessionResponse:
+        """Load a browser playback session, rejecting sessions owned by other profiles."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            session = await client.get_playback_session(session_id)
+        return self._owned_session(session)
+
+    async def report_playback_progress(
+        self, session_id: str, update: SessionProgressUpdate
+    ) -> None:
+        """Record one browser progress sample after verifying session ownership."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            session = await client.get_playback_session(session_id)
+            self._owned_session(session)
+            await client.update_playback_session_progress(session_id, update)
+
+    async def complete_playback_entry(self, session_id: str) -> PlaybackSessionResponse | None:
+        """Complete the current entry and advance a queue when another item is available."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            session = await client.get_playback_session(session_id)
+            self._owned_session(session)
+            completion = await client.complete_playback_session(session_id)
+            current = completion.session.current_item
+            if current is None or current.next_entry is None:
+                return None
+            advanced = await client.advance_playback_session(session_id)
+        return self._owned_session(advanced)
+
+    async def close_playback_session(self, session_id: str) -> None:
+        """Close one owned browser session when its inline player is stopped."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            session = await client.get_playback_session(session_id)
+            self._owned_session(session)
+            await client.close_playback_session(session_id)
+
+    def _owned_session(self, session: PlaybackSessionResponse) -> PlaybackSessionResponse:
+        if session.user_id != self._user_id:
+            raise KatalogClientError(
+                KatalogClientErrorKind.NOT_FOUND, "Playback session not found."
+            )
+        return session
 
 
 @dataclass

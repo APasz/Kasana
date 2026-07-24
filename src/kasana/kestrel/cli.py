@@ -35,7 +35,7 @@ from kasana.kestrel.uri import (
     uninstall_uri_handler,
     validate_launch_token,
 )
-from kasana.shared import SharedSettings, configure_logging
+from kasana.shared import LogDomain, SharedSettings, configure_logging
 
 LOGGER = logging.getLogger(__name__)
 app: Typer = typer.Typer(
@@ -59,7 +59,7 @@ def configure(context: typer.Context) -> None:
         typer.echo("Configuration error.", err=True)
         raise typer.Exit(2) from error
     shared_settings = SharedSettings()
-    configure_logging(shared_settings.log_level, shared_settings.log_file)
+    configure_logging(shared_settings.log_level, LogDomain.KESTREL, shared_settings.log_directory)
     context.obj = CLIContext(settings=settings)
     if context.invoked_subcommand is None:
         LOGGER.info("Kestrel configured; run with --help to list commands.")
@@ -72,7 +72,12 @@ def play(context: typer.Context, launch_token: str = typer.Argument()) -> None:
     try:
         settings = context_from(context).settings
         result = asyncio.run(_play(settings, validate_launch_token(launch_token)))
-    except (KestrelUriError, KestrelPlaybackError) as error:
+    except KestrelUriError as error:
+        LOGGER.warning("Rejected invalid Kestrel launch token: %s", error)
+        typer.echo(str(error), err=True)
+        raise typer.Exit(2) from error
+    except KestrelPlaybackError as error:
+        LOGGER.exception("Kestrel playback failed.")
         typer.echo(str(error), err=True)
         raise typer.Exit(2) from error
     Console().print(playback_panel(result))
@@ -134,7 +139,12 @@ def handle_uri(context: typer.Context, kasana_uri: str = typer.Argument()) -> No
     try:
         parsed = parse_playback_uri(kasana_uri)
         result = asyncio.run(_play(context_from(context).settings, parsed.launch_token))
-    except (KestrelUriError, KestrelPlaybackError) as error:
+    except KestrelUriError as error:
+        LOGGER.warning("Rejected malformed Kestrel playback URI: %s", error)
+        typer.echo(str(error), err=True)
+        raise typer.Exit(2) from error
+    except KestrelPlaybackError as error:
+        LOGGER.exception("Kestrel URI playback failed.")
         typer.echo(str(error), err=True)
         raise typer.Exit(2) from error
     typer.echo(result.outcome.value)
@@ -194,6 +204,7 @@ def _run_context_playback(
     try:
         result = asyncio.run(_plan_and_play(context_from(context).settings, user, playback_context))
     except KestrelPlaybackError as error:
+        LOGGER.exception("Kestrel playback failed.")
         typer.echo(str(error), err=True)
         raise typer.Exit(2) from error
     Console().print(playback_panel(result))

@@ -1630,6 +1630,15 @@ class KatalogQueryService:
 
         return self._database.run_transaction(update)
 
+    def playback_state(self, user_id: int, item_id: int) -> PlaybackStateResponse | None:
+        def load(session: Session) -> PlaybackStateResponse | None:
+            self._configured_user(session, user_id)
+            _require(session, Zaisan, item_id, "Library item")
+            state = _playback_state(session, user_id, item_id)
+            return _playback(state) if state is not None else None
+
+        return self._database.run_transaction(load)
+
     def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
             self._configured_user(session, user_id)

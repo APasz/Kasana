@@ -49,11 +49,19 @@ The API also writes a portable JSON backup when the configured backup file is
 missing, then every 24 hours by default. Configure that in
 `configs/config.katalog.json` with `json_backup_enabled`, `json_backup_path`,
 and `json_backup_interval_hours`.
-Kanvas is configured to use `127.0.0.1:5370` when its web server is enabled.
-All Kasana entry points write application logs to `logs/kasana.log` by default.
-Set `log_file` in `configs/config.shared.json` or temporarily set
-`KASANA_LOG_FILE` to change the destination; background job exceptions include
-their traceback there even when the Jobs page stores a compact failure reason.
+Kanvas listens on every local network interface at port `5370` by default. Open
+`http://<server-LAN-address>:5370` from another device on the same network. If
+your host firewall blocks inbound connections, allow TCP port `5370`; set
+`host` to `127.0.0.1` in `configs/config.kanvas.json` to restrict Kanvas to the
+local machine again.
+Each Kasana domain writes to its own file in `logs` by default (for example,
+`logs/katalog.log` and `logs/kanvas.log`). At process startup, a domain's
+previous log replaces its matching file in `logs.old`, retaining one prior
+session per domain without disrupting other running components. Set
+`log_directory` in `configs/config.shared.json` or temporarily set
+`KASANA_LOG_DIRECTORY` to change the destination; background job exceptions
+include their traceback there even when the Jobs page stores a compact failure
+reason.
 
 ## Play a file with Kestrel
 
@@ -90,12 +98,12 @@ uv run kasana-kestrel play-series 8 --user owner --resume
 uv run kasana-kestrel play-queue 4 9 12 --user owner
 ```
 
-On Linux or Steam Deck Desktop Mode, install the per-user URI handler once and
-check end-to-end readiness:
+Kestrel is an optional external-player integration for Linux or Steam Deck
+Desktop Mode. Install its per-user URI handler and check end-to-end readiness:
 
 ```bash
 uv run kasana-kestrel install-uri-handler
-uv run kasana doctor
+uv run kasana-kestrel doctor
 ```
 
 The URI handler supports `kasana://play/<launch-token>` links from another

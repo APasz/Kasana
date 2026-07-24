@@ -6,7 +6,9 @@ from nicegui import ui
 
 from kasana.kanvas.dashboard import build_dashboard
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.shared import SharedSettings, configure_logging
+from kasana.shared import LogDomain, SharedSettings, configure_logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -14,10 +16,8 @@ def main() -> None:
 
     shared_settings = SharedSettings()
     settings = Kanvas_Settings()
-    configure_logging(shared_settings.log_level, shared_settings.log_file)
-    logging.getLogger(__name__).info(
-        "Kanvas scaffold configured for %s:%s", settings.host, settings.port
-    )
+    configure_logging(shared_settings.log_level, LogDomain.KANVAS, shared_settings.log_directory)
+    LOGGER.info("Kanvas scaffold configured for %s:%s", settings.host, settings.port)
 
 
 def console_main() -> None:
@@ -35,8 +35,7 @@ def console_main() -> None:
         tailwind=False,
         show=settings.auto_browser_open,
         show_welcome_message=False,
+        log_config=None,
     )
-
-
 if __name__ == "__main__":  # pragma: no cover
     console_main()

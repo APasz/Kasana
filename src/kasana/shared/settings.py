@@ -23,7 +23,7 @@ class KSettings(BaseSettings):
 
     configuration_section: ClassVar[str | None] = None
     log_level: LogLevel = LogLevel.INFO
-    log_file: Path | None = Path("logs/kasana.log")
+    log_directory: Path = Path("logs")
 
     @classmethod
     def settings_customise_sources(

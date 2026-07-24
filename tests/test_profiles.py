@@ -263,6 +263,14 @@ async def test_profile_dashboard_session_and_administration_actions(
     assert current_profile_update.display_name == "Owner"
     assert current_profile_update.pin == "1357"
     assert current_profile_update.accent_colour == "#336699"
+    assert (
+        await dashboard.update_current_profile(
+            cast(Request, JsonRequest({"pin": None})),
+        )
+    ).status_code == 200
+    cleared_pin_update = update_requests[-1][1]
+    assert cleared_pin_update.pin is None
+    assert "pin" in cleared_pin_update.model_fields_set
     preference_response = await dashboard.update_kanvas_preferences(
         cast(Request, JsonRequest({"accent_colour": "#336699"}))
     )

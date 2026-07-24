@@ -36,7 +36,7 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.public import JobStatus
+from kasana.katalog.public import JobStatus, UserAuthentication, UserCreate, UserUpdate
 from kasana.katalog.repair import HierarchyRepairPlan, HierarchyRepairResult, RepairImpact
 from kasana.katalog.scanning import ScanResult, ScanTotals
 from kasana.katalog.services import (
@@ -568,10 +568,19 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     )
     assert progress.status_code == 200
     assert progress.json()["position_seconds"] == 20
+    persisted_progress = await api_fixture.client.get("/api/v1/users/1/items/1/progress")
+    assert persisted_progress.status_code == 200
+    assert persisted_progress.json()["completed"] is False
     assert (await api_fixture.client.post("/api/v1/users/1/items/1/watched")).json()[
         "completed"
     ] is True
+    persisted_watched = await api_fixture.client.get("/api/v1/users/1/items/1/progress")
+    assert persisted_watched.status_code == 200
+    assert persisted_watched.json()["completed"] is True
     assert (await api_fixture.client.delete("/api/v1/users/1/items/1/watched")).status_code == 204
+    cleared_progress = await api_fixture.client.get("/api/v1/users/1/items/1/progress")
+    assert cleared_progress.status_code == 200
+    assert cleared_progress.json() is None
     assert (
         await api_fixture.client.post(
             "/api/v1/metadata/items/1/reject",
@@ -1042,9 +1051,28 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
                 "Alpha",
             ]
             assert (await client.hierarchy_repair_preview()).actions == ()
+            pin_profile = await client.create_user(UserCreate(username="client-pin", pin="2468"))
+            await client.update_user(pin_profile.id, UserUpdate(display_name="Client PIN"))
+            assert (
+                await client.authenticate_user(pin_profile.id, UserAuthentication(pin="2468"))
+            ).id == pin_profile.id
+            await client.update_user(pin_profile.id, UserUpdate(pin=None))
+            cleared_pin_profile = await client.authenticate_user(
+                pin_profile.id, UserAuthentication(pin=None)
+            )
+            assert cleared_pin_profile.id == pin_profile.id
             detail = await client.get_library_item(1)
             assert detail.item is not None
             assert (await client.get_library_item(1, etag=detail.etag)).not_modified is True
+            initial_state = await client.playback_state(1, 1)
+            assert initial_state is not None
+            assert initial_state.completed is True
+            await client.clear_watched(1, 1)
+            assert await client.playback_state(1, 1) is None
+            await client.mark_watched(1, 1)
+            watched_state = await client.playback_state(1, 1)
+            assert watched_state is not None
+            assert watched_state.completed is True
             with pytest.raises(KatalogClientError) as error:
                 await client.get_collection(999)
             assert error.value.kind is KatalogClientErrorKind.NOT_FOUND

@@ -42,29 +42,29 @@
       <div class="k-picker k-profile-form" role="document">
         <div class="k-picker__header">
           <strong>Profile</strong>
-          <button type="button" class="k-button" data-profile-close>Close</button>
+          <button type="button" class="k-icon-action" data-profile-close aria-label="Close profile settings" title="Close">×</button>
         </div>
         <form data-profile-form>
           <label class="k-control-shell k-input-shell">
             <span class="k-sr-only">Profile name</span>
             <input class="k-input" name="displayName" value="${escapeHtml(name)}" aria-label="Profile name" placeholder="Profile name">
           </label>
-          <label class="k-control-shell k-input-shell">
-            <span class="k-sr-only">New PIN</span>
-            <input class="k-input" name="pin" type="text" autocomplete="off" inputmode="numeric" minlength="${PROFILE_PIN_MIN_LENGTH}" maxlength="${PROFILE_PIN_MAX_LENGTH}" aria-label="New PIN" placeholder="New PIN">
-          </label>
+          <div class="k-profile-pin-field">
+            <label class="k-control-shell k-input-shell">
+              <span class="k-sr-only">New PIN</span>
+              <input class="k-input" name="pin" type="text" autocomplete="off" inputmode="numeric" minlength="${PROFILE_PIN_MIN_LENGTH}" maxlength="${PROFILE_PIN_MAX_LENGTH}" aria-label="New PIN" placeholder="New PIN">
+            </label>
+            <button type="button" class="k-button" data-profile-clear-pin>Clear PIN</button>
+          </div>
           <label class="k-colour-field">
             <span>Accent colour</span>
             <input name="accentColour" type="color" value="${escapeHtml(accentColour)}" aria-label="Accent colour">
           </label>
           <div class="k-picker__status" data-profile-status aria-live="polite"></div>
-          <div class="k-action-row">
+          <div class="k-profile-actions">
             <button type="submit" class="k-button k-button--primary" data-profile-save>Save changes</button>
-            <button type="button" class="k-button" data-profile-cancel>Cancel</button>
+            <button type="submit" class="k-button" formaction="/profiles/sign-out" formmethod="post" data-profile-logout>Log out</button>
           </div>
-        </form>
-        <form action="/profiles/sign-out" method="post" class="k-profile-logout">
-          <button type="submit" class="k-button">Log out</button>
         </form>
       </div>
     </dialog>`;
@@ -75,6 +75,7 @@
       this.dialog = null;
       this.status = null;
       this.saveButton = null;
+      this.pinClearRequested = false;
     }
 
     connectedCallback() {
@@ -87,8 +88,11 @@
       const closeDialog = () => this.dialog?.close();
       this.querySelector('.k-profile-switcher')?.addEventListener('click', () => this.open());
       this.querySelector('[data-profile-close]')?.addEventListener('click', closeDialog);
-      this.querySelector('[data-profile-cancel]')?.addEventListener('click', closeDialog);
-      this.querySelector('[data-profile-form]')?.addEventListener('submit', (event) => this.save(event));
+      this.querySelector('[data-profile-form]')?.addEventListener('submit', (event) => this.handleSubmit(event));
+      this.querySelector('[data-profile-clear-pin]')?.addEventListener('click', () => this.requestPinClear());
+      this.querySelector('input[name="pin"]')?.addEventListener('input', () => this.cancelPinClearWhenReplacing());
+      this.dialog?.addEventListener('click', (event) => this.closeFromBackdrop(event));
+      this.dialog?.addEventListener('close', () => this.resetForm());
     }
 
     profileName() {
@@ -100,6 +104,44 @@
       if (!this.dialog) return;
       if (!this.dialog.open) this.dialog.showModal();
       this.querySelector('input[name="displayName"]')?.focus();
+    }
+
+    closeFromBackdrop(event) {
+      if (event.target === this.dialog) this.dialog?.close();
+    }
+
+    handleSubmit(event) {
+      const submitter = event.submitter;
+      if (submitter instanceof HTMLButtonElement && submitter.hasAttribute('data-profile-logout')) return;
+      this.save(event);
+    }
+
+    requestPinClear() {
+      const pinInput = this.querySelector('input[name="pin"]');
+      if (!(pinInput instanceof HTMLInputElement)) return;
+      pinInput.value = '';
+      this.pinClearRequested = true;
+      this.setStatus('PIN will be cleared when you save changes.');
+      pinInput.focus();
+    }
+
+    cancelPinClearWhenReplacing() {
+      const pinInput = this.querySelector('input[name="pin"]');
+      if (pinInput instanceof HTMLInputElement && pinInput.value.trim()) this.pinClearRequested = false;
+    }
+
+    resetForm() {
+      const form = this.querySelector('[data-profile-form]');
+      if (!(form instanceof HTMLFormElement)) return;
+      form.reset();
+      const nameInput = form.elements.namedItem('displayName');
+      if (nameInput instanceof HTMLInputElement) nameInput.value = this.profileName();
+      const accentInput = form.elements.namedItem('accentColour');
+      if (accentInput instanceof HTMLInputElement) {
+        accentInput.value = normaliseHexColour(this.getAttribute('data-accent-colour')) || PROFILE_ACCENT_DEFAULT;
+      }
+      this.pinClearRequested = false;
+      this.setStatus('');
     }
 
     setStatus(message, error = false) {
@@ -125,6 +167,7 @@
       }
       const profilePayload = {displayName: String(data.get('displayName') || '').trim(), accent_colour: accentColour};
       if (pin) profilePayload.pin = pin;
+      else if (this.pinClearRequested) profilePayload.pin = null;
       this.saveButton?.setAttribute('disabled', 'disabled');
       this.setStatus('Saving...');
       try {
@@ -138,6 +181,7 @@
         document.documentElement.style.setProperty('--k-accent', savedColour);
         const pinInput = form.elements.namedItem('pin');
         if (pinInput instanceof HTMLInputElement) pinInput.value = '';
+        this.pinClearRequested = false;
         this.setStatus('Saved.');
       } catch (error) {
         this.setStatus(error?.message || 'Changes could not be saved.', true);
@@ -1120,11 +1164,10 @@
       try {
         const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({itemId: Number(row.dataset.itemId)})});
         const payload = await response.json();
-        if (!response.ok || typeof payload.launchUri !== 'string' || !payload.launchUri.startsWith('kasana://play/')) throw new Error('Launch failed');
-        await window.kanvas.launch(payload.launchUri);
-        this.status.textContent = 'Player launch requested.';
+        if (!response.ok || typeof payload.playbackUrl !== 'string' || !payload.playbackUrl.startsWith('/play/watch-orders/')) throw new Error('Launch failed');
+        window.location.assign(payload.playbackUrl);
       } catch (_) {
-        this.status.textContent = 'Could not create a playback plan.';
+        this.status.textContent = 'Could not start browser playback.';
       }
     }
 
@@ -1215,7 +1258,7 @@
     }
 
     connectedCallback() {
-      this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
+      this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit Details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
       this.dialog = this.querySelector('dialog');
       this.querySelector('[data-item-edit-open]')?.addEventListener('click', () => this.open());
     }
@@ -1372,14 +1415,201 @@
 
   if (!customElements.get('kanvas-item-editor')) customElements.define('kanvas-item-editor', KanvasItemEditor);
 
+  class KanvasPlaybackPlayer extends HTMLElement {
+    connectedCallback() {
+      const video = this.querySelector('video');
+      const status = this.querySelector('.k-player__status');
+      const controls = this.querySelector('.k-player__controls');
+      const timeline = this.querySelector('[data-player-timeline]');
+      const currentTime = this.querySelector('[data-player-current-time]');
+      const remainingTime = this.querySelector('[data-player-remaining-time]');
+      const volume = this.querySelector('[data-player-volume]');
+      const contextMenu = this.querySelector('[data-player-context-menu]');
+      const nativeControls = this.querySelector('[data-player-native-controls]');
+      const sessionId = this.getAttribute('session-id');
+      const resumePosition = Number(this.getAttribute('resume-position') || '0');
+      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !nativeControls || !sessionId || !Number.isFinite(resumePosition)) return;
+      let lastReportedPosition = -1;
+      let resumeApplied = false;
+      let seeking = false;
+      let completing = false;
+      let reporting = false;
+      const formatTime = (seconds) => {
+        if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+        const totalSeconds = Math.floor(seconds);
+        const minutes = Math.floor(totalSeconds / 60);
+        const remainingSeconds = totalSeconds % 60;
+        if (minutes < 60) return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+        const hours = Math.floor(minutes / 60);
+        return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+      };
+      const actionButton = (action) => controls.querySelector(`[data-player-action="${action}"]`);
+      const updateControls = () => {
+        const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+        const position = Math.min(Math.max(video.currentTime || 0, 0), duration);
+        timeline.max = String(duration);
+        timeline.value = String(position);
+        timeline.disabled = duration === 0;
+        timeline.style.setProperty(
+          '--progress-percent', `${duration === 0 ? 0 : (position / duration) * 100}%`
+        );
+        currentTime.textContent = formatTime(position);
+        remainingTime.textContent = `-${formatTime(Math.max(duration - position, 0))}`;
+        const toggle = actionButton('toggle');
+        if (toggle) {
+          toggle.innerHTML = video.paused ? '&#9654;' : '&#10074;&#10074;';
+          toggle.setAttribute('aria-label', video.paused ? 'Play' : 'Pause');
+        }
+        const mute = actionButton('mute');
+        if (mute) {
+          mute.innerHTML = video.muted || video.volume === 0 ? '&#128263;' : '&#128266;';
+          mute.setAttribute('aria-label', video.muted || video.volume === 0 ? 'Unmute' : 'Mute');
+        }
+        contextMenu.querySelectorAll('[data-player-rate]').forEach((option) => {
+          const rate = Number(option.getAttribute('data-player-rate'));
+          option.setAttribute('aria-pressed', String(Math.abs(rate - video.playbackRate) < 0.01));
+        });
+        volume.value = String(video.muted ? 0 : video.volume);
+        volume.style.setProperty('--volume-percent', `${video.muted ? 0 : video.volume * 100}%`);
+      };
+      const hideContextMenu = () => { contextMenu.hidden = true; };
+      const showContextMenu = (clientX, clientY) => {
+        const bounds = this.getBoundingClientRect();
+        contextMenu.hidden = false;
+        contextMenu.style.left = `${Math.max(8, Math.min(clientX - bounds.left, bounds.width - 210))}px`;
+        contextMenu.style.top = `${Math.max(8, clientY - bounds.top)}px`;
+      };
+      const reportProgress = async (force, seek) => {
+        if (!Number.isFinite(video.currentTime) || video.currentTime < 0) return;
+        if (resumePosition > 0 && !resumeApplied) return;
+        if (reporting) return;
+        if (!force && video.currentTime - lastReportedPosition < 10) return;
+        reporting = true;
+        try {
+          const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            credentials: 'same-origin',
+            body: JSON.stringify({positionSeconds: video.currentTime, seek}),
+          });
+          if (!response.ok) throw new Error('Progress failed');
+          lastReportedPosition = video.currentTime;
+        } catch (_) {
+          status.textContent = 'Playback progress could not be saved.';
+        } finally {
+          reporting = false;
+        }
+      };
+      controls.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const target = element?.closest('[data-player-action]');
+        if (!target) return;
+        const action = target.getAttribute('data-player-action');
+        if (action === 'toggle') {
+          if (video.paused) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
+          else video.pause();
+        } else if (action === 'rewind' || action === 'forward') {
+          const offset = action === 'rewind' ? -10 : 10;
+          if (Number.isFinite(video.duration)) video.currentTime = Math.min(Math.max(video.currentTime + offset, 0), video.duration);
+        } else if (action === 'menu') {
+          const bounds = target.getBoundingClientRect();
+          showContextMenu(bounds.left + bounds.width / 2, bounds.bottom);
+        } else if (action === 'mute') {
+          video.muted = !video.muted;
+        } else if (action === 'fullscreen') {
+          if (document.fullscreenElement) void document.exitFullscreen();
+          else if (typeof video.requestFullscreen === 'function') void video.requestFullscreen();
+          else if (typeof video.webkitEnterFullscreen === 'function') video.webkitEnterFullscreen();
+        }
+        updateControls();
+      });
+      contextMenu.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const option = element?.closest('[data-player-rate]');
+        if (!option) return;
+        const rate = Number(option.getAttribute('data-player-rate'));
+        if (!Number.isFinite(rate)) return;
+        video.playbackRate = rate;
+        updateControls();
+        hideContextMenu();
+      });
+      timeline.addEventListener('input', () => {
+        const position = Number(timeline.value);
+        if (Number.isFinite(position)) video.currentTime = position;
+        updateControls();
+      });
+      volume.addEventListener('input', () => {
+        const nextVolume = Number(volume.value);
+        if (!Number.isFinite(nextVolume)) return;
+        video.volume = Math.min(Math.max(nextVolume, 0), 1);
+        video.muted = video.volume === 0;
+        updateControls();
+      });
+      nativeControls.addEventListener('change', () => {
+        video.controls = nativeControls.checked;
+        hideContextMenu();
+      });
+      this.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        showContextMenu(event.clientX, event.clientY);
+      });
+      const onPointerDown = (event) => {
+        if (!contextMenu.contains(event.target)) hideContextMenu();
+      };
+      document.addEventListener('pointerdown', onPointerDown);
+      this._dispose = () => { document.removeEventListener('pointerdown', onPointerDown); };
+      video.addEventListener('loadedmetadata', () => {
+        if (!resumeApplied && resumePosition > 0 && Number.isFinite(video.duration)) {
+          resumeApplied = true;
+          video.currentTime = Math.min(resumePosition, video.duration);
+        }
+        status.textContent = '';
+        updateControls();
+      });
+      video.addEventListener('play', updateControls);
+      video.addEventListener('pause', updateControls);
+      video.addEventListener('ratechange', updateControls);
+      video.addEventListener('volumechange', updateControls);
+      video.addEventListener('timeupdate', () => {
+        updateControls();
+        void reportProgress(false, false);
+      });
+      video.addEventListener('seeking', () => { seeking = true; });
+      video.addEventListener('seeked', () => {
+        void reportProgress(true, seeking);
+        seeking = false;
+      });
+      video.addEventListener('pause', () => { void reportProgress(true, false); });
+      video.addEventListener('error', () => {
+        status.textContent = 'This video format is not supported by this browser.';
+      });
+      video.addEventListener('ended', async () => {
+        if (completing) return;
+        completing = true;
+        status.textContent = 'Completing playback…';
+        try {
+          const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/complete`, {
+            method: 'POST', headers: {'Accept': 'application/json'}, credentials: 'same-origin'
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error('Completion failed');
+          if (typeof payload.nextUrl === 'string') window.location.assign(payload.nextUrl);
+          else status.textContent = 'Playback complete.';
+        } catch (_) {
+          completing = false;
+          status.textContent = 'Playback completion could not be saved.';
+        }
+      });
+      updateControls();
+    }
+
+    disconnectedCallback() {
+      if (this._dispose) this._dispose();
+    }
+  }
+
+  if (!customElements.get('kanvas-playback-player')) customElements.define('kanvas-playback-player', KanvasPlaybackPlayer);
+
   window.kanvasInternals = {escapeHtml, jobDetail};
 
-  window.kanvas = window.kanvas || {};
-  window.kanvas.launch = (uri) => new Promise((resolve) => {
-    let hidden = false;
-    const onVisibility = () => { hidden = document.visibilityState === 'hidden'; };
-    document.addEventListener('visibilitychange', onVisibility, {once: true});
-    window.location.assign(uri);
-    window.setTimeout(() => resolve(hidden || document.hasFocus() === false), 850);
-  });
 })();
