@@ -17,7 +17,7 @@ def main() -> None:
     shared_settings = SharedSettings()
     settings = Kanvas_Settings()
     configure_logging(shared_settings.log_level, LogDomain.KANVAS, shared_settings.log_directory)
-    LOGGER.info("Kanvas scaffold configured for %s:%s", settings.host, settings.port)
+    LOGGER.info("Kanvas configured for %s:%s", settings.host, settings.port)
 
 
 def console_main() -> None:

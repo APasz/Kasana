@@ -7,6 +7,7 @@ from asyncio import CancelledError, gather
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import urljoin
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -31,6 +32,12 @@ from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import add_kanvas_head, kanvas_asset_versions, page_shell
 from kasana.kanvas.components.typography import page_title, section_title
+from kasana.kanvas.ffmpeg import FFmpegError, start_fragmented_mp4
+from kasana.kanvas.playback_compatibility import (
+    BrowserPlaybackCapabilities,
+    PlaybackMode,
+    classify_playback,
+)
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile, is_profile_access_error
 from kasana.kanvas.routes.administration import AdministrationSection, render_administration
 from kasana.kanvas.routes.collections import (
@@ -75,6 +82,7 @@ from kasana.katalog.public import (
     LibraryRootCreate,
     LibraryRootKind,
     LibraryRootUpdate,
+    PlaybackPlanEntry,
     ScanRequest,
     SessionProgressUpdate,
     UserCreate,
@@ -203,6 +211,14 @@ async def update_current_profile(request: Request) -> JSONResponse:
     if "accent_colour" in payload:
         values["accent_colour"] = _optional_string(
             payload["accent_colour"], maximum_length=7
+        )
+    if "preferred_audio_language" in payload:
+        values["preferred_audio_language"] = _optional_string(
+            payload["preferred_audio_language"], maximum_length=32
+        )
+    if "preferred_subtitle_language" in payload:
+        values["preferred_subtitle_language"] = _optional_string(
+            payload["preferred_subtitle_language"], maximum_length=32
         )
     try:
         update = UserUpdate.model_validate(values)
@@ -886,6 +902,37 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
     entry = session.current_item
     if entry is None or entry.position != entry_position:
         raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    mode, audio_stream_index = _requested_playback_delivery(request)
+    if not _valid_playback_delivery(entry, mode, audio_stream_index):
+        raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    if mode is not PlaybackMode.DIRECT:
+        if request.method == "HEAD":
+            return Response(headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"})
+        try:
+            ffmpeg_stream = await start_fragmented_mp4(
+                _settings.ffmpeg_executable,
+                urljoin(str(_settings.katalog_url), entry.stream_url),
+                audio_stream_index=audio_stream_index,
+                transcode_audio=mode is PlaybackMode.AUDIO_TRANSCODE,
+            )
+        except FFmpegError as error:
+            _LOGGER.warning("Browser FFmpeg stream could not start: %s", error)
+            return JSONResponse(
+                {"error": "Browser playback conversion is unavailable."}, status_code=503
+            )
+
+        async def ffmpeg_output() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in ffmpeg_stream.chunks():
+                    yield chunk
+            except FFmpegError as error:
+                _LOGGER.warning("Browser FFmpeg stream ended early: %s", error)
+
+        return PlaybackStreamingResponse(
+            ffmpeg_output(),
+            headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"},
+        )
+
     catalogue = KatalogClient(
         str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
     )
@@ -920,6 +967,55 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
         status_code=transfer.status_code,
         headers=_stream_response_headers(transfer.headers),
     )
+
+
+@app.post(
+    "/kanvas/playback/sessions/{session_id}/entries/{entry_position}/compatibility",
+    include_in_schema=False,
+)
+async def playback_compatibility(
+    session_id: str, entry_position: int, request: Request
+) -> JSONResponse:
+    """Choose a browser delivery mode from probe metadata and browser evidence."""
+
+    profile = await _require_profile(request)
+    payload = await _json_object(request)
+    try:
+        capabilities = BrowserPlaybackCapabilities.model_validate(payload)
+        session = await KanvasPlaybackService(_settings, profile.user.id).playback_session(
+            session_id
+        )
+    except ValidationError:
+        return _invalid_action("Browser capability data is invalid.")
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback media is unavailable.")
+    except ValueError:
+        return _invalid_action("Playback session is invalid.")
+    entry = session.current_item
+    if entry is None or entry.position != entry_position:
+        raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    decision = classify_playback(
+        entry,
+        capabilities,
+        preferred_audio_language=profile.user.preferred_audio_language,
+    )
+    if decision.mode is PlaybackMode.UNSUPPORTED:
+        try:
+            fallback_uri = await KanvasPlaybackService(
+                _settings, profile.user.id
+            ).create_kestrel_fallback_uri(session)
+        except (KatalogClientError, ValueError):
+            fallback_uri = None
+        return JSONResponse(
+            {"mode": decision.mode.value, "mediaUrl": None, "fallbackUri": fallback_uri}
+        )
+    if decision.audio_stream_index is None:
+        raise HTTPException(status_code=500, detail="Playback decision is incomplete.")
+    media_url = (
+        f"/kanvas/playback/sessions/{session.id}/entries/{entry.position}/media"
+        f"?mode={decision.mode.value}&audioStream={decision.audio_stream_index}"
+    )
+    return JSONResponse({"mode": decision.mode.value, "mediaUrl": media_url, "fallbackUri": None})
 
 
 @app.put("/kanvas/playback/sessions/{session_id}/progress", include_in_schema=False)
@@ -961,12 +1057,15 @@ async def complete_playback(session_id: str, request: Request) -> JSONResponse:
     except KatalogClientError as error:
         return _katalog_data_error(error, "Playback completion could not be saved.")
     next_item = next_session.current_item if next_session is not None else None
-    next_url = (
-        f"/item/{next_item.item_id}?playbackSession={next_session.id}"
-        if next_item is not None and next_session is not None
+    next_entry = (
+        {
+            "position": next_item.position,
+            "resumePosition": next_item.saved_resume_position_seconds,
+        }
+        if next_item is not None
         else None
     )
-    return JSONResponse({"nextUrl": next_url})
+    return JSONResponse({"nextEntry": next_entry})
 
 
 @app.post("/kanvas/actions/collections", include_in_schema=False)
@@ -1168,9 +1267,48 @@ def _query_text(request: Request, name: str, *, maximum_length: int) -> str | No
 
 
 def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Drop fixed entity lengths so canceled browser streams remain valid ASGI responses."""
+    """Drop fixed entity lengths so cancelled browser streams remain valid ASGI responses."""
 
     return {name: value for name, value in headers.items() if name.casefold() != "content-length"}
+
+
+def _requested_playback_delivery(request: Request) -> tuple[PlaybackMode, int]:
+    """Parse the small, server-validated delivery selector issued by Kanvas."""
+
+    raw_mode = request.query_params.get("mode", PlaybackMode.DIRECT.value)
+    try:
+        mode = PlaybackMode(raw_mode)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Playback delivery mode is invalid.") from error
+    raw_audio_index = request.query_params.get("audioStream", "0")
+    if not raw_audio_index.isdecimal():
+        raise HTTPException(status_code=422, detail="Playback audio stream is invalid.")
+    audio_stream_index = int(raw_audio_index)
+    if audio_stream_index > 63:
+        raise HTTPException(status_code=422, detail="Playback audio stream is invalid.")
+    return mode, audio_stream_index
+
+
+def _valid_playback_delivery(
+    entry: PlaybackPlanEntry, mode: PlaybackMode, audio_stream_index: int
+) -> bool:
+    """Keep query values from widening the server's no-video-transcode boundary."""
+
+    video_streams = entry.video_streams
+    audio_streams = entry.audio_streams
+    if not video_streams:
+        return mode is PlaybackMode.DIRECT and audio_stream_index == 0
+    if len(video_streams) != 1 or audio_stream_index >= len(audio_streams):
+        return False
+    video_codec = (video_streams[0].codec or "").casefold()
+    audio_codec = (audio_streams[audio_stream_index].codec or "").casefold()
+    if video_codec not in {"h264", "avc", "avc1", "hevc", "h265", "hev1", "hvc1"}:
+        return False
+    if mode is PlaybackMode.DIRECT:
+        return entry.container == "isobmff" and audio_stream_index == 0 and audio_codec == "aac"
+    if mode is PlaybackMode.REMUX:
+        return audio_codec == "aac" and (entry.container != "isobmff" or audio_stream_index != 0)
+    return mode is PlaybackMode.AUDIO_TRANSCODE and audio_codec != "aac"
 
 
 def _query_boolean(request: Request, name: str, *, default: bool) -> bool:

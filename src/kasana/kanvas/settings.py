@@ -31,6 +31,7 @@ class Kanvas_Settings(KSettings):
         default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
     )
     katalog_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
+    ffmpeg_executable: str = "ffmpeg"
 
     @property
     def static_max_cache_age(self) -> int:

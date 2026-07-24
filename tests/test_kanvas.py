@@ -562,7 +562,7 @@ def test_playback_proxy_does_not_forward_a_fixed_body_length() -> None:
     assert headers == {"Content-Range": "bytes 0-9/1048576"}
 
 
-async def test_playback_stream_response_ends_quietly_when_canceled() -> None:
+async def test_playback_stream_response_ends_quietly_when_cancelled() -> None:
     async def content() -> AsyncIterator[bytes]:
         yield b"media"
 

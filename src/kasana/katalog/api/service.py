@@ -364,6 +364,8 @@ class KatalogQueryService:
                 state=UserConfigurationState.ACTIVE,
                 pin=request.pin,
                 accent_colour=request.accent_colour,
+                preferred_audio_language=request.preferred_audio_language,
+                preferred_subtitle_language=request.preferred_subtitle_language,
             )
             self._user_configurations.save(user.id, configuration)
             return _profile_summary(user.id, configuration)
@@ -400,6 +402,14 @@ class KatalogQueryService:
             if request.accent_colour is not None:
                 configuration = configuration.model_copy(
                     update={"accent_colour": request.accent_colour}
+                )
+            if "preferred_audio_language" in values:
+                configuration = configuration.model_copy(
+                    update={"preferred_audio_language": request.preferred_audio_language}
+                )
+            if "preferred_subtitle_language" in values:
+                configuration = configuration.model_copy(
+                    update={"preferred_subtitle_language": request.preferred_subtitle_language}
                 )
             self._user_configurations.save(user.id, configuration)
             session.flush()
@@ -2216,6 +2226,8 @@ def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSumm
         is_disabled=configuration.state is UserConfigurationState.DISABLED,
         pin_required=configuration.pin is not None,
         accent_colour=configuration.accent_colour,
+        preferred_audio_language=configuration.preferred_audio_language,
+        preferred_subtitle_language=configuration.preferred_subtitle_language,
     )
 
 
@@ -2415,6 +2427,8 @@ def _playback_plan_entry(
         saved_resume_position_seconds=saved_position,
         stream_url=f"/api/v1/media/{stream_token}",
         download_url=f"/api/v1/downloads/{download_token}",
+        container=canonical_container(media_file.container) or media_file.container,
+        video_streams=tuple(_stream_summary(stream) for stream in media_file.video_streams),
         audio_streams=tuple(_stream_summary(stream) for stream in media_file.audio_streams),
         subtitle_streams=tuple(_stream_summary(stream) for stream in media_file.subtitle_streams),
         next_entry=next_entry,
@@ -2892,8 +2906,10 @@ def _media_summary(file: MediaFile) -> MediaTechnicalSummary:
 
 def _stream_summary(stream: Mapping[str, object]) -> MediaStreamSummary:
     return MediaStreamSummary(
-        codec=_optional_string(stream.get("codec_name")),
-        language=_optional_string(_tags(stream).get("language")),
+        codec=_optional_string(stream.get("codec"))
+        or _optional_string(stream.get("codec_name")),
+        language=_optional_string(stream.get("language"))
+        or _optional_string(_tags(stream).get("language")),
         width=_optional_int(stream.get("width")),
         height=_optional_int(stream.get("height")),
         channels=_optional_int(stream.get("channels")),

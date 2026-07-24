@@ -866,6 +866,8 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "level",
         "name",
         "pin",
+        "preferred_audio_language",
+        "preferred_subtitle_language",
         "state",
         "username",
     }
@@ -916,9 +918,11 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "display_name": "Filesystem profile",
         "role": "user",
         "is_disabled": False,
-        "pin_required": False,
-        "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
-    }
+            "pin_required": False,
+            "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
+            "preferred_audio_language": None,
+            "preferred_subtitle_language": None,
+        }
 
     rejected_pin = await api_fixture.client.post(
         f"/api/v1/users/{user['id']}/authenticate", json={"pin": "0000"}

@@ -11,6 +11,7 @@ from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemDetail,
+    ManualQueuePlaybackContext,
     PlaybackPlanRequest,
     PlaybackSessionResponse,
     SeriesPlaybackContext,
@@ -138,6 +139,25 @@ class KanvasPlaybackService:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             await client.close_playback_session(session_id)
+
+    async def create_kestrel_fallback_uri(self, session: PlaybackSessionResponse) -> str:
+        """Create a Kestrel launch for the unplayed tail of an owned browser queue."""
+
+        owned_session = self._owned_session(session)
+        remaining_entries = owned_session.entries[owned_session.current_entry_position :]
+        entry_ids = tuple(entry.item_id for entry in remaining_entries)
+        if not entry_ids:
+            msg = "Playback sessions must contain a current media item."
+            raise ValueError(msg)
+        request = PlaybackPlanRequest(
+            user_id=self._user_id,
+            context=ManualQueuePlaybackContext(item_ids=entry_ids),
+        )
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            launch = await client.create_playback_plan(request)
+        return launch_uri(launch.launch_token)
 
     def _owned_session(self, session: PlaybackSessionResponse) -> PlaybackSessionResponse:
         if session.user_id != self._user_id:

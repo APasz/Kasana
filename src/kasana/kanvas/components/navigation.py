@@ -64,6 +64,8 @@ def _navigation(
                         f"data-user-id={profile.user.id!r}",
                         f"data-name={profile_display_name(profile.user)!r}",
                         f"data-accent-colour={profile.user.accent_colour!r}",
+                        f"data-preferred-audio-language={profile.user.preferred_audio_language!r}",
+                        f"data-preferred-subtitle-language={profile.user.preferred_subtitle_language!r}",
                     )
                 )
             )

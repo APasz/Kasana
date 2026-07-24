@@ -45,6 +45,8 @@ class UserConfiguration(BaseModel):
     accent_colour: str = Field(
         default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
     )
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
 
     @field_validator("username", "name")
     @classmethod

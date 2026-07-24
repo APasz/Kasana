@@ -36,7 +36,7 @@
   const normaliseHexColour = (value) => (
     typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) ? value : null
   );
-  const profileMenuMarkup = (name, accentColour) => `
+  const profileMenuMarkup = (name, accentColour, preferredAudioLanguage, preferredSubtitleLanguage) => `
     <button type="button" class="k-profile-switcher" aria-haspopup="dialog" aria-label="Open profile settings" title="Profile settings">${escapeHtml(name)}</button>
     <dialog class="k-kanvas-dialog k-profile-dialog">
       <div class="k-picker k-profile-form" role="document">
@@ -60,6 +60,14 @@
             <span>Accent colour</span>
             <input name="accentColour" type="color" value="${escapeHtml(accentColour)}" aria-label="Accent colour">
           </label>
+          <label class="k-control-shell k-input-shell">
+            <span class="k-sr-only">Preferred audio language</span>
+            <input class="k-input" name="preferredAudioLanguage" value="${escapeHtml(preferredAudioLanguage)}" aria-label="Preferred audio language" placeholder="Preferred audio language (for example, en)">
+          </label>
+          <label class="k-control-shell k-input-shell">
+            <span class="k-sr-only">Preferred subtitle language</span>
+            <input class="k-input" name="preferredSubtitleLanguage" value="${escapeHtml(preferredSubtitleLanguage)}" aria-label="Preferred subtitle language" placeholder="Preferred subtitle language (for example, en)">
+          </label>
           <div class="k-picker__status" data-profile-status aria-live="polite"></div>
           <div class="k-profile-actions">
             <button type="submit" class="k-button k-button--primary" data-profile-save>Save changes</button>
@@ -81,7 +89,9 @@
     connectedCallback() {
       const name = this.profileName();
       const accentColour = normaliseHexColour(this.getAttribute('data-accent-colour')) || PROFILE_ACCENT_DEFAULT;
-      this.innerHTML = profileMenuMarkup(name, accentColour);
+      const preferredAudioLanguage = this.getAttribute('data-preferred-audio-language') || '';
+      const preferredSubtitleLanguage = this.getAttribute('data-preferred-subtitle-language') || '';
+      this.innerHTML = profileMenuMarkup(name, accentColour, preferredAudioLanguage, preferredSubtitleLanguage);
       this.dialog = this.querySelector('dialog');
       this.status = this.querySelector('[data-profile-status]');
       this.saveButton = this.querySelector('[data-profile-save]');
@@ -166,6 +176,10 @@
         return;
       }
       const profilePayload = {displayName: String(data.get('displayName') || '').trim(), accent_colour: accentColour};
+      const preferredAudioLanguage = String(data.get('preferredAudioLanguage') || '').trim();
+      const preferredSubtitleLanguage = String(data.get('preferredSubtitleLanguage') || '').trim();
+      profilePayload.preferred_audio_language = preferredAudioLanguage || null;
+      profilePayload.preferred_subtitle_language = preferredSubtitleLanguage || null;
       if (pin) profilePayload.pin = pin;
       else if (this.pinClearRequested) profilePayload.pin = null;
       this.saveButton?.setAttribute('disabled', 'disabled');
@@ -178,6 +192,8 @@
         if (button instanceof HTMLButtonElement) button.textContent = nextName;
         const savedColour = normaliseHexColour(profile.accent_colour) || accentColour;
         this.setAttribute('data-accent-colour', savedColour);
+        this.setAttribute('data-preferred-audio-language', profile.preferred_audio_language || '');
+        this.setAttribute('data-preferred-subtitle-language', profile.preferred_subtitle_language || '');
         document.documentElement.style.setProperty('--k-accent', savedColour);
         const pinInput = form.elements.namedItem('pin');
         if (pinInput instanceof HTMLInputElement) pinInput.value = '';
@@ -1426,15 +1442,75 @@
       const volume = this.querySelector('[data-player-volume]');
       const contextMenu = this.querySelector('[data-player-context-menu]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
+      const kestrelLink = this.querySelector('[data-player-kestrel]');
       const sessionId = this.getAttribute('session-id');
-      const resumePosition = Number(this.getAttribute('resume-position') || '0');
-      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !nativeControls || !sessionId || !Number.isFinite(resumePosition)) return;
+      let entryPosition = Number(this.getAttribute('entry-position') || '0');
+      let resumePosition = Number(this.getAttribute('resume-position') || '0');
+      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition)) return;
       let lastReportedPosition = -1;
       let resumeApplied = false;
       let seeking = false;
       let completing = false;
       let reporting = false;
       let fullscreenHideTimer = null;
+      const capabilityTypes = [
+        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+        'video/mp4; codecs="hvc1.1.6.L93.B0, mp4a.40.2"',
+        'video/mp4; codecs="hev1.1.6.L93.B0, mp4a.40.2"'
+      ];
+      const browserCapabilities = async () => Promise.all(capabilityTypes.map(async (contentType) => {
+        let mediaCapabilitiesSupported = false;
+        try {
+          if (navigator.mediaCapabilities?.decodingInfo) {
+            const result = await navigator.mediaCapabilities.decodingInfo({type: 'file', video: {contentType}});
+            mediaCapabilitiesSupported = result.supported === true;
+          }
+        } catch (_) {}
+        return {
+          content_type: contentType,
+          media_capabilities_supported: mediaCapabilitiesSupported,
+          can_play_type: video.canPlayType(contentType)
+        };
+      }));
+      const selectDelivery = async (autoplay) => {
+        status.textContent = 'Preparing playback…';
+        const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/compatibility`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          credentials: 'same-origin',
+          body: JSON.stringify({media: await browserCapabilities()})
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || typeof payload.mode !== 'string') throw new Error('Playback compatibility failed');
+        if (payload.mode === 'unsupported' || typeof payload.mediaUrl !== 'string') {
+          video.removeAttribute('src');
+          video.load();
+          status.textContent = 'This browser cannot play this video.';
+          if (kestrelLink instanceof HTMLAnchorElement && typeof payload.fallbackUri === 'string') {
+            kestrelLink.href = payload.fallbackUri;
+            kestrelLink.textContent = 'Open in Kestrel';
+            kestrelLink.hidden = false;
+          }
+          return false;
+        }
+        if (kestrelLink instanceof HTMLAnchorElement) kestrelLink.hidden = true;
+        video.src = payload.mediaUrl;
+        video.load();
+        if (autoplay) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
+        return true;
+      };
+      const loadEntry = async (nextPosition, nextResumePosition, autoplay) => {
+        if (!Number.isSafeInteger(nextPosition) || nextPosition < 0 || !Number.isFinite(nextResumePosition)) {
+          throw new Error('Playback queue entry is invalid');
+        }
+        entryPosition = nextPosition;
+        resumePosition = nextResumePosition;
+        resumeApplied = false;
+        lastReportedPosition = -1;
+        this.setAttribute('entry-position', String(entryPosition));
+        this.setAttribute('resume-position', String(resumePosition));
+        return selectDelivery(autoplay);
+      };
       const formatTime = (seconds) => {
         if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
         const totalSeconds = Math.floor(seconds);
@@ -1547,6 +1623,16 @@
           reporting = false;
         }
       };
+      const flushProgressOnPageHide = () => {
+        if (!Number.isFinite(video.currentTime) || video.currentTime < 0) return;
+        void fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          credentials: 'same-origin',
+          keepalive: true,
+          body: JSON.stringify({positionSeconds: video.currentTime, seek: false})
+        });
+      };
       controls.addEventListener('click', (event) => {
         showFullscreenControls();
         const element = event.target instanceof Element ? event.target : null;
@@ -1614,6 +1700,7 @@
         clearFullscreenHideTimer();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        window.removeEventListener('pagehide', flushProgressOnPageHide);
       };
       video.addEventListener('loadedmetadata', () => {
         if (!resumeApplied && resumePosition > 0 && Number.isFinite(video.duration)) {
@@ -1667,14 +1754,20 @@
           });
           const payload = await response.json();
           if (!response.ok) throw new Error('Completion failed');
-          if (typeof payload.nextUrl === 'string') window.location.assign(payload.nextUrl);
-          else status.textContent = 'Playback complete.';
+          if (payload.nextEntry && Number.isSafeInteger(payload.nextEntry.position) && Number.isFinite(payload.nextEntry.resumePosition)) {
+            completing = false;
+            await loadEntry(payload.nextEntry.position, payload.nextEntry.resumePosition, true);
+          } else status.textContent = 'Playback complete.';
         } catch (_) {
           completing = false;
           status.textContent = 'Playback completion could not be saved.';
         }
       });
+      window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();
+      void loadEntry(entryPosition, resumePosition, true).catch(() => {
+        status.textContent = 'Playback compatibility could not be checked.';
+      });
     }
 
     disconnectedCallback() {

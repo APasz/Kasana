@@ -137,6 +137,8 @@ class UserSummary(APIModel):
     accent_colour: str = Field(
         default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
     )
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
 
 
 class UserCreate(APIModel):
@@ -149,6 +151,8 @@ class UserCreate(APIModel):
     accent_colour: str = Field(
         default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
     )
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
 
     @field_validator("username", "display_name")
     @classmethod
@@ -164,6 +168,8 @@ class UserUpdate(APIModel):
         default=None, min_length=PROFILE_PIN_MIN_LENGTH, max_length=PROFILE_PIN_MAX_LENGTH
     )
     accent_colour: str | None = Field(default=None, pattern=PROFILE_ACCENT_COLOUR_PATTERN)
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
 
     @field_validator("username", "display_name")
     @classmethod
@@ -788,6 +794,8 @@ class PlaybackPlanEntry(APIModel):
     saved_resume_position_seconds: float = Field(ge=0)
     stream_url: str = Field(pattern=r"^/api/v1/media/[A-Za-z0-9_-]+$")
     download_url: str = Field(pattern=r"^/api/v1/downloads/[A-Za-z0-9_-]+$")
+    container: str = Field(default="unknown", min_length=1, max_length=100)
+    video_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=32)
     audio_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=64)
     subtitle_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=128)
     next_entry: PlaybackNextEntry | None = None

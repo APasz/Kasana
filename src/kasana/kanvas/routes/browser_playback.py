@@ -24,7 +24,6 @@ def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
     entry = session.current_item
     if entry is None:
         raise ValueError("Playback sessions must contain a current media item.")
-    media_url = f"/kanvas/playback/sessions/{session.id}/entries/{entry.position}/media"
     with (
         ui.element("kanvas-playback-player")
         .classes("k-player")
@@ -34,8 +33,11 @@ def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
         )
     ):
         ui.label("Loading player…").classes("k-player__status").props('aria-live="polite"')
+        ui.element("a").classes("k-player__kestrel").props(
+            'data-player-kestrel hidden aria-live="polite"'
+        )
         ui.element("video").classes("k-player__video").props(
-            f'src="{media_url}" autoplay playsinline preload="metadata"'
+            'autoplay playsinline preload="metadata"'
         )
         with ui.element("div").classes("k-player__progress"):
             ui.label("0:00").classes("k-player__time k-player__bar-label").props(
