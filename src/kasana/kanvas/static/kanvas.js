@@ -1434,6 +1434,7 @@
       let seeking = false;
       let completing = false;
       let reporting = false;
+      let fullscreenHideTimer = null;
       const formatTime = (seconds) => {
         if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
         const totalSeconds = Math.floor(seconds);
@@ -1465,6 +1466,12 @@
           mute.innerHTML = video.muted || video.volume === 0 ? '&#128263;' : '&#128266;';
           mute.setAttribute('aria-label', video.muted || video.volume === 0 ? 'Unmute' : 'Mute');
         }
+        const fullscreen = actionButton('fullscreen');
+        if (fullscreen) {
+          const isFullscreen = document.fullscreenElement === this || document.fullscreenElement === video;
+          fullscreen.innerHTML = isFullscreen ? '&#10005;' : '&#9974;';
+          fullscreen.setAttribute('aria-label', isFullscreen ? 'Exit fullscreen' : 'Fullscreen');
+        }
         contextMenu.querySelectorAll('[data-player-rate]').forEach((option) => {
           const rate = Number(option.getAttribute('data-player-rate'));
           option.setAttribute('aria-pressed', String(Math.abs(rate - video.playbackRate) < 0.01));
@@ -1472,12 +1479,52 @@
         volume.value = String(video.muted ? 0 : video.volume);
         volume.style.setProperty('--volume-percent', `${video.muted ? 0 : video.volume * 100}%`);
       };
-      const hideContextMenu = () => { contextMenu.hidden = true; };
+      const isCardFullscreen = () => document.fullscreenElement === this;
+      const clearFullscreenHideTimer = () => {
+        if (fullscreenHideTimer !== null) window.clearTimeout(fullscreenHideTimer);
+        fullscreenHideTimer = null;
+      };
+      const showFullscreenControls = () => {
+        if (!isCardFullscreen()) return;
+        this.classList.remove('k-player--controls-hidden');
+        clearFullscreenHideTimer();
+        if (!video.paused && contextMenu.hidden) {
+          fullscreenHideTimer = window.setTimeout(() => {
+            if (isCardFullscreen() && !video.paused && contextMenu.hidden) {
+              this.classList.add('k-player--controls-hidden');
+            }
+          }, 2600);
+        }
+      };
+      const hideContextMenu = () => {
+        contextMenu.hidden = true;
+        showFullscreenControls();
+      };
       const showContextMenu = (clientX, clientY) => {
         const bounds = this.getBoundingClientRect();
         contextMenu.hidden = false;
+        showFullscreenControls();
         contextMenu.style.left = `${Math.max(8, Math.min(clientX - bounds.left, bounds.width - 210))}px`;
         contextMenu.style.top = `${Math.max(8, clientY - bounds.top)}px`;
+      };
+      const toggleFullscreen = async () => {
+        try {
+          const fullscreenElement = document.fullscreenElement;
+          if (fullscreenElement === this || fullscreenElement === video) {
+            await document.exitFullscreen();
+          } else if (typeof this.requestFullscreen === 'function') {
+            await this.requestFullscreen();
+          } else if (typeof video.webkitEnterFullscreen === 'function') {
+            video.controls = true;
+            video.webkitEnterFullscreen();
+          } else {
+            status.textContent = 'Fullscreen is not available in this browser.';
+          }
+        } catch (_) {
+          status.textContent = 'Could not enter fullscreen.';
+        } finally {
+          updateControls();
+        }
       };
       const reportProgress = async (force, seek) => {
         if (!Number.isFinite(video.currentTime) || video.currentTime < 0) return;
@@ -1501,6 +1548,7 @@
         }
       };
       controls.addEventListener('click', (event) => {
+        showFullscreenControls();
         const element = event.target instanceof Element ? event.target : null;
         const target = element?.closest('[data-player-action]');
         if (!target) return;
@@ -1517,9 +1565,7 @@
         } else if (action === 'mute') {
           video.muted = !video.muted;
         } else if (action === 'fullscreen') {
-          if (document.fullscreenElement) void document.exitFullscreen();
-          else if (typeof video.requestFullscreen === 'function') void video.requestFullscreen();
-          else if (typeof video.webkitEnterFullscreen === 'function') video.webkitEnterFullscreen();
+          void toggleFullscreen();
         }
         updateControls();
       });
@@ -1534,11 +1580,13 @@
         hideContextMenu();
       });
       timeline.addEventListener('input', () => {
+        showFullscreenControls();
         const position = Number(timeline.value);
         if (Number.isFinite(position)) video.currentTime = position;
         updateControls();
       });
       volume.addEventListener('input', () => {
+        showFullscreenControls();
         const nextVolume = Number(volume.value);
         if (!Number.isFinite(nextVolume)) return;
         video.volume = Math.min(Math.max(nextVolume, 0), 1);
@@ -1553,11 +1601,20 @@
         event.preventDefault();
         showContextMenu(event.clientX, event.clientY);
       });
+      this.addEventListener('pointermove', showFullscreenControls);
+      this.addEventListener('pointerdown', showFullscreenControls);
+      this.addEventListener('touchstart', showFullscreenControls, {passive: true});
+      this.addEventListener('keydown', showFullscreenControls);
+      this.addEventListener('focusin', showFullscreenControls);
       const onPointerDown = (event) => {
         if (!contextMenu.contains(event.target)) hideContextMenu();
       };
       document.addEventListener('pointerdown', onPointerDown);
-      this._dispose = () => { document.removeEventListener('pointerdown', onPointerDown); };
+      this._dispose = () => {
+        clearFullscreenHideTimer();
+        document.removeEventListener('pointerdown', onPointerDown);
+        document.removeEventListener('fullscreenchange', onFullscreenChange);
+      };
       video.addEventListener('loadedmetadata', () => {
         if (!resumeApplied && resumePosition > 0 && Number.isFinite(video.duration)) {
           resumeApplied = true;
@@ -1566,10 +1623,27 @@
         status.textContent = '';
         updateControls();
       });
-      video.addEventListener('play', updateControls);
-      video.addEventListener('pause', updateControls);
+      video.addEventListener('play', () => {
+        updateControls();
+        showFullscreenControls();
+      });
+      video.addEventListener('pause', () => {
+        updateControls();
+        showFullscreenControls();
+      });
       video.addEventListener('ratechange', updateControls);
       video.addEventListener('volumechange', updateControls);
+      const onFullscreenChange = () => {
+        updateControls();
+        if (isCardFullscreen()) showFullscreenControls();
+        else {
+          clearFullscreenHideTimer();
+          this.classList.remove('k-player--controls-hidden');
+        }
+      };
+      document.addEventListener('fullscreenchange', onFullscreenChange);
+      video.addEventListener('webkitbeginfullscreen', updateControls);
+      video.addEventListener('webkitendfullscreen', updateControls);
       video.addEventListener('timeupdate', () => {
         updateControls();
         void reportProgress(false, false);

@@ -54,6 +54,16 @@ Kanvas listens on every local network interface at port `5370` by default. Open
 your host firewall blocks inbound connections, allow TCP port `5370`; set
 `host` to `127.0.0.1` in `configs/config.kanvas.json` to restrict Kanvas to the
 local machine again.
+
+### Kanvas browser support
+
+Kanvas supports current desktop releases of Chrome, Chromium, Microsoft Edge,
+and Firefox on both Windows and Linux. JavaScript and same-origin cookies must
+be enabled. Inline playback uses the browser's native media stack, so a file
+must use a container and codecs the installed browser can decode; this can vary for
+Firefox on Linux when system H.264/AAC codec support is not installed. Kestrel
+is the Linux/Steam Deck option for media that a browser cannot play.
+
 Each Kasana domain writes to its own file in `logs` by default (for example,
 `logs/katalog.log` and `logs/kanvas.log`). At process startup, a domain's
 previous log replaces its matching file in `logs.old`, retaining one prior

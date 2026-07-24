@@ -73,9 +73,24 @@ def _create_kanvas_session_secret(path: Path) -> str:
 
 
 def _require_owner_only_file(path: Path) -> None:
+    """Validate the portable file protection available on this platform.
+
+    Windows file permissions are ACL-based; ``st_mode`` does not reliably
+    describe who can read a file there.  The creation path still requests a
+    private file, while Windows applies the account's ACLs.
+    """
+
+    if not _requires_posix_private_file_mode():
+        return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode != 0o600:
         raise ValueError(f"Kanvas session secret at {path} must have mode 0600, not {mode:04o}.")
+
+
+def _requires_posix_private_file_mode() -> bool:
+    """Return whether ``st_mode`` reliably expresses private-file access."""
+
+    return os.name != "nt"
 
 
 def configured_katalog_api_url() -> str:

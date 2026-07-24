@@ -544,6 +544,11 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "data-player-native-controls" in script
     assert '"toggle", "Play"' in card
     assert 'data-player-rate="{rate:g}"' in card
+    assert "document.fullscreenElement === this" in script
+    assert "fullscreenElement === this || fullscreenElement === video" in script
+    assert "this.requestFullscreen" in script
+    assert "k-player--controls-hidden" in script
+    assert "2600" in script
     assert "controls autoplay" not in card
     assert "entry.display_title" not in card
     assert "kasana://play/" not in script

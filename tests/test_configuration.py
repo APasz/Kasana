@@ -8,6 +8,7 @@ from pathlib import Path
 
 from _pytest.monkeypatch import MonkeyPatch
 
+from kasana import configuration
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.settings import KatalogSettings
 from kasana.kestrel.settings import KestrelSettings
@@ -87,3 +88,18 @@ def test_kanvas_session_secret_can_be_supplied_by_managed_deployment(
 
     assert Kanvas_Settings().session_secret == configured_secret
     assert not (configuration_directory / "kanvas.session-secret").exists()
+
+
+def test_kanvas_session_secret_uses_windows_acl_security_not_posix_mode_bits(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration_directory = tmp_path / "configs"
+    secret_path = configuration_directory / "kanvas.session-secret"
+    configuration_directory.mkdir()
+    secret_path.write_text("session-secret-that-is-long-enough", encoding="utf-8")
+    secret_path.chmod(0o644)
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(configuration_directory))
+    monkeypatch.delenv("KASANA_KANVAS_SESSION_SECRET", raising=False)
+    monkeypatch.setattr(configuration, "_requires_posix_private_file_mode", lambda: False)
+
+    assert Kanvas_Settings().session_secret == "session-secret-that-is-long-enough"

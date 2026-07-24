@@ -646,6 +646,34 @@ kanvas-poster {
 .k-player__speed-option { min-height: 28px; border: 1px solid var(--k-border-subtle); color: var(--k-text); background: var(--k-surface-2); font: inherit; font-size: 0.76rem; cursor: pointer; }
 .k-player__speed-option[aria-pressed="true"] { border-color: var(--k-accent); color: var(--k-accent); }
 
+.k-player:fullscreen {
+    display: block;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    background: #000;
+}
+.k-player:fullscreen .k-player__video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.k-player:fullscreen .k-player__progress,
+.k-player:fullscreen .k-player__details {
+    position: absolute;
+    right: 0;
+    left: 0;
+    z-index: 2;
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+.k-player:fullscreen .k-player__progress { bottom: 52px; border-bottom: 0; background: rgba(16, 16, 16, 0.9); }
+.k-player:fullscreen .k-player__details { bottom: 0; box-sizing: border-box; min-height: 52px; padding-bottom: max(12px, env(safe-area-inset-bottom)); background: linear-gradient(to top, rgba(0, 0, 0, 0.96), rgba(0, 0, 0, 0.72)); }
+.k-player:fullscreen.k-player--controls-hidden .k-player__progress,
+.k-player:fullscreen.k-player--controls-hidden .k-player__details {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(14px);
+}
+.k-player:fullscreen.k-player--controls-hidden { cursor: none; }
+.k-player:fullscreen .k-player__status { bottom: auto; top: 8px; left: 10px; z-index: 3; }
+
 @media (max-width: 560px) {
     .k-player__details { padding: 8px 10px 10px; }
     .k-player__controls { gap: 6px; }
