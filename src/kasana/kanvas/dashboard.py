@@ -73,6 +73,8 @@ from kasana.kanvas.viewmodels.library import (
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     CollectionRelationship,
+    DuplicateResolutionBatchRequest,
+    DuplicateResolutionRequest,
     HierarchyRepairRequest,
     KatalogClient,
     KatalogClientError,
@@ -416,12 +418,17 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
         item, audit = await gather(
             service.item_edit_detail(item_id), service.item_edit_audit(item_id)
         )
+        collection_choices = await service.item_edit_collection_choices(item)
     except KatalogClientError as error:
         return _katalog_data_error(error, "Katalog could not load this item for editing.")
     return JSONResponse(
         {
             "item": item.model_dump(mode="json"),
             "audit": [entry.model_dump(mode="json") for entry in audit],
+            "collectionChoices": [choice.model_dump(mode="json") for choice in collection_choices],
+            "collectionRelationships": [
+                relationship.value for relationship in CollectionRelationship
+            ],
         }
     )
 
@@ -445,6 +452,43 @@ async def item_edit_action(item_id: int, request: Request) -> JSONResponse:
     except (ValidationError, ValueError) as error:
         return _invalid_action(str(error))
     return JSONResponse(result.model_dump(mode="json"))
+
+
+@app.post("/kanvas/actions/items/{item_id}/collections", include_in_schema=False)
+async def add_item_to_collection_action(item_id: int, request: Request) -> RedirectResponse:
+    """Add the viewed item to one selected collection with its displayed revision."""
+
+    profile = await _require_profile(request)
+    _require_administrator(profile)
+    form = await request.form()
+    collection_id, revision = _form_collection_target(form, "collection_target")
+    await KanvasKatalogService(_settings, profile.user.id).add_collection_member(
+        collection_id,
+        revision=revision,
+        item_id=item_id,
+        relationship=_optional_relationship(_form_optional(form, "relationship")),
+    )
+    return RedirectResponse(f"/item/{item_id}", status_code=303)
+
+
+@app.post(
+    "/kanvas/actions/items/{item_id}/collections/{collection_id}/remove",
+    include_in_schema=False,
+)
+async def remove_item_from_collection_action(
+    item_id: int, collection_id: int, request: Request
+) -> RedirectResponse:
+    """Remove the viewed item from one collection without changing the item itself."""
+
+    profile = await _require_profile(request)
+    _require_administrator(profile)
+    form = await request.form()
+    await KanvasKatalogService(_settings, profile.user.id).remove_collection_member(
+        collection_id,
+        revision=_form_integer(form, "revision"),
+        item_id=item_id,
+    )
+    return RedirectResponse(f"/item/{item_id}", status_code=303)
 
 
 def _library_request_id(request: Request) -> str:
@@ -623,6 +667,27 @@ async def administration_hierarchy_data(request: Request) -> JSONResponse:
     return JSONResponse(preview.model_dump(mode="json"))
 
 
+@app.get("/kanvas/data/administration/duplicates", include_in_schema=False)
+async def administration_duplicates_data(request: Request) -> JSONResponse:
+    """Return only currently safe duplicate record and hierarchy resolutions."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    try:
+        service = KanvasKatalogService(_settings)
+        preview, file_issues = await gather(
+            service.duplicate_resolution_preview(), service.duplicate_episode_issues()
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load duplicate resolutions.")
+    payload = preview.model_dump(mode="json")
+    payload["fileIssues"] = [issue.model_dump(mode="json") for issue in file_issues]
+    return JSONResponse(payload)
+
+
 @app.post("/kanvas/actions/administration", include_in_schema=False)
 async def administration_action(request: Request) -> JSONResponse:
     """Apply explicit administration intents through the typed Kanvas service boundary."""
@@ -664,6 +729,26 @@ async def administration_action(request: Request) -> JSONResponse:
                 return _invalid_action("Applying hierarchy repair requires explicit confirmation.")
             job = await service.submit_hierarchy_repair(
                 HierarchyRepairRequest(apply=apply, confirmed=apply)
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "duplicate-resolve":
+            if payload.get("confirmed") is not True:
+                return _invalid_action("Resolving a duplicate requires explicit confirmation.")
+            job = await service.submit_duplicate_resolution(
+                DuplicateResolutionRequest(
+                    source_item_id=_integer(payload, "sourceItemId"),
+                    target_item_id=_integer(payload, "targetItemId"),
+                    confirmed=True,
+                )
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "duplicate-resolve-batch":
+            if payload.get("confirmed") is not True:
+                return _invalid_action("Resolving duplicates requires explicit confirmation.")
+            job = await service.submit_duplicate_resolution_batch(
+                DuplicateResolutionBatchRequest.model_validate(
+                    {"resolutions": payload.get("resolutions"), "confirmed": True}
+                )
             )
             return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
         if operation == "cancel-job":
@@ -731,7 +816,10 @@ async def administration_action(request: Request) -> JSONResponse:
             await service.delete_library_root(root_id, confirm=True)
             return JSONResponse({"rootId": root_id})
     except KatalogClientError as error:
-        return _katalog_data_error(error, "Administration change could not be applied.")
+        return _katalog_data_error(
+            error,
+            _administration_operation_failure_message(operation, error),
+        )
     except (ValueError, TypeError) as error:
         return _invalid_action(str(error))
     return _invalid_action("Unsupported administration operation.")
@@ -789,11 +877,30 @@ async def watch_order_data(watch_order_id: int, request: Request) -> JSONRespons
     )
 
 
+@app.get("/kanvas/data/watch-orders/{watch_order_id}/workspace", include_in_schema=False)
+async def watch_order_workspace_data(watch_order_id: int, request: Request) -> JSONResponse:
+    """Return the editable order plus collection-backed single-item and season sources."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    try:
+        workspace = await KanvasKatalogService(
+            _settings, profile.user.id
+        ).watch_order_workspace(watch_order_id)
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load this watch-order workspace.")
+    return JSONResponse(workspace.model_dump(by_alias=True, mode="json"))
+
+
 @app.post("/kanvas/actions/collections/{collection_id}/members", include_in_schema=False)
 async def collection_member_action(collection_id: int, request: Request) -> JSONResponse:
     """Apply one browser-owned membership addition with an explicit revision."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     payload = await _json_object(request)
     if payload.get("operation") != "add":
         return _invalid_action("Unsupported collection member operation.")
@@ -821,6 +928,7 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
     """Apply add, move, or remove entry intents from the bounded row component."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     payload = await _json_object(request)
     operation = payload.get("operation")
     try:
@@ -831,6 +939,20 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
                 watch_order_id,
                 revision=revision,
                 item_id=_integer(payload, "itemId"),
+            )
+        elif operation == "add_source":
+            next_revision = await service.add_watch_order_source(
+                watch_order_id,
+                revision=revision,
+                source_item_id=_integer(payload, "sourceItemId"),
+                before_entry_id=_optional_integer(payload.get("beforeEntryId")),
+            )
+        elif operation == "add_sources":
+            next_revision = await service.add_watch_order_sources(
+                watch_order_id,
+                revision=revision,
+                source_item_ids=_integer_tuple(payload, "sourceItemIds", maximum_length=1_000),
+                before_entry_id=_optional_integer(payload.get("beforeEntryId")),
             )
         elif operation == "move":
             boundary = payload.get("boundary")
@@ -1073,6 +1195,7 @@ async def create_collection_action(request: Request) -> RedirectResponse:
     """Create a collection from the native editor and enter its deterministic route."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     collection_id = await KanvasKatalogService(_settings, profile.user.id).create_collection(
         name=_form_required(form, "name"), overview=_form_optional(form, "overview")
@@ -1086,11 +1209,15 @@ async def update_collection_action(collection_id: int, request: Request) -> Redi
 
     profile = await _require_profile(request)
     form = await request.form()
+    _require_administrator(profile)
     await KanvasKatalogService(_settings, profile.user.id).update_collection(
         collection_id,
         revision=_form_integer(form, "revision"),
         name=_form_required(form, "name"),
         overview=_form_optional(form, "overview"),
+        artwork_item_id=_form_optional_integer(form, "artwork_item_id"),
+        default_watch_order_id=_form_optional_integer(form, "default_watch_order_id"),
+        update_preferences=True,
     )
     return RedirectResponse(f"/collections/{collection_id}", status_code=303)
 
@@ -1100,6 +1227,7 @@ async def delete_collection_action(collection_id: int, request: Request) -> Redi
     """Delete a collection only after the non-transient confirmation field is present."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     _require_confirmation(form)
     await KanvasKatalogService(_settings, profile.user.id).delete_collection(
@@ -1115,6 +1243,7 @@ async def update_collection_member_action(
     """Update an optional relationship with an explicit collection revision."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     await KanvasKatalogService(_settings, profile.user.id).update_collection_member(
         collection_id,
@@ -1135,6 +1264,7 @@ async def remove_collection_member_action(
     """Remove a direct collection member using its displayed revision."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     await KanvasKatalogService(_settings, profile.user.id).remove_collection_member(
         collection_id, revision=_form_integer(form, "revision"), item_id=item_id
@@ -1147,6 +1277,7 @@ async def create_watch_order_action(collection_id: int, request: Request) -> Red
     """Create an intentionally empty watch order inside the selected collection."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     try:
         kind = WatchOrderKind(_form_required(form, "kind"))
@@ -1166,17 +1297,26 @@ async def update_watch_order_action(watch_order_id: int, request: Request) -> Re
     """Update the name or kind of an existing watch order."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     try:
         kind = WatchOrderKind(_form_required(form, "kind"))
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Invalid watch-order kind.") from error
-    await KanvasKatalogService(_settings, profile.user.id).update_watch_order(
-        watch_order_id,
-        revision=_form_integer(form, "revision"),
-        name=_form_required(form, "name"),
-        kind=kind,
-    )
+    try:
+        await KanvasKatalogService(_settings, profile.user.id).update_watch_order(
+            watch_order_id,
+            revision=_form_integer(form, "revision"),
+            name=_form_required(form, "name"),
+            kind=kind,
+        )
+    except KatalogClientError as error:
+        message = (
+            "This watch order changed. Reload the editor before saving again."
+            if error.kind is KatalogClientErrorKind.CONFLICT
+            else "Watch-order changes could not be saved."
+        )
+        raise HTTPException(status_code=_katalog_status(error), detail=message) from error
     return RedirectResponse(f"/watch-orders/{watch_order_id}/edit", status_code=303)
 
 
@@ -1185,12 +1325,15 @@ async def delete_watch_order_action(watch_order_id: int, request: Request) -> Re
     """Delete a watch order after explicit confirmation and return to collections."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     _require_confirmation(form)
     await KanvasKatalogService(_settings, profile.user.id).delete_watch_order(
         watch_order_id, revision=_form_integer(form, "revision")
     )
-    return RedirectResponse("/collections", status_code=303)
+    collection_id = _form_optional_integer(form, "collection_id")
+    destination = f"/collections/{collection_id}" if collection_id is not None else "/collections"
+    return RedirectResponse(destination, status_code=303)
 
 
 @app.post(
@@ -1203,6 +1346,7 @@ async def apply_watch_order_generation_action(
     """Apply a previously reviewed generation only after form confirmation."""
 
     profile = await _require_profile(request)
+    _require_administrator(profile)
     form = await request.form()
     try:
         mode = WatchOrderGenerationMode(_form_required(form, "mode"))
@@ -1364,6 +1508,31 @@ def _integer(payload: dict[str, object], field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive integer.")
     return value
+
+
+def _integer_tuple(
+    payload: dict[str, object], field: str, *, maximum_length: int
+) -> tuple[int, ...]:
+    """Read a bounded, duplicate-free sequence of positive JSON identifiers."""
+
+    value = payload.get(field)
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{field} must be a non-empty list of at most {maximum_length} identifiers."
+        )
+    values = cast(list[object], value)
+    if not values or len(values) > maximum_length:
+        raise ValueError(
+            f"{field} must be a non-empty list of at most {maximum_length} identifiers."
+        )
+    identifiers = tuple(
+        item
+        for item in values
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0
+    )
+    if len(identifiers) != len(values) or len(set(identifiers)) != len(identifiers):
+        raise ValueError(f"{field} must contain unique positive integers.")
+    return identifiers
 
 
 def _string(payload: dict[str, object], field: str, *, maximum_length: int) -> str:
@@ -1536,6 +1705,38 @@ def _form_integer(form: FormData, field: str) -> int:
     return parsed
 
 
+def _form_optional_integer(form: FormData, field: str) -> int | None:
+    """Read an optional positive identifier from a native form."""
+
+    value = _form_optional(form, field)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=f"{field} must be an integer.") from error
+    if parsed <= 0:
+        raise HTTPException(status_code=422, detail=f"{field} must be positive.")
+    return parsed
+
+
+def _form_collection_target(form: FormData, field: str) -> tuple[int, int]:
+    """Decode the collection ID and optimistic revision selected by a native form."""
+
+    value = _form_required(form, field)
+    collection_value, separator, revision_value = value.partition(":")
+    if not separator:
+        raise HTTPException(status_code=422, detail=f"{field} is invalid.")
+    try:
+        collection_id = int(collection_value)
+        revision = int(revision_value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=f"{field} is invalid.") from error
+    if collection_id <= 0 or revision <= 0:
+        raise HTTPException(status_code=422, detail=f"{field} is invalid.")
+    return collection_id, revision
+
+
 def _require_confirmation(form: FormData) -> None:
     """Require the page's explicit destructive-action confirmation value."""
 
@@ -1567,7 +1768,41 @@ def _katalog_status(error: KatalogClientError) -> int:
 def _katalog_data_error(error: KatalogClientError, message: str) -> JSONResponse:
     """Keep Katalog transport detail private while retaining a useful status code."""
 
-    return JSONResponse({"error": message}, status_code=_katalog_status(error))
+    _LOGGER.warning(
+        "Katalog request failed: user_message=%s kind=%s status=%s request_id=%s detail=%s",
+        message,
+        error.kind.value,
+        error.status_code,
+        error.request_id,
+        str(error),
+    )
+    payload: dict[str, str] = {"error": message}
+    if error.request_id is not None:
+        payload["requestId"] = error.request_id
+    return JSONResponse(payload, status_code=_katalog_status(error))
+
+
+def _administration_operation_failure_message(
+    operation: object, error: KatalogClientError
+) -> str:
+    """Return a specific but safe failure message for a known admin operation."""
+
+    if operation == "match" and error.kind is KatalogClientErrorKind.CONFLICT:
+        return str(error)
+    if operation == "duplicate-resolve-batch" and error.kind is KatalogClientErrorKind.NOT_FOUND:
+        return (
+            "The running Katalog API does not support batch duplicate merging yet. "
+            "Restart Katalog, then try again."
+        )
+    messages: dict[str, str] = {
+        "match": "Metadata match could not be applied.",
+        "reject": "Metadata rejection could not be applied.",
+        "ignore": "Metadata ignore could not be applied.",
+        "refresh": "Metadata refresh could not be applied.",
+    }
+    if isinstance(operation, str):
+        return messages.get(operation, "Administration change could not be applied.")
+    return "Administration change could not be applied."
 
 
 async def _collection_mutation_error(
@@ -1678,6 +1913,9 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     )
     _kanvas_page("/administration/hierarchy", "Kanvas · Hierarchy repair")(
         administration_hierarchy_page
+    )
+    _kanvas_page("/administration/duplicates", "Kanvas · Duplicate resolution")(
+        administration_duplicates_page
     )
     _kanvas_page("/_design", "Kanvas · Design review")(design_page)
     _pages_registered = True
@@ -1802,17 +2040,30 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
     if isinstance(profile, RedirectResponse):
         return profile
     resume = _query_boolean(request, "resume", default=False)
+    skip_unavailable = _query_boolean(request, "skipUnavailable", default=False)
+    start_item_id = _query_positive_integer(request, "itemId")
     try:
-        catalogue = KanvasKatalogService(_settings, profile.user.id)
-        start_item_id = _query_positive_integer(request, "itemId")
-        if start_item_id is None and resume:
-            start_item_id = await catalogue.watch_order_resume_item_id(watch_order_id)
         session = await KanvasPlaybackService(
             _settings, profile.user.id
-        ).create_watch_order_playback_session(watch_order_id, start_item_id=start_item_id)
-    except KatalogClientError:
+        ).create_watch_order_playback_session(
+            watch_order_id,
+            start_item_id=start_item_id,
+            resume=resume,
+            skip_unavailable=skip_unavailable,
+        )
+    except KatalogClientError as error:
+        _log_watch_order_playback_failure(
+            error,
+            watch_order_id=watch_order_id,
+            user_id=profile.user.id,
+            start_item_id=start_item_id,
+            resume=resume,
+            skip_unavailable=skip_unavailable,
+        )
         with page_shell(_settings, "/collections", "Playback", profile):
-            feedback_state("Playback unavailable", "Could not start this watch order.")
+            feedback_state(
+                "Playback could not start", _watch_order_playback_error_detail(error)
+            )
         return
     current_item = session.current_item
     if current_item is None:
@@ -1821,6 +2072,40 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
         return
     return RedirectResponse(
         f"/item/{current_item.item_id}?playbackSession={session.id}", status_code=303
+    )
+
+
+def _watch_order_playback_error_detail(error: KatalogClientError) -> str:
+    """Preserve Katalog's actionable validation failures for watch-order playback."""
+
+    if error.kind is KatalogClientErrorKind.VALIDATION:
+        return str(error)
+    return "Could not start this watch order."
+
+
+def _log_watch_order_playback_failure(
+    error: KatalogClientError,
+    *,
+    watch_order_id: int,
+    user_id: int,
+    start_item_id: int | None,
+    resume: bool,
+    skip_unavailable: bool,
+) -> None:
+    """Record a handled watch-order launch failure with safe diagnostic context."""
+
+    _LOGGER.warning(
+        "Watch-order playback failed: watch_order_id=%s user_id=%s start_item_id=%s "
+        "resume=%s skip_unavailable=%s kind=%s status=%s request_id=%s detail=%s",
+        watch_order_id,
+        user_id,
+        start_item_id,
+        resume,
+        skip_unavailable,
+        error.kind.value,
+        error.status_code,
+        error.request_id,
+        str(error),
     )
 
 
@@ -1919,6 +2204,10 @@ async def administration_artwork_page(request: Request) -> Response | None:
 
 async def administration_hierarchy_page(request: Request) -> Response | None:
     return await _administration_page(request, "hierarchy")
+
+
+async def administration_duplicates_page(request: Request) -> Response | None:
+    return await _administration_page(request, "duplicates")
 
 
 async def design_page() -> None:

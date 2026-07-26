@@ -314,6 +314,8 @@ class Zaisan(Base):
     air_date: Mapped[date | None] = mapped_column(Date)
     season_number: Mapped[int | None] = mapped_column(Integer)
     episode_number: Mapped[int | None] = mapped_column(Integer)
+    episode_end_season_number: Mapped[int | None] = mapped_column(Integer)
+    episode_end_number: Mapped[int | None] = mapped_column(Integer)
     overview: Mapped[str | None] = mapped_column(Text)
     # Root tags describe a library as a whole.  These are deliberately separate
     # so an editor can add a tag to one title without altering every item in a
@@ -382,6 +384,18 @@ class Zaisan(Base):
         CheckConstraint("season_number IS NULL OR season_number >= 0", name="valid_season_number"),
         CheckConstraint(
             "episode_number IS NULL OR episode_number >= 0", name="valid_episode_number"
+        ),
+        CheckConstraint(
+            "episode_end_season_number IS NULL OR episode_end_season_number >= 0",
+            name="valid_episode_end_season_number",
+        ),
+        CheckConstraint(
+            "episode_end_number IS NULL OR episode_end_number >= 0",
+            name="valid_episode_end_number",
+        ),
+        CheckConstraint(
+            "(episode_end_season_number IS NULL) = (episode_end_number IS NULL)",
+            name="complete_episode_end_identifier",
         ),
         Index("ix_library_item_root_parent", "library_root_id", "parent_id"),
         Index("ix_library_item_parent", "parent_id"),
@@ -662,13 +676,26 @@ class Collection(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     overview: Mapped[str | None] = mapped_column(Text)
+    artwork_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("library_item.id", ondelete="SET NULL")
+    )
+    default_watch_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("watch_order.id", ondelete="SET NULL", use_alter=True)
+    )
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     memberships: Mapped[list[CollectionKin]] = orm_relationship(
         back_populates="collection", cascade="all, delete-orphan", passive_deletes=True
     )
     watch_orders: Mapped[list[Keiro]] = orm_relationship(
-        back_populates="collection", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="collection",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        foreign_keys="Keiro.collection_id",
+    )
+    artwork_item: Mapped[Zaisan | None] = orm_relationship(foreign_keys=[artwork_item_id])
+    default_watch_order: Mapped[Keiro | None] = orm_relationship(
+        foreign_keys=[default_watch_order_id], post_update=True
     )
 
     __table_args__ = (
@@ -715,7 +742,9 @@ class Keiro(Base):
     )
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
-    collection: Mapped[Collection] = orm_relationship(back_populates="watch_orders")
+    collection: Mapped[Collection] = orm_relationship(
+        back_populates="watch_orders", foreign_keys=[collection_id]
+    )
     entries: Mapped[list[KeiroEntry]] = orm_relationship(
         back_populates="watch_order", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -821,6 +850,9 @@ class PlaybackSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    skipped_unavailable_titles: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
 
     user: Mapped[User] = orm_relationship(back_populates="playback_sessions")
     context_item: Mapped[Zaisan | None] = orm_relationship(foreign_keys=[context_item_id])

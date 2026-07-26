@@ -18,6 +18,8 @@ from kasana.katalog.models import (
     AvailabilityState,
     Kura,
     MediaFile,
+    MetadataBinding,
+    MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
 )
@@ -25,7 +27,9 @@ from kasana.katalog.parsing import (
     LibraryLayout,
     ParsedMediaKind,
     ParseFailure,
+    is_decade_directory,
     parse_episode_numbers,
+    parse_episode_range,
     parse_media_path,
     parse_season_number,
 )
@@ -381,6 +385,113 @@ def test_abbreviated_decade_directories_index_files_and_repair_legacy_grouping(
     assert database.run_transaction(item_details) == ("Cars", 2006)
 
 
+def test_scan_preserves_matched_movie_identity_when_local_filename_differs(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    film = movies / "2000s" / "Local File Title (2006).mkv"
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"video")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    stat_result = film.stat()
+
+    def create_matched_record(session: Session) -> int:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        item = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Canonical Provider Title",
+            release_year=2006,
+        )
+        attach_media_file(
+            session,
+            library_item_id=item.id,
+            absolute_path=film,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+            filesystem_device=stat_result.st_dev,
+            filesystem_inode=stat_result.st_ino,
+            container="matroska",
+        )
+        session.add(
+            MetadataBinding(
+                library_item_id=item.id,
+                provider="tmdb",
+                provider_id="42",
+                provider_media_kind=ZaisanKind.MOVIE,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        return item.id
+
+    item_id = database.run_transaction(create_matched_record)
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.unchanged == 1
+
+    def item_title(session: Session) -> tuple[int, str]:
+        media_file = session.scalar(select(MediaFile))
+        assert media_file is not None
+        return media_file.library_item_id, media_file.library_item.title
+
+    assert database.run_transaction(item_title) == (item_id, "Canonical Provider Title")
+
+
+def test_scan_preserves_matched_series_identity_when_an_episode_file_changes(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    shows = tmp_path / "TVShows"
+    episode_path = shows / "Local Folder Title" / "Season 1" / "S01E01.mkv"
+    episode_path.parent.mkdir(parents=True)
+    episode_path.write_bytes(b"first")
+    _register_root(database, shows, ZaisanKind.SERIES)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+    scanner = _run_scan(database, fake_client)
+
+    first_scan = scanner.scan()
+    assert first_scan.totals.added == 1
+
+    def match_series(session: Session) -> int:
+        series = session.scalar(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.SERIES))
+        assert series is not None
+        series.title = "Canonical Provider Title"
+        series.sort_title = "Canonical Provider Title"
+        session.add(
+            MetadataBinding(
+                library_item_id=series.id,
+                provider="tmdb",
+                provider_id="42",
+                provider_media_kind=ZaisanKind.SERIES,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        return series.id
+
+    series_id = database.run_transaction(match_series)
+    episode_path.write_bytes(b"changed")
+
+    changed_scan = scanner.scan()
+    assert changed_scan.totals.changed == 1
+
+    def series_details(session: Session) -> tuple[tuple[int, str], ...]:
+        return tuple(
+            (item.id, item.title)
+            for item in session.scalars(
+                select(Zaisan)
+                .where(Zaisan.item_kind == ZaisanKind.SERIES)
+                .order_by(Zaisan.id)
+            ).all()
+        )
+
+    assert database.run_transaction(series_details) == ((series_id, "Canonical Provider Title"),)
+
+
 def test_episode_parsing_uses_season_directory_context() -> None:
     assert parse_season_number("Season 02", allow_volume=False) == 2
     assert parse_season_number("Volume 02", allow_volume=False) is None
@@ -390,6 +501,16 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert parse_episode_numbers("Show [2x03]", season_from_directory=2) == (2, 3)
     assert parse_episode_numbers("Show (2X03)", season_from_directory=2) == (2, 3)
     assert parse_episode_numbers("Show E02", season_from_directory=None) is None
+    compact_range = parse_episode_range("Show S01E01E02", season_from_directory=1)
+    hyphenated_range = parse_episode_range("Show S01E01-E02", season_from_directory=1)
+    assert compact_range == hyphenated_range
+    assert compact_range is not None and compact_range.end is not None
+    assert (
+        compact_range.start.season_number,
+        compact_range.start.episode_number,
+        compact_range.end.season_number,
+        compact_range.end.episode_number,
+    ) == (1, 1, 1, 2)
 
     parsed = parse_media_path(
         Path("/library/TVShows"),
@@ -411,6 +532,42 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert alternate.episode_number == 3
     assert alternate.title == "The Test"
 
+    combined = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/Show S01E01-E02.mkv"),
+    )
+    assert not isinstance(combined, ParseFailure)
+    assert (
+        combined.season_number,
+        combined.episode_number,
+        combined.episode_end_season_number,
+        combined.episode_end_number,
+        combined.title,
+    ) == (1, 1, 1, 2, "S01E01-E02")
+
+    cross_season_combined = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/Show S01E10-S02E01.mkv"),
+    )
+    assert not isinstance(cross_season_combined, ParseFailure)
+    assert (
+        cross_season_combined.season_number,
+        cross_season_combined.episode_number,
+        cross_season_combined.episode_end_season_number,
+        cross_season_combined.episode_end_number,
+        cross_season_combined.title,
+    ) == (1, 10, 2, 1, "S01E10-S02E01")
+
+    backwards_combined = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/Show S01E02-E01.mkv"),
+    )
+    assert isinstance(backwards_combined, ParseFailure)
+    assert "must end after" in backwards_combined.message
+
     special = parse_media_path(
         Path("/library/TVShows"),
         LibraryLayout.TV_SHOWS,
@@ -428,6 +585,61 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert not isinstance(extra, ParseFailure)
     assert extra.kind is ParsedMediaKind.EXTRA
     assert extra.parent_series_title == "Show"
+
+    singular_extra = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/Extra/Behind the Scenes.mkv"),
+    )
+    assert not isinstance(singular_extra, ParseFailure)
+    assert singular_extra.kind is ParsedMediaKind.EXTRA
+    assert singular_extra.parent_series_title == "Show"
+
+
+def test_scanner_materialises_combined_episode_files_as_one_playable_entry(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    shows = tmp_path / "TVShows"
+    first_season = shows / "Example" / "Season 1"
+    first_season.mkdir(parents=True)
+    combined = first_season / "Example S01E10-S02E01.mkv"
+    combined.write_bytes(b"combined video")
+    _register_root(database, shows, ZaisanKind.SERIES)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 1
+
+    def combined_entry(session: Session) -> tuple[Zaisan, MediaFile]:
+        episode = session.scalar(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.EPISODE))
+        media_file = session.scalar(select(MediaFile))
+        assert episode is not None
+        assert media_file is not None
+        return episode, media_file
+
+    episode, media_file = database.run_transaction(combined_entry)
+    assert (
+        episode.season_number,
+        episode.episode_number,
+        episode.episode_end_season_number,
+        episode.episode_end_number,
+        episode.title,
+    ) == (1, 10, 2, 1, "S01E10-S02E01")
+    assert media_file.library_item_id == episode.id
+    assert len(database.run_transaction(lambda session: session.scalars(select(Zaisan)).all())) == 3
+
+
+@pytest.mark.parametrize(
+    ("directory_name", "expected"),
+    [
+        ("1990s", True),
+        ("1990's", True),
+        ("90's", True),
+        ("Movies", False),
+    ],
+)
+def test_decade_directory_recognition(directory_name: str, expected: bool) -> None:
+    assert is_decade_directory(directory_name) is expected
 
 
 def test_scanner_classifies_extras_and_season_zero_outside_series_episodes(

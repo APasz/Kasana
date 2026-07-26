@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.metadata.scoring import normalise_title
 from kasana.katalog.models import (
     AuditIssue,
     CollectionKin,
@@ -28,7 +29,9 @@ from kasana.katalog.models import (
     MediaFile,
     MetadataBinding,
     MetadataCandidate,
+    MetadataCandidateStatus,
     MetadataField,
+    MetadataMatchStatus,
     PlaybackSession,
     PlaybackState,
     Zaisan,
@@ -128,6 +131,26 @@ class HierarchyRepairResult(BaseModel):
     plan: HierarchyRepairPlan
 
 
+class DuplicateResolutionCandidate(BaseModel):
+    """One provably duplicate media-less movie and its file-backed replacement."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    source_item_id: int = Field(gt=0, alias="sourceItemId")
+    source_title: str = Field(min_length=1, max_length=1_000, alias="sourceTitle")
+    source_year: int | None = Field(default=None, ge=1, le=9999, alias="sourceYear")
+    target_item_id: int = Field(gt=0, alias="targetItemId")
+    target_title: str = Field(min_length=1, max_length=1_000, alias="targetTitle")
+    target_year: int | None = Field(default=None, ge=1, le=9999, alias="targetYear")
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500, alias="providerId")
+    impact: RepairImpact
+
+
+class DuplicateResolutionError(ValueError):
+    """A requested duplicate resolution is no longer safe to apply."""
+
+
 @dataclass(frozen=True)
 class HierarchyRepairFilters:
     root_id: int | None = None
@@ -136,6 +159,135 @@ class HierarchyRepairFilters:
 
 
 _DEFAULT_REPAIR_FILTERS = HierarchyRepairFilters()
+
+
+def _hierarchy_title_key(kind: ZaisanKind, title: str) -> tuple[ZaisanKind, str]:
+    identity = _series_title_identity(title) if kind is ZaisanKind.SERIES else title.casefold()
+    return kind, identity
+
+
+def _series_title_identity(title: str) -> str:
+    """Compare local folder aliases with canonical series titles without punctuation or ``The``."""
+
+    return "".join(normalise_title(title).split()).removeprefix("the")
+
+
+@dataclass(frozen=True)
+class _HierarchyIndex:
+    """Constant-time hierarchy lookups used while planning one library root."""
+
+    items_by_id: dict[int, Zaisan]
+    children_by_parent: dict[int, tuple[Zaisan, ...]]
+    top_level_by_identity: dict[tuple[ZaisanKind, str], tuple[Zaisan, ...]]
+    seasons_by_series_and_number: dict[tuple[int, int], tuple[Zaisan, ...]]
+    episodes_by_identity: dict[tuple[str, int, int], tuple[Zaisan, ...]]
+    specials_by_identity: dict[tuple[str, str], tuple[Zaisan, ...]]
+
+    @classmethod
+    def from_items(cls, items: Sequence[Zaisan]) -> _HierarchyIndex:
+        items_by_id = {item.id: item for item in items}
+        children: defaultdict[int, list[Zaisan]] = defaultdict(list)
+        top_level: defaultdict[tuple[ZaisanKind, str], list[Zaisan]] = defaultdict(list)
+        seasons: defaultdict[tuple[int, int], list[Zaisan]] = defaultdict(list)
+        episodes: defaultdict[tuple[str, int, int], list[Zaisan]] = defaultdict(list)
+        specials: defaultdict[tuple[str, str], list[Zaisan]] = defaultdict(list)
+        for item in items:
+            if item.parent_id is None:
+                top_level[(_hierarchy_title_key(item.item_kind, item.sort_title))].append(item)
+            else:
+                children[item.parent_id].append(item)
+            if (
+                item.item_kind is ZaisanKind.SEASON
+                and item.parent_id is not None
+                and item.season_number is not None
+            ):
+                seasons[(item.parent_id, item.season_number)].append(item)
+        for item in items:
+            parent = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+            if (
+                item.item_kind is ZaisanKind.EPISODE
+                and item.season_number is not None
+                and item.episode_number is not None
+                and parent is not None
+            ):
+                series = (
+                    items_by_id.get(parent.parent_id) if parent.parent_id is not None else None
+                )
+                if series is not None and series.item_kind is ZaisanKind.SERIES:
+                    episodes[
+                        (
+                            _series_title_identity(series.sort_title),
+                            item.season_number,
+                            item.episode_number,
+                        )
+                    ].append(item)
+            if (
+                item.item_kind is ZaisanKind.SPECIAL
+                and parent is not None
+                and parent.item_kind is ZaisanKind.SERIES
+            ):
+                specials[
+                    (_series_title_identity(parent.sort_title), item.title.casefold())
+                ].append(item)
+        return cls(
+            items_by_id=items_by_id,
+            children_by_parent={
+                parent_id: tuple(entries) for parent_id, entries in children.items()
+            },
+            top_level_by_identity={
+                identity: tuple(entries) for identity, entries in top_level.items()
+            },
+            seasons_by_series_and_number={
+                identity: tuple(entries) for identity, entries in seasons.items()
+            },
+            episodes_by_identity={
+                identity: tuple(entries) for identity, entries in episodes.items()
+            },
+            specials_by_identity={
+                identity: tuple(entries) for identity, entries in specials.items()
+            },
+        )
+
+    def top_level_item(
+        self, kind: ZaisanKind, title: str, *, exclude_id: int | None = None
+    ) -> Zaisan | None:
+        return next(
+            (
+                item
+                for item in self.top_level_by_identity.get(_hierarchy_title_key(kind, title), ())
+                if item.id != exclude_id
+            ),
+            None,
+        )
+
+    def season_item(self, series_id: int, number: int) -> Zaisan | None:
+        return next(iter(self.seasons_by_series_and_number.get((series_id, number), ())), None)
+
+    def episode_item(
+        self, series_title: str, season_number: int, episode_number: int, *, exclude_id: int
+    ) -> Zaisan | None:
+        return next(
+            (
+                item
+                for item in self.episodes_by_identity.get(
+                    (_series_title_identity(series_title), season_number, episode_number), ()
+                )
+                if item.id != exclude_id
+            ),
+            None,
+        )
+
+    def special_item(self, series_title: str, title: str, *, exclude_id: int) -> Zaisan | None:
+        return next(
+            (
+                item
+                for item in self.specials_by_identity.get(
+                    (_series_title_identity(series_title), title.casefold()), ()
+                )
+                if item.id != exclude_id
+            ),
+            None,
+        )
 
 
 class HierarchyRepairService:
@@ -184,11 +336,278 @@ class HierarchyRepairService:
         return self._database.run_transaction(operation)
 
 
+class DuplicateResolutionService:
+    """Resolves metadata-proven media-less duplicate records and series hierarchies."""
+
+    def __init__(self, database: KatalogDatabase) -> None:
+        self._database = database
+
+    def preview(self) -> tuple[DuplicateResolutionCandidate, ...]:
+        return self._database.run_transaction(_duplicate_resolution_candidates)
+
+    def apply(self, *, source_item_id: int, target_item_id: int, backup_path: Path) -> None:
+        self.apply_many(
+            resolutions=((source_item_id, target_item_id),),
+            backup_path=backup_path,
+        )
+
+    def apply_many(
+        self, *, resolutions: Sequence[tuple[int, int]], backup_path: Path
+    ) -> None:
+        if not backup_path.is_absolute():
+            msg = "Duplicate resolution requires an absolute SQLite backup path."
+            raise ValueError(msg)
+        if not backup_path.is_file():
+            msg = "Duplicate resolution requires a completed SQLite backup."
+            raise DuplicateResolutionError(msg)
+        if not resolutions:
+            msg = "Duplicate resolution requires at least one source and target pair."
+            raise ValueError(msg)
+        source_ids = tuple(source_item_id for source_item_id, _ in resolutions)
+        if len(set(source_ids)) != len(source_ids):
+            msg = "A duplicate source can appear only once in a batch."
+            raise ValueError(msg)
+
+        def resolve(session: Session) -> None:
+            candidates = _duplicate_resolution_candidates(session)
+            candidate_pairs = {
+                (candidate.source_item_id, candidate.target_item_id) for candidate in candidates
+            }
+            invalid_pairs = tuple(pair for pair in resolutions if pair not in candidate_pairs)
+            if invalid_pairs:
+                msg = "The selected duplicate is no longer an unambiguous media-less orphan."
+                raise DuplicateResolutionError(msg)
+            for source_item_id, target_item_id in resolutions:
+                _merge_duplicate_item(session, source_item_id, target_item_id)
+
+        self._database.run_transaction(resolve)
+
+
 def repair_backup_path(database_path: Path, now: datetime | None = None) -> Path:
     """Return a sibling backup location whose name identifies one repair attempt."""
 
     timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
     return database_path.with_name(f"{database_path.name}.hierarchy-repair-{timestamp}.bak")
+
+
+def duplicate_resolution_backup_path(
+    database_path: Path, now: datetime | None = None
+) -> Path:
+    """Return the backup path created before deleting a duplicate catalogue record."""
+
+    timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+    return database_path.with_name(f"{database_path.name}.duplicate-resolution-{timestamp}.bak")
+
+
+def _duplicate_resolution_candidates(
+    session: Session,
+) -> tuple[DuplicateResolutionCandidate, ...]:
+    items = tuple(session.scalars(select(Zaisan)).all())
+    top_level_items = tuple(
+        session.scalars(
+            select(Zaisan).where(
+                Zaisan.item_kind.in_((ZaisanKind.MOVIE, ZaisanKind.SERIES)),
+                Zaisan.parent_id.is_(None),
+            )
+        ).all()
+    )
+    files_by_item = _files_by_item(tuple(session.scalars(select(MediaFile)).all()))
+    children_by_parent = _children_by_parent(items)
+    candidates: list[DuplicateResolutionCandidate] = []
+    for source in top_level_items:
+        source_item_ids = _subtree_item_ids(source.id, children_by_parent)
+        if _subtree_has_files(source_item_ids, files_by_item):
+            continue
+        source_identifiers = {
+            (binding.provider, binding.provider_id)
+            for binding in source.metadata_bindings
+            if binding.status is MetadataMatchStatus.MATCHED
+        }
+        if not source_identifiers:
+            continue
+        targets = tuple(
+            target
+            for target in top_level_items
+            if target.id != source.id
+            and target.library_root_id == source.library_root_id
+            and target.item_kind is source.item_kind
+            and _subtree_has_files(_subtree_item_ids(target.id, children_by_parent), files_by_item)
+            and _shares_metadata_identifier(target, source_identifiers)
+            and _metadata_bindings_are_compatible(source, target)
+            and _matching_hierarchy_pairs(source, target, children_by_parent) is not None
+        )
+        if len(targets) != 1:
+            continue
+        target = targets[0]
+        matching_identifiers = _matching_metadata_identifiers(target, source_identifiers)
+        provider, provider_id = next(iter(sorted(matching_identifiers)))
+        candidates.append(
+            DuplicateResolutionCandidate(
+                sourceItemId=source.id,
+                sourceTitle=source.title,
+                sourceYear=source.release_year,
+                targetItemId=target.id,
+                targetTitle=target.title,
+                targetYear=target.release_year,
+                provider=provider,
+                providerId=provider_id,
+                impact=_repair_impact(session, source_item_ids),
+            )
+        )
+    return tuple(sorted(candidates, key=lambda candidate: candidate.source_item_id))
+
+
+def _children_by_parent(items: Sequence[Zaisan]) -> dict[int, tuple[Zaisan, ...]]:
+    """Index catalogue children once while evaluating duplicate hierarchy candidates."""
+
+    children: defaultdict[int, list[Zaisan]] = defaultdict(list)
+    for item in items:
+        if item.parent_id is not None:
+            children[item.parent_id].append(item)
+    return {
+        parent_id: tuple(sorted(entries, key=lambda entry: entry.id))
+        for parent_id, entries in children.items()
+    }
+
+
+def _subtree_item_ids(
+    item_id: int, children_by_parent: dict[int, tuple[Zaisan, ...]]
+) -> set[int]:
+    """Return one item's complete logical hierarchy, including the item itself."""
+
+    item_ids = {item_id}
+    pending = [item_id]
+    while pending:
+        parent_id = pending.pop()
+        for child in children_by_parent.get(parent_id, ()):
+            item_ids.add(child.id)
+            pending.append(child.id)
+    return item_ids
+
+
+def _subtree_has_files(
+    item_ids: set[int], files_by_item: dict[int, tuple[MediaFile, ...]]
+) -> bool:
+    return any(files_by_item.get(item_id) for item_id in item_ids)
+
+
+def _matching_hierarchy_pairs(
+    source: Zaisan,
+    target: Zaisan,
+    children_by_parent: dict[int, tuple[Zaisan, ...]],
+) -> tuple[tuple[Zaisan, Zaisan], ...] | None:
+    """Pair every source descendant with exactly one equivalent target descendant."""
+
+    if not _metadata_bindings_are_compatible(source, target):
+        return None
+    pairs: list[tuple[Zaisan, Zaisan]] = [(source, target)]
+    pending = [(source, target)]
+    while pending:
+        source_parent, target_parent = pending.pop()
+        target_children: defaultdict[tuple[object, ...], list[Zaisan]] = defaultdict(list)
+        for target_child in children_by_parent.get(target_parent.id, ()):
+            target_children[_hierarchy_child_key(target_child)].append(target_child)
+        for source_child in children_by_parent.get(source_parent.id, ()):
+            matching_children = target_children[_hierarchy_child_key(source_child)]
+            if len(matching_children) != 1:
+                return None
+            target_child = matching_children[0]
+            if not _metadata_bindings_are_compatible(source_child, target_child):
+                return None
+            pairs.append((source_child, target_child))
+            pending.append((source_child, target_child))
+    return tuple(pairs)
+
+
+def _hierarchy_child_key(item: Zaisan) -> tuple[object, ...]:
+    """Return the stable local identity used to pair duplicate hierarchy children."""
+
+    if item.item_kind is ZaisanKind.SEASON:
+        return (item.item_kind, item.season_number)
+    if item.item_kind in {ZaisanKind.EPISODE, ZaisanKind.SPECIAL}:
+        return (
+            item.item_kind,
+            item.season_number,
+            item.episode_number,
+            item.episode_end_season_number,
+            item.episode_end_number,
+        )
+    return (item.item_kind, item.sort_title.casefold())
+
+
+def _shares_metadata_identifier(
+    item: Zaisan, identifiers: set[tuple[str, str]]
+) -> bool:
+    return bool(_matching_metadata_identifiers(item, identifiers))
+
+
+def _matching_metadata_identifiers(
+    item: Zaisan, identifiers: set[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    matching = {
+        (binding.provider, binding.provider_id)
+        for binding in item.metadata_bindings
+        if (binding.provider, binding.provider_id) in identifiers
+    }
+    matching.update(
+        (candidate.provider, candidate.provider_id)
+        for candidate in item.metadata_candidates
+        if candidate.status is MetadataCandidateStatus.SUGGESTED
+        and (candidate.provider, candidate.provider_id) in identifiers
+    )
+    return matching
+
+
+def _metadata_bindings_are_compatible(source: Zaisan, target: Zaisan) -> bool:
+    """Reject a merge that would discard either item's provider identity."""
+
+    target_by_provider = {
+        binding.provider: binding.provider_id for binding in target.metadata_bindings
+    }
+    return all(
+        target_by_provider.get(binding.provider) in {None, binding.provider_id}
+        for binding in source.metadata_bindings
+    )
+
+
+def _merge_duplicate_item(session: Session, source_item_id: int, target_item_id: int) -> None:
+    source = _require_item(session, source_item_id)
+    target = _require_item(session, target_item_id)
+    children_by_parent = _children_by_parent(tuple(session.scalars(select(Zaisan)).all()))
+    pairs = _matching_hierarchy_pairs(source, target, children_by_parent)
+    if pairs is None:
+        msg = "The selected duplicate hierarchy is no longer structurally compatible."
+        raise DuplicateResolutionError(msg)
+    for source_child, target_child in reversed(pairs[1:]):
+        _merge_items(session, source_child.id, target_child.id)
+    source_identifiers = {
+        (binding.provider, binding.provider_id) for binding in source.metadata_bindings
+    }
+    source_title = source.title
+    source_sort_title = source.sort_title
+    source_release_year = source.release_year
+    source_release_date = source.release_date
+    source_overview = source.overview
+    source_tags = set(source.tags)
+    source_artwork = dict(source.selected_artwork_ids)
+    _merge_items(session, source_item_id, target_item_id)
+    target.title = source_title
+    target.sort_title = source_sort_title
+    if source_release_year is not None:
+        target.release_year = source_release_year
+    if source_release_date is not None:
+        target.release_date = source_release_date
+    if source_overview is not None:
+        target.overview = source_overview
+    target.tags = sorted(set(target.tags) | source_tags)
+    target.selected_artwork_ids = {
+        **source_artwork,
+        **target.selected_artwork_ids,
+    }
+    for candidate in target.metadata_candidates:
+        if (candidate.provider, candidate.provider_id) in source_identifiers:
+            candidate.status = MetadataCandidateStatus.ACCEPTED
+    session.flush()
 
 
 def _build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyRepairPlan:
@@ -206,7 +625,7 @@ def _build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyR
             ).all()
         )
         files_by_item = _files_by_item(root_files)
-        items_by_id = {item.id: item for item in root_items}
+        hierarchy = _HierarchyIndex.from_items(root_items)
         selected_items = (
             tuple(item for item in root_items if item.id == filters.item_id)
             if filters.item_id is not None
@@ -222,7 +641,7 @@ def _build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyR
                 layout,
                 item,
                 files_by_item,
-                items_by_id,
+                hierarchy,
                 creation_keys,
             )
             actions.extend(item_actions)
@@ -276,7 +695,7 @@ def _plan_item(
     layout: LibraryLayout,
     item: Zaisan,
     files_by_item: dict[int, tuple[MediaFile, ...]],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     files = files_by_item.get(item.id, ())
@@ -284,17 +703,17 @@ def _plan_item(
     actions: list[RepairAction] = []
     reviews: list[RepairManualReview] = []
     if _is_container_movie(item, files):
-        movie_actions, movie_reviews = _plan_container_movie(item, parsed, items_by_id)
+        movie_actions, movie_reviews = _plan_container_movie(item, parsed, hierarchy)
         actions.extend(movie_actions)
         reviews.extend(movie_reviews)
-    parent = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+    parent = hierarchy.items_by_id.get(item.parent_id) if item.parent_id is not None else None
     if (
         item.item_kind is ZaisanKind.EPISODE
         and parent is not None
         and parent.item_kind is ZaisanKind.SEASON
         and (
             parent.parent_id is None
-            or (grandparent := items_by_id.get(parent.parent_id)) is None
+            or (grandparent := hierarchy.items_by_id.get(parent.parent_id)) is None
             or grandparent.item_kind is not ZaisanKind.SERIES
         )
     ):
@@ -302,23 +721,23 @@ def _plan_item(
         # the child separately would create a competing season before its real parent moves.
         return actions, reviews
     episode_actions, episode_reviews = _plan_episode_or_special(
-        root, item, parsed, items_by_id, creation_keys
+        root, item, parsed, hierarchy, creation_keys
     )
     if episode_actions:
         return actions + episode_actions, reviews + episode_reviews
     actions.extend(episode_actions)
     reviews.extend(episode_reviews)
     extra_actions, extra_reviews = _plan_top_level_extra(
-        root, item, parsed, items_by_id, creation_keys
+        root, item, parsed, hierarchy, creation_keys
     )
     actions.extend(extra_actions)
     reviews.extend(extra_reviews)
     season_actions, season_reviews = _plan_orphan_season(
-        root, item, files_by_item, items_by_id, creation_keys
+        root, item, files_by_item, hierarchy, creation_keys
     )
     actions.extend(season_actions)
     reviews.extend(season_reviews)
-    movie_actions, movie_reviews = _plan_episode_as_movie(item, parsed, items_by_id)
+    movie_actions, movie_reviews = _plan_episode_as_movie(item, parsed, hierarchy)
     actions.extend(movie_actions)
     reviews.extend(movie_reviews)
     return actions, reviews
@@ -327,7 +746,7 @@ def _plan_item(
 def _plan_container_movie(
     item: Zaisan,
     parsed: Sequence[ParsedMedia],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     movies = tuple(entry for entry in parsed if entry.kind is ParsedMediaKind.MOVIE)
     titles = {entry.title for entry in movies}
@@ -350,7 +769,7 @@ def _plan_container_movie(
                 reason="Container-like movie title is manually locked and will not be renamed.",
             )
         ]
-    target = _top_level_item(items_by_id.values(), ZaisanKind.MOVIE, title, exclude_id=item.id)
+    target = hierarchy.top_level_item(ZaisanKind.MOVIE, title, exclude_id=item.id)
     if target is not None:
         return _merge_actions(item, target)
     return [
@@ -367,7 +786,7 @@ def _plan_episode_or_special(
     root: Kura,
     item: Zaisan,
     parsed: Sequence[ParsedMedia],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     candidates = tuple(
@@ -394,8 +813,7 @@ def _plan_episode_or_special(
     if parsed_item.kind is ParsedMediaKind.EPISODE:
         assert parsed_item.season_number is not None
         assert parsed_item.episode_number is not None
-        existing = _episode_item(
-            items_by_id.values(),
+        existing = hierarchy.episode_item(
             parsed_item.series_title,
             parsed_item.season_number,
             parsed_item.episode_number,
@@ -411,8 +829,27 @@ def _plan_episode_or_special(
                     reason="Episode season or episode metadata is manually locked.",
                 )
             ]
+        parent = hierarchy.items_by_id.get(item.parent_id) if item.parent_id is not None else None
+        series = (
+            hierarchy.items_by_id.get(parent.parent_id)
+            if parent is not None and parent.parent_id is not None
+            else None
+        )
+        if (
+            item.item_kind is ZaisanKind.EPISODE
+            and item.season_number == parsed_item.season_number
+            and item.episode_number == parsed_item.episode_number
+            and parent is not None
+            and parent.item_kind is ZaisanKind.SEASON
+            and parent.season_number == parsed_item.season_number
+            and series is not None
+            and series.item_kind is ZaisanKind.SERIES
+            and _series_title_identity(series.sort_title)
+            == _series_title_identity(parsed_item.series_title)
+        ):
+            return [], []
         actions = _ensure_series_and_season_actions(
-            root.id, parsed_item.series_title, parsed_item.season_number, items_by_id, creation_keys
+            root.id, parsed_item.series_title, parsed_item.season_number, hierarchy, creation_keys
         )
         if item.item_kind is not ZaisanKind.EPISODE:
             actions.append(
@@ -436,12 +873,21 @@ def _plan_episode_or_special(
             )
         )
         return actions, []
-    existing_special = _special_item(
-        items_by_id.values(), parsed_item.series_title, parsed_item.title, item.id
+    existing_special = hierarchy.special_item(
+        parsed_item.series_title, parsed_item.title, exclude_id=item.id
     )
     if existing_special is not None:
         return _merge_actions(item, existing_special)
-    actions = _ensure_series_actions(root.id, parsed_item.series_title, items_by_id, creation_keys)
+    parent = hierarchy.items_by_id.get(item.parent_id) if item.parent_id is not None else None
+    if (
+        item.item_kind is ZaisanKind.SPECIAL
+        and parent is not None
+        and parent.item_kind is ZaisanKind.SERIES
+        and _series_title_identity(parent.sort_title)
+        == _series_title_identity(parsed_item.series_title)
+    ):
+        return [], []
+    actions = _ensure_series_actions(root.id, parsed_item.series_title, hierarchy, creation_keys)
     if item.item_kind is not ZaisanKind.SPECIAL:
         actions.append(
             RepairAction(
@@ -468,7 +914,7 @@ def _plan_top_level_extra(
     root: Kura,
     item: Zaisan,
     parsed: Sequence[ParsedMedia],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     if item.item_kind is not ZaisanKind.EXTRA or item.parent_id is not None:
@@ -485,7 +931,7 @@ def _plan_top_level_extra(
         ]
     movie_title, series_title = parents.pop()
     if movie_title is not None:
-        actions = _ensure_movie_actions(root.id, movie_title, items_by_id, creation_keys)
+        actions = _ensure_movie_actions(root.id, movie_title, hierarchy, creation_keys)
         actions.append(
             RepairAction(
                 kind=RepairActionKind.REPARENT,
@@ -497,7 +943,7 @@ def _plan_top_level_extra(
         )
         return actions, []
     assert series_title is not None
-    actions = _ensure_series_actions(root.id, series_title, items_by_id, creation_keys)
+    actions = _ensure_series_actions(root.id, series_title, hierarchy, creation_keys)
     actions.append(
         RepairAction(
             kind=RepairActionKind.REPARENT,
@@ -514,18 +960,17 @@ def _plan_orphan_season(
     root: Kura,
     item: Zaisan,
     files_by_item: dict[int, tuple[MediaFile, ...]],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     if item.item_kind is not ZaisanKind.SEASON:
         return [], []
-    parent = items_by_id.get(item.parent_id) if item.parent_id is not None else None
+    parent = hierarchy.items_by_id.get(item.parent_id) if item.parent_id is not None else None
     if parent is not None and parent.item_kind is ZaisanKind.SERIES:
         return [], []
     child_files = (
         media_file
-        for child in items_by_id.values()
-        if child.parent_id == item.id
+        for child in hierarchy.children_by_parent.get(item.id, ())
         for media_file in files_by_item.get(child.id, ())
     )
     parsed = _parsed_files(root, infer_library_layout(Path(root.path)), tuple(child_files))
@@ -541,7 +986,7 @@ def _plan_orphan_season(
         ]
     series_title = next(iter(series_titles))
     assert series_title is not None
-    actions = _ensure_series_actions(root.id, series_title, items_by_id, creation_keys)
+    actions = _ensure_series_actions(root.id, series_title, hierarchy, creation_keys)
     actions.append(
         RepairAction(
             kind=RepairActionKind.REPARENT,
@@ -557,7 +1002,7 @@ def _plan_orphan_season(
 def _plan_episode_as_movie(
     item: Zaisan,
     parsed: Sequence[ParsedMedia],
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     if item.item_kind is not ZaisanKind.EPISODE:
         return [], []
@@ -566,7 +1011,7 @@ def _plan_episode_as_movie(
     if len(titles) != 1:
         return [], []
     title = movies[0].title
-    target = _top_level_item(items_by_id.values(), ZaisanKind.MOVIE, title, exclude_id=item.id)
+    target = hierarchy.top_level_item(ZaisanKind.MOVIE, title, exclude_id=item.id)
     if target is not None:
         return _merge_actions(item, target)
     if _title_locked(item):
@@ -596,10 +1041,10 @@ def _plan_episode_as_movie(
 def _ensure_movie_actions(
     root_id: int,
     title: str,
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
-    if _top_level_item(items_by_id.values(), ZaisanKind.MOVIE, title) is not None:
+    if hierarchy.top_level_item(ZaisanKind.MOVIE, title) is not None:
         return []
     key = (ZaisanKind.MOVIE, title.casefold(), None)
     if key in creation_keys:
@@ -619,10 +1064,10 @@ def _ensure_movie_actions(
 def _ensure_series_actions(
     root_id: int,
     title: str,
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
-    if _top_level_item(items_by_id.values(), ZaisanKind.SERIES, title) is not None:
+    if hierarchy.top_level_item(ZaisanKind.SERIES, title) is not None:
         return []
     key = (ZaisanKind.SERIES, title.casefold(), None)
     if key in creation_keys:
@@ -643,13 +1088,13 @@ def _ensure_series_and_season_actions(
     root_id: int,
     series_title: str,
     season_number: int,
-    items_by_id: dict[int, Zaisan],
+    hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
-    actions = _ensure_series_actions(root_id, series_title, items_by_id, creation_keys)
-    existing_series = _top_level_item(items_by_id.values(), ZaisanKind.SERIES, series_title)
+    actions = _ensure_series_actions(root_id, series_title, hierarchy, creation_keys)
+    existing_series = hierarchy.top_level_item(ZaisanKind.SERIES, series_title)
     existing_season = (
-        _season_item(items_by_id.values(), existing_series.id, season_number)
+        hierarchy.season_item(existing_series.id, season_number)
         if existing_series is not None
         else None
     )
@@ -785,54 +1230,6 @@ def _season_item(items: Iterable[Zaisan], series_id: int, number: int) -> Zaisan
             if item.item_kind is ZaisanKind.SEASON
             and item.parent_id == series_id
             and item.season_number == number
-        ),
-        None,
-    )
-
-
-def _episode_item(
-    items: Iterable[Zaisan],
-    series_title: str,
-    season_number: int,
-    episode_number: int,
-    exclude_id: int,
-) -> Zaisan | None:
-    by_id = {item.id: item for item in items}
-    for item in by_id.values():
-        parent = by_id.get(item.parent_id) if item.parent_id is not None else None
-        series = (
-            by_id.get(parent.parent_id)
-            if parent is not None and parent.parent_id is not None
-            else None
-        )
-        if (
-            item.id != exclude_id
-            and item.item_kind is ZaisanKind.EPISODE
-            and item.season_number == season_number
-            and item.episode_number == episode_number
-            and parent is not None
-            and series is not None
-            and series.sort_title.casefold() == series_title.casefold()
-        ):
-            return item
-    return None
-
-
-def _special_item(
-    items: Iterable[Zaisan], series_title: str, title: str, exclude_id: int
-) -> Zaisan | None:
-    by_id = {item.id: item for item in items}
-    return next(
-        (
-            item
-            for item in by_id.values()
-            if item.id != exclude_id
-            and item.item_kind is ZaisanKind.SPECIAL
-            and item.title.casefold() == title.casefold()
-            and item.parent_id is not None
-            and (parent := by_id.get(item.parent_id)) is not None
-            and parent.item_kind is ZaisanKind.SERIES
-            and parent.sort_title.casefold() == series_title.casefold()
         ),
         None,
     )

@@ -243,6 +243,55 @@ async def test_exact_match_auto_accepts_and_applies_unlocked_metadata(
     assert binding.provider_id == "11"
 
 
+async def test_auto_match_retains_a_suggested_candidate_when_metadata_would_collide(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create(session: Session) -> int:
+        root = create_library_root(
+            session,
+            path=tmp_path / "Movies",
+            expected_media_kind=ZaisanKind.MOVIE,
+        )
+        create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Everything Everywhere All at Once",
+            release_year=2022,
+        )
+        return create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Everything, Everywhere, All At Once",
+            release_year=2022,
+        ).id
+
+    item_id = database.run_transaction(create)
+    result = _search_result("12", "Everything Everywhere All at Once", year=2022)
+    provider = _FakeProvider(
+        (result,), {"12": _movie_details("12", "Everything Everywhere All at Once", year=2022)}
+    )
+
+    outcome = await _workflow(database, tmp_path / "cache").search_item(item_id, (provider,))
+
+    assert outcome.auto_matched_provider_id is None
+    assert len(outcome.candidates) == 1
+    assert outcome.candidates[0].status is MetadataCandidateStatus.SUGGESTED
+
+    def load(session: Session) -> tuple[Zaisan, MetadataBinding | None]:
+        item = session.get(Zaisan, item_id)
+        assert item is not None
+        binding = session.scalar(
+            select(MetadataBinding).where(MetadataBinding.library_item_id == item_id)
+        )
+        return item, binding
+
+    item, binding = database.run_transaction(load)
+    assert item.title == "Everything, Everywhere, All At Once"
+    assert binding is None
+
+
 async def test_remake_ambiguity_and_title_only_results_require_review(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:

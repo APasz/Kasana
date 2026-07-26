@@ -240,6 +240,7 @@
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
+    if (poster.header != null && typeof poster.header !== 'string') return null;
     if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
@@ -249,6 +250,7 @@
       href: poster.href,
       posterUrl: poster.posterUrl ?? null,
       placeholder,
+      header: poster.header?.trim() || null,
       subtitle: poster.subtitle ?? null,
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
@@ -269,9 +271,10 @@
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
       : `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
     const watched = poster.state === 'watched' ? '<span class="k-poster__watched">Watched</span>' : '';
+    const header = poster.header ? `<span class="k-poster__header">${escapeHtml(poster.header)}</span>` : '';
     const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
-      <span class="k-poster__art">${artwork}${progress}${watched}</span>
+      <span class="k-poster__art">${artwork}${header}${progress}${watched}</span>
       <span class="k-poster__meta"><span class="k-poster__title">${escapeHtml(poster.title)}</span>${subtitle}</span>
     </a>`;
   };
@@ -343,7 +346,7 @@
     return removed.length;
   };
 
-  const LIBRARY_GRID_SCHEMA_VERSION = 4;
+  const LIBRARY_GRID_SCHEMA_VERSION = 5;
   const LIBRARY_RESPONSE_SCHEMA_VERSION = 1;
   const libraryAssetVersion = () => {
     const scripts = Array.from(document.scripts);
@@ -382,7 +385,7 @@
 
   class KanvasPosterGrid extends HTMLElement {
     static get observedAttributes() {
-      return ['source'];
+      return ['source', 'catalogue-revision'];
     }
 
     constructor() {
@@ -411,7 +414,7 @@
     }
 
     attributeChangedCallback(name, previous, current) {
-      if (name === 'source' && this.isConnected && previous !== current) this.initialise();
+      if ((name === 'source' || name === 'catalogue-revision') && this.isConnected && previous !== current) this.initialise();
     }
 
     disconnectedCallback() {
@@ -458,7 +461,12 @@
 
     buildStateKey(source) {
       const user = this.getAttribute('state-user') || 'anonymous';
-      return `kanvas:grid:v${LIBRARY_GRID_SCHEMA_VERSION}:asset=${libraryAssetVersion()}:user=${encodeURIComponent(user)}:filters=${encodeURIComponent(normalisedGridSource(source))}`;
+      const catalogueRevision = this.catalogueRevision();
+      return `kanvas:grid:v${LIBRARY_GRID_SCHEMA_VERSION}:asset=${libraryAssetVersion()}:catalogue=${encodeURIComponent(catalogueRevision)}:user=${encodeURIComponent(user)}:filters=${encodeURIComponent(normalisedGridSource(source))}`;
+    }
+
+    catalogueRevision() {
+      return this.getAttribute('catalogue-revision') || 'unknown';
     }
 
     async loadNext({retry = false} = {}) {
@@ -638,6 +646,7 @@
       sessionStorage.setItem(this.stateKey, JSON.stringify({
         schemaVersion: LIBRARY_GRID_SCHEMA_VERSION,
         asset: libraryAssetVersion(),
+        catalogueRevision: this.catalogueRevision(),
         filters: normalisedGridSource(this.getAttribute('source') || ''),
         user: this.getAttribute('state-user') || 'anonymous',
         cursor: this.cursor,
@@ -658,6 +667,7 @@
         if (
           state.schemaVersion !== LIBRARY_GRID_SCHEMA_VERSION ||
           state.asset !== libraryAssetVersion() ||
+          state.catalogueRevision !== this.catalogueRevision() ||
           state.filters !== expectedFilters ||
           state.user !== (this.getAttribute('state-user') || 'anonymous') ||
           !Array.isArray(state.posters) ||
@@ -1014,7 +1024,18 @@
     if (typeof row.kind !== 'string' || typeof row.available !== 'boolean') return null;
     if (row.year != null && (!Number.isInteger(row.year) || row.year < 1)) return null;
     if (row.posterUrl != null && !localArtworkUrl(row.posterUrl)) return null;
-    return row;
+    const fallbackPoster = {
+      id: row.itemId,
+      title: row.title,
+      href: `/item/${row.itemId}`,
+      posterUrl: row.posterUrl ?? null,
+      placeholder: {lines: [row.title], footer: row.kind},
+      subtitle: [row.year, row.kind].filter(Boolean).join(' · ') || null,
+      state: row.available ? (row.posterUrl ? 'normal' : 'missing_artwork') : 'unavailable',
+      available: row.available
+    };
+    const poster = normalisePoster(row.poster) || normalisePoster(fallbackPoster);
+    return poster ? {...row, poster} : null;
   };
 
   class KanvasWatchOrderList extends HTMLElement {
@@ -1176,6 +1197,10 @@
     async playFromHere(row) {
       const action = this.getAttribute('launch-action');
       if (!action || !this.status) return;
+      if (row.querySelector('.k-watch-row__warning')) {
+        this.status.textContent = 'This entry is unavailable. Use Play available entries to skip it.';
+        return;
+      }
       this.status.textContent = 'Opening player…';
       try {
         const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({itemId: Number(row.dataset.itemId)})});
@@ -1227,9 +1252,454 @@
     }
   }
 
+  const normaliseWatchSource = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const source = value;
+    if (!Number.isSafeInteger(source.id) || source.id <= 0 || typeof source.title !== 'string' || !source.title) return null;
+    if (typeof source.kind !== 'string' || !Number.isInteger(source.entryCount) || source.entryCount < 0 || typeof source.addable !== 'boolean' || typeof source.available !== 'boolean') return null;
+    if (source.year != null && (!Number.isInteger(source.year) || source.year < 1)) return null;
+    if (source.seriesTitle != null && typeof source.seriesTitle !== 'string') return null;
+    if (source.seasonNumber != null && (!Number.isInteger(source.seasonNumber) || source.seasonNumber < 0)) return null;
+    const poster = normalisePoster(source.poster);
+    return poster ? {...source, poster} : null;
+  };
+
+  class KanvasWatchOrderWorkspace extends HTMLElement {
+    constructor() {
+      super();
+      this.revision = Number(this.getAttribute('revision')) || 0;
+      this.entries = [];
+      this.sources = [];
+      this.selectedSourceIds = new Set();
+      this.status = null;
+      this.order = null;
+      this.pool = null;
+      this.pendingIntent = null;
+      this.activeSlot = null;
+      this.isDragging = false;
+      this.dragScrollDirection = 0;
+      this.dragScrollFrame = null;
+      this.windowWheelListener = (event) => this.onOrderWheel(event);
+    }
+
+    connectedCallback() {
+      this.innerHTML = '<section class="k-watch-workspace" aria-label="Watch-order editor"><div class="k-watch-list-status" aria-live="polite"></div><section><div class="k-watch-workspace__heading"><h2 class="k-section-title">Play order</h2><span class="k-watch-workspace__hint">The leftmost poster plays first. Drag posters onto the spaces between them; shows and seasons stay together.</span></div><div class="k-watch-workspace__dropzone" data-order-dropzone><div class="k-watch-order-list k-watch-workspace__order" role="list" aria-label="Play order, leftmost plays first"></div></div></section><section class="k-watch-workspace__sources"><div class="k-watch-workspace__heading"><h2 class="k-section-title">Collection items</h2><label class="k-control-shell k-input-shell"><span class="k-sr-only">Filter collection items</span><input class="k-input" type="search" placeholder="Filter movies, shows, seasons, episodes" aria-label="Filter collection items" data-source-filter></label></div><div class="k-watch-workspace__pool" role="list" aria-label="Available collection items"></div></section><div class="k-conflict-state" hidden aria-live="assertive"></div></section>';
+      this.status = this.querySelector('.k-watch-list-status');
+      this.order = this.querySelector('.k-watch-workspace__order');
+      this.pool = this.querySelector('.k-watch-workspace__pool');
+      this.order?.addEventListener('click', (event) => this.onOrderClick(event));
+      this.order?.addEventListener('keydown', (event) => this.onOrderKeydown(event));
+      this.order?.addEventListener('dragstart', (event) => this.onOrderDragStart(event));
+      this.order?.addEventListener('dragend', () => this.clearDragState());
+      const dropzone = this.querySelector('[data-order-dropzone]');
+      dropzone?.addEventListener('dragover', (event) => this.onOrderDragOver(event));
+      dropzone?.addEventListener('dragleave', (event) => this.onOrderDragLeave(event));
+      dropzone?.addEventListener('drop', (event) => this.onOrderDrop(event));
+      window.addEventListener('wheel', this.windowWheelListener, {capture: true, passive: false});
+      this.pool?.addEventListener('click', (event) => this.onPoolClick(event));
+      this.pool?.addEventListener('keydown', (event) => this.onPoolKeydown(event));
+      this.pool?.addEventListener('dragstart', (event) => this.onPoolDragStart(event));
+      this.pool?.addEventListener('dragend', () => this.clearDragState());
+      this.querySelector('[data-source-filter]')?.addEventListener('input', () => this.renderSources());
+      this.load();
+    }
+
+    disconnectedCallback() {
+      window.removeEventListener('wheel', this.windowWheelListener, {capture: true});
+    }
+
+    async load() {
+      const source = this.getAttribute('source');
+      if (!source || !this.status) return;
+      this.status.textContent = 'Loading watch-order workspace…';
+      try {
+        const response = await fetch(source, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        if (!response.ok) throw new Error('Workspace request failed');
+        const payload = await response.json();
+        const entries = Array.isArray(payload.entries) ? payload.entries.map(normaliseWatchRow).filter(Boolean) : [];
+        const sources = Array.isArray(payload.sources) ? payload.sources.map(normaliseWatchSource).filter(Boolean) : [];
+        if (!Number.isInteger(payload.revision)) throw new Error('Invalid workspace revision');
+        this.revision = payload.revision;
+        this.entries = entries;
+        this.sources = sources;
+        this.selectedSourceIds = new Set(
+          [...this.selectedSourceIds].filter((id) => sources.some((source) => source.id === id))
+        );
+        this.renderOrder();
+        this.renderSources();
+        this.status.textContent = entries.length ? '' : 'Drop a collection item here to start this order.';
+      } catch (_) {
+        this.status.textContent = 'Could not load the watch-order workspace.';
+      }
+    }
+
+    renderOrder() {
+      if (!this.order) return;
+      const previousPositions = new Map(
+        Array.from(this.order.querySelectorAll('[data-entry-id]')).map((element) => [
+          element.dataset.entryId,
+          element.getBoundingClientRect(),
+        ])
+      );
+      this.order.innerHTML = this.entries.length
+        ? this.entries.map((row, index) => `${this.insertionSlot(this.entries[index]?.id ?? null)}${this.rowMarkup(row)}`).join('') + this.insertionSlot(null)
+        : '';
+      this.animateOrderLayout(previousPositions);
+    }
+
+    renderSources() {
+      if (!this.pool) return;
+      const input = this.querySelector('[data-source-filter]');
+      const query = input instanceof HTMLInputElement ? input.value.trim().toLocaleLowerCase() : '';
+      const matches = this.sources.filter((source) => this.sourceText(source).includes(query));
+      this.pool.innerHTML = matches.map((source) => this.sourceMarkup(source)).join('') || '<p class="k-watch-workspace__empty">No collection items match this filter.</p>';
+    }
+
+    sourceText(source) {
+      return [source.title, source.kind, source.seriesTitle || '', source.seasonNumber == null ? '' : `season ${source.seasonNumber}`].join(' ').toLocaleLowerCase();
+    }
+
+    rowMarkup(row) {
+      const unavailable = row.available ? '' : '<span class="k-watch-order-poster__warning">Unavailable</span>';
+      return `<article class="k-watch-order-poster" role="listitem" tabindex="0" draggable="true" data-entry-id="${row.id}" data-item-id="${row.itemId}" aria-label="${escapeHtml(`${row.position + 1}. ${row.title}`)}"><span class="k-watch-order-poster__position">${row.position + 1}</span>${posterMarkup(row.poster)}${unavailable}<span class="k-watch-order-poster__actions"><button type="button" class="k-row-button" data-row-action="back" aria-label="Move ${escapeHtml(row.title)} earlier; Shift-click to move to the start" title="Move earlier · Shift-click for start">←</button><button type="button" class="k-row-button" data-row-action="forward" aria-label="Move ${escapeHtml(row.title)} later; Shift-click to move to the end" title="Move later · Shift-click for end">→</button><button type="button" class="k-row-button" data-row-action="play" aria-label="Play ${escapeHtml(row.title)} from here">▶</button><button type="button" class="k-row-button" data-row-action="remove" aria-label="Remove ${escapeHtml(row.title)}">×</button></span></article>`;
+    }
+
+    insertionSlot(beforeEntryId) {
+      const before = beforeEntryId == null ? '' : String(beforeEntryId);
+      const label = beforeEntryId == null ? 'Add to end of order' : 'Insert before this poster';
+      return `<div class="k-watch-order-slot" data-insert-before="${before}" aria-label="${label}" role="presentation"><span></span></div>`;
+    }
+
+    animateOrderLayout(previousPositions) {
+      if (!this.order || !previousPositions.size) return;
+      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+      for (const element of this.order.querySelectorAll('[data-entry-id]')) {
+        const previous = previousPositions.get(element.dataset.entryId);
+        if (!previous) continue;
+        const current = element.getBoundingClientRect();
+        const x = previous.left - current.left;
+        const y = previous.top - current.top;
+        if ((x || y) && typeof element.animate === 'function') {
+          element.animate(
+            [{transform: `translate(${x}px, ${y}px)`}, {transform: 'translate(0, 0)'}],
+            {duration: 220, easing: 'cubic-bezier(.2,.75,.25,1)'}
+          );
+        }
+      }
+    }
+
+    sourceMarkup(source) {
+      const unavailable = source.available ? '' : '<span class="k-watch-row__warning">Includes unavailable media</span>';
+      const action = source.addable
+        ? `<button type="button" class="k-row-button" data-source-add aria-label="Add ${escapeHtml(source.title)} to watch order">+</button>`
+        : '<span class="k-watch-source__note">No playable descendants</span>';
+      const selected = this.selectedSourceIds.has(source.id);
+      const selectedClass = selected ? ' k-watch-source--selected' : '';
+      return `<article class="k-watch-source${selectedClass}" role="listitem" aria-selected="${selected}" tabindex="${source.addable ? '0' : '-1'}" draggable="${source.addable}" data-source-item-id="${source.id}">${posterMarkup(source.poster)}${unavailable}${action}</article>`;
+    }
+
+    onPoolClick(event) {
+      const button = event.target instanceof Element ? event.target.closest('[data-source-add]') : null;
+      const source = button instanceof Element ? button.closest('.k-watch-source') : null;
+      if (source instanceof HTMLElement) {
+        event.preventDefault();
+        this.addSource(source.dataset.sourceItemId, null);
+        return;
+      }
+      const poster = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
+      if (poster instanceof HTMLElement) {
+        event.preventDefault();
+        this.toggleSourceSelection(poster.dataset.sourceItemId);
+      }
+    }
+
+    onPoolKeydown(event) {
+      const source = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
+      if (!(source instanceof HTMLElement) || event.target instanceof HTMLButtonElement) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this.toggleSourceSelection(source.dataset.sourceItemId);
+      }
+    }
+
+    toggleSourceSelection(sourceItemId) {
+      const sourceId = Number(sourceItemId);
+      const source = this.sources.find((candidate) => candidate.id === sourceId);
+      if (!source?.addable) return;
+      if (this.selectedSourceIds.has(sourceId)) this.selectedSourceIds.delete(sourceId);
+      else this.selectedSourceIds.add(sourceId);
+      this.renderSources();
+    }
+
+    onPoolDragStart(event) {
+      const source = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
+      if (!(source instanceof HTMLElement) || source.getAttribute('draggable') !== 'true' || !source.dataset.sourceItemId) return;
+      this.isDragging = true;
+      source.classList.add('k-watch-source--dragging');
+      const sourceId = Number(source.dataset.sourceItemId);
+      const selectedSourceIds = this.selectedSourceIds.has(sourceId)
+        ? this.sources
+          .filter((candidate) => this.selectedSourceIds.has(candidate.id))
+          .map((candidate) => candidate.id)
+        : [sourceId];
+      event.dataTransfer?.setData('application/x-kanvas-watch-sources', JSON.stringify(selectedSourceIds));
+      event.dataTransfer?.setData('application/x-kanvas-watch-source', source.dataset.sourceItemId);
+      event.dataTransfer?.setData('text/plain', `kanvas-watch-sources:${selectedSourceIds.join(',')}`);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
+    }
+
+    onOrderDragStart(event) {
+      const poster = event.target instanceof Element ? event.target.closest('.k-watch-order-poster') : null;
+      if (!(poster instanceof HTMLElement) || !poster.dataset.entryId) return;
+      this.isDragging = true;
+      poster.classList.add('k-watch-order-poster--dragging');
+      event.dataTransfer?.setData('application/x-kanvas-watch-entry', poster.dataset.entryId);
+      event.dataTransfer?.setData('text/plain', poster.dataset.entryId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    }
+
+    onOrderDragOver(event) {
+      event.preventDefault();
+      this.setActiveSlot(this.insertionSlotForTarget(event.target, event.clientX));
+      this.updateDragScroll(event.clientX);
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = Array.from(event.dataTransfer.types).includes('application/x-kanvas-watch-source') ? 'copy' : 'move';
+      }
+    }
+
+    onOrderDragLeave(event) {
+      const related = event.relatedTarget;
+      const dropzone = this.querySelector('[data-order-dropzone]');
+      if (dropzone instanceof Element && related instanceof Node && dropzone.contains(related)) return;
+      this.setActiveSlot(null);
+      this.stopDragScroll();
+    }
+
+    onOrderDrop(event) {
+      event.preventDefault();
+      const slot = this.insertionSlotForTarget(event.target, event.clientX);
+      const beforeEntryId = slot?.dataset.insertBefore || null;
+      const plainText = event.dataTransfer?.getData('text/plain') || '';
+      const sourceIds = this.sourceIdsFromDrop(event.dataTransfer, plainText);
+      if (sourceIds.length) {
+        this.addSources(sourceIds, beforeEntryId);
+        this.clearDragState();
+        return;
+      }
+      const entryId = event.dataTransfer?.getData('application/x-kanvas-watch-entry');
+      if (entryId && !this.isNoopMove(entryId, beforeEntryId)) this.moveEntry(entryId, beforeEntryId);
+      this.clearDragState();
+    }
+
+    sourceIdsFromDrop(dataTransfer, plainText) {
+      const encoded = dataTransfer?.getData('application/x-kanvas-watch-sources');
+      let values = [];
+      try {
+        values = encoded ? JSON.parse(encoded) : plainText.startsWith('kanvas-watch-sources:')
+          ? plainText.slice('kanvas-watch-sources:'.length).split(',').map(Number)
+          : [Number(dataTransfer?.getData('application/x-kanvas-watch-source'))];
+      } catch (_) {
+        return [];
+      }
+      if (!Array.isArray(values)) return [];
+      const sourceIds = values.filter((id) => Number.isSafeInteger(id) && id > 0);
+      return sourceIds.length === values.length && new Set(sourceIds).size === sourceIds.length ? sourceIds : [];
+    }
+
+    updateDragScroll(clientX) {
+      if (!this.order) return;
+      const bounds = this.order.getBoundingClientRect();
+      const edgeWidth = Math.min(72, bounds.width / 3);
+      const leftDistance = clientX - bounds.left;
+      const rightDistance = bounds.right - clientX;
+      this.dragScrollDirection = leftDistance < edgeWidth
+        ? -(1 - leftDistance / edgeWidth)
+        : rightDistance < edgeWidth
+          ? 1 - rightDistance / edgeWidth
+          : 0;
+      if (this.dragScrollDirection && this.dragScrollFrame === null) this.runDragScroll();
+    }
+
+    runDragScroll() {
+      if (!this.order || !this.dragScrollDirection) {
+        this.dragScrollFrame = null;
+        return;
+      }
+      this.order.scrollLeft += this.dragScrollDirection * 18;
+      this.dragScrollFrame = requestAnimationFrame(() => this.runDragScroll());
+    }
+
+    stopDragScroll() {
+      this.dragScrollDirection = 0;
+      if (this.dragScrollFrame !== null) cancelAnimationFrame(this.dragScrollFrame);
+      this.dragScrollFrame = null;
+    }
+
+    onOrderWheel(event) {
+      if (!this.order || !this.isDragging || this.activeSlot === null) return;
+      const delta = event.deltaX || event.deltaY;
+      if (!delta) return;
+      event.preventDefault();
+      this.order.scrollLeft += delta;
+    }
+
+    insertionSlotForTarget(target, clientX) {
+      const element = target instanceof Element ? target : null;
+      const slot = element?.closest('.k-watch-order-slot');
+      if (slot instanceof HTMLElement) return slot;
+      const poster = element?.closest('.k-watch-order-poster');
+      if (poster instanceof HTMLElement) {
+        const bounds = poster.getBoundingClientRect();
+        const insertBefore = clientX < bounds.left + bounds.width / 2;
+        const adjacent = insertBefore ? poster.previousElementSibling : poster.nextElementSibling;
+        if (adjacent instanceof HTMLElement && adjacent.classList.contains('k-watch-order-slot')) return adjacent;
+      }
+      return this.order?.querySelector('.k-watch-order-slot:last-child') ?? null;
+    }
+
+    setActiveSlot(slot) {
+      if (this.activeSlot === slot) return;
+      this.activeSlot?.classList.remove('k-watch-order-slot--active');
+      this.activeSlot = slot instanceof HTMLElement ? slot : null;
+      this.activeSlot?.classList.add('k-watch-order-slot--active');
+      this.order?.classList.toggle('k-watch-workspace__order--dragging', this.activeSlot !== null);
+    }
+
+    clearDragState() {
+      this.setActiveSlot(null);
+      this.isDragging = false;
+      this.stopDragScroll();
+      this.querySelectorAll('.k-watch-order-poster--dragging, .k-watch-source--dragging').forEach((element) => {
+        element.classList.remove('k-watch-order-poster--dragging', 'k-watch-source--dragging');
+      });
+    }
+
+    isNoopMove(entryId, beforeEntryId) {
+      const sourceIndex = this.entries.findIndex((entry) => entry.id === Number(entryId));
+      const beforeIndex = beforeEntryId == null
+        ? this.entries.length
+        : this.entries.findIndex((entry) => entry.id === Number(beforeEntryId));
+      return sourceIndex < 0 || beforeIndex < 0 || sourceIndex === beforeIndex || sourceIndex + 1 === beforeIndex;
+    }
+
+    onOrderClick(event) {
+      const button = event.target instanceof Element ? event.target.closest('[data-row-action]') : null;
+      const poster = button instanceof Element ? button.closest('.k-watch-order-poster') : null;
+      if (!(button instanceof HTMLButtonElement) || !(poster instanceof HTMLElement)) return;
+      const index = this.entries.findIndex((entry) => entry.id === Number(poster.dataset.entryId));
+      if (index < 0) return;
+      if (button.dataset.rowAction === 'back' && index > 0) {
+        if (event.shiftKey) this.moveBoundary(poster.dataset.entryId, 'start');
+        else this.moveEntry(poster.dataset.entryId, String(this.entries[index - 1].id));
+      }
+      if (button.dataset.rowAction === 'forward' && index < this.entries.length - 1) {
+        if (event.shiftKey) this.moveBoundary(poster.dataset.entryId, 'end');
+        else this.moveEntry(poster.dataset.entryId, index + 2 < this.entries.length ? String(this.entries[index + 2].id) : null);
+      }
+      if (button.dataset.rowAction === 'remove') this.mutate({operation: 'remove', entryId: Number(poster.dataset.entryId), revision: this.revision});
+      if (button.dataset.rowAction === 'play') this.playFromHere(poster);
+    }
+
+    onOrderKeydown(event) {
+      const poster = event.target instanceof Element ? event.target.closest('.k-watch-order-poster') : null;
+      if (!(poster instanceof HTMLElement) || event.target instanceof HTMLButtonElement) return;
+      const index = this.entries.findIndex((entry) => entry.id === Number(poster.dataset.entryId));
+      if (index < 0) return;
+      if ((event.key === 'ArrowLeft' || event.key === 'ArrowUp') && index > 0) { event.preventDefault(); this.moveEntry(poster.dataset.entryId, String(this.entries[index - 1].id)); }
+      if ((event.key === 'ArrowRight' || event.key === 'ArrowDown') && index < this.entries.length - 1) { event.preventDefault(); this.moveEntry(poster.dataset.entryId, index + 2 < this.entries.length ? String(this.entries[index + 2].id) : null); }
+      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.mutate({operation: 'remove', entryId: Number(poster.dataset.entryId), revision: this.revision}); }
+      if (event.key === 'Enter') { event.preventDefault(); window.location.assign(`/item/${poster.dataset.itemId}`); }
+    }
+
+    addSource(sourceItemId, beforeEntryId) {
+      const sourceId = Number(sourceItemId);
+      const beforeId = beforeEntryId == null ? null : Number(beforeEntryId);
+      if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId <= 0))) return;
+      this.mutate({operation: 'add_source', sourceItemId: sourceId, beforeEntryId: beforeId, revision: this.revision});
+    }
+
+    addSources(sourceItemIds, beforeEntryId) {
+      const sourceIds = sourceItemIds.map(Number);
+      const beforeId = beforeEntryId == null ? null : Number(beforeEntryId);
+      if (!sourceIds.length || sourceIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) return;
+      if (new Set(sourceIds).size !== sourceIds.length) return;
+      if (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId <= 0)) return;
+      this.mutate({operation: 'add_sources', sourceItemIds: sourceIds, beforeEntryId: beforeId, revision: this.revision});
+    }
+
+    moveEntry(entryId, beforeEntryId) {
+      const id = Number(entryId);
+      const before = beforeEntryId == null ? null : Number(beforeEntryId);
+      if (!Number.isSafeInteger(id) || id <= 0 || (before !== null && (!Number.isSafeInteger(before) || before <= 0))) return;
+      this.mutate({operation: 'move', entryId: id, beforeEntryId: before, afterEntryId: null, revision: this.revision});
+    }
+
+    moveBoundary(entryId, boundary) {
+      const id = Number(entryId);
+      if (!Number.isSafeInteger(id) || id <= 0 || (boundary !== 'start' && boundary !== 'end')) return;
+      this.mutate({operation: 'move', entryId: id, boundary, revision: this.revision});
+    }
+
+    async playFromHere(row) {
+      const action = this.getAttribute('launch-action');
+      if (!action || !this.status) return;
+      if (row.querySelector('.k-watch-row__warning, .k-watch-order-poster__warning')) { this.status.textContent = 'This entry is unavailable. Use Play available entries to skip it.'; return; }
+      this.status.textContent = 'Opening player…';
+      try {
+        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({itemId: Number(row.dataset.itemId)})});
+        const payload = await response.json();
+        if (!response.ok || typeof payload.playbackUrl !== 'string' || !payload.playbackUrl.startsWith('/play/watch-orders/')) throw new Error('Launch failed');
+        window.location.assign(payload.playbackUrl);
+      } catch (_) { this.status.textContent = 'Could not start browser playback.'; }
+    }
+
+    async mutate(intent) {
+      const action = this.getAttribute('action');
+      if (!action || !this.status) return;
+      this.setAttribute('aria-busy', 'true');
+      this.status.textContent = 'Saving change…';
+      try {
+        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify(intent)});
+        const payload = await response.json();
+        if (response.status === 409) { this.showConflict(payload, intent); return; }
+        if (!response.ok || !Number.isInteger(payload.revision)) throw new Error(payload.error || 'Action failed');
+        this.revision = payload.revision;
+        this.syncWatchOrderFormRevisions();
+        await this.load();
+      } catch (_) { this.status.textContent = 'Could not save this change.'; }
+      finally { this.removeAttribute('aria-busy'); }
+    }
+
+    syncWatchOrderFormRevisions() {
+      const entryAction = this.getAttribute('action');
+      const actionPrefix = entryAction?.replace(/\/entries$/, '');
+      if (!actionPrefix) return;
+      document.querySelectorAll('form').forEach((form) => {
+        if (!form.getAttribute('action')?.startsWith(actionPrefix)) return;
+        form.querySelectorAll('input[name="revision"]').forEach((input) => {
+          input.value = String(this.revision);
+        });
+      });
+    }
+
+    showConflict(payload, intent) {
+      this.pendingIntent = intent;
+      const state = this.querySelector('.k-conflict-state');
+      if (!state) return;
+      const revision = Number.isInteger(payload.currentRevision) ? payload.currentRevision : null;
+      state.hidden = false;
+      state.innerHTML = '<span>This watch order changed elsewhere.</span><button type="button" class="k-button" data-conflict-reload>Reload</button><button type="button" class="k-button" data-conflict-reapply>Reapply</button>';
+      state.querySelector('[data-conflict-reload]')?.addEventListener('click', () => this.load());
+      state.querySelector('[data-conflict-reapply]')?.addEventListener('click', () => {
+        if (this.pendingIntent && revision !== null) this.mutate({...this.pendingIntent, revision});
+      });
+    }
+  }
+
   if (!customElements.get('kanvas-collection-grid')) customElements.define('kanvas-collection-grid', KanvasCollectionGrid);
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
   if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
+  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);
 
   const ITEM_EDITOR_KINDS = ['movie', 'series', 'season', 'episode', 'special', 'extra'];
   const ITEM_EDITOR_KIND_LABELS = {
@@ -1283,7 +1753,11 @@
 
     async open() {
       if (!this.dialog) return;
-      this.dialog.showModal();
+      if (!this.dialog.open) this.dialog.showModal();
+      await this.load();
+    }
+
+    async load() {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
       content.innerHTML = '<div class="k-picker__status" aria-live="polite">Loading editable metadata…</div>';
@@ -1296,13 +1770,18 @@
         if (!response.ok) throw new Error('Item editor request failed');
         const payload = await response.json();
         if (!payload.item || typeof payload.item !== 'object') throw new Error('Item editor response was invalid');
-        this.render(payload.item, Array.isArray(payload.audit) ? payload.audit : []);
+        this.render(
+          payload.item,
+          Array.isArray(payload.audit) ? payload.audit : [],
+          Array.isArray(payload.collectionChoices) ? payload.collectionChoices : [],
+          Array.isArray(payload.collectionRelationships) ? payload.collectionRelationships : []
+        );
       } catch (error) {
         if (error?.name !== 'AbortError') content.innerHTML = '<div class="k-picker__status">This item could not be loaded for editing. Close and try again.</div>';
       }
     }
 
-    render(item, audit) {
+    render(item, audit, collectionChoices, collectionRelationships) {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
       this.currentItem = item;
@@ -1315,11 +1794,88 @@
       const artworkRows = this.renderArtworkRows(artworks, artworkKinds, selected);
       const auditRows = audit.length ? audit.map((entry) => `<li>${escapeHtml(entry.actor || 'administrator')} · ${escapeHtml((entry.changed_fields || []).join(', ') || 'updated')} · ${escapeHtml(entry.occurred_at || '')}</li>`).join('') : '<li>No local edits have been recorded.</li>';
       const kind = itemEditorKind(item.kind);
-      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit details</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><div class="k-item-editor__summary"><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span><span>${escapeHtml(item.title || `Item ${item.id || ''}`)}</span></div><section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><details><summary>Metadata locks</summary><div class="k-item-editor__checks" data-item-editor-locks>${this.renderLockRows(kind, locks)}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></details><details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
+      const collectionControls = this.renderCollectionControls(
+        item, collectionChoices, collectionRelationships
+      );
+      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit details</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><div class="k-item-editor__summary"><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span><span>${escapeHtml(item.title || `Item ${item.id || ''}`)}</span></div><section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><details><summary>Metadata locks</summary><div class="k-item-editor__checks" data-item-editor-locks>${this.renderLockRows(kind, locks)}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></details>${collectionControls}<details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
       this.status = content.querySelector('[data-item-editor-status]');
       content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
       content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
       content.querySelector('[data-item-editor-kind]')?.addEventListener('change', (event) => this.updateKindFields(event.currentTarget?.value));
+      this.bindCollectionControls(content);
+    }
+
+    renderCollectionControls(item, collectionChoices, collectionRelationships) {
+      const isCollection = (collection) => collection
+        && Number.isSafeInteger(collection.id)
+        && collection.id > 0
+        && typeof collection.name === 'string'
+        && collection.name.trim()
+        && Number.isSafeInteger(collection.revision)
+        && collection.revision > 0;
+      const included = (Array.isArray(item.collections) ? item.collections : []).filter(isCollection);
+      const choices = collectionChoices.filter(isCollection);
+      const relationships = collectionRelationships.filter((relationship) => (
+        typeof relationship === 'string' && relationship
+      ));
+      const memberRows = included.length
+        ? included.map((collection) => `<div class="k-member-editor-row"><a href="/collections/${collection.id}" class="k-member-editor-row__title">${escapeHtml(collection.name)}</a>${collection.relationship ? `<span class="k-member-editor-row__relationship">${escapeHtml(String(collection.relationship).replaceAll('_', ' '))}</span>` : ''}<button type="button" class="k-button" data-item-collection-remove="${collection.id}" data-item-collection-revision="${collection.revision}">Remove</button></div>`).join('')
+        : '<p class="k-item-editor__muted">This item is not in a collection.</p>';
+      const relationshipOptions = ['<option value="">No relationship</option>']
+        .concat(relationships.map((relationship) => `<option value="${escapeHtml(relationship)}">${escapeHtml(relationship.replaceAll('_', ' '))}</option>`))
+        .join('');
+      const addControl = choices.length
+        ? `<div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Add to collection" data-item-collection-target>${choices.map((collection) => `<option value="${collection.id}:${collection.revision}">${escapeHtml(collection.name)}</option>`).join('')}</select></label><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Collection relationship" data-item-collection-relationship>${relationshipOptions}</select></label><button type="button" class="k-button" data-item-collection-add>Add to collection</button></div>`
+        : '<p class="k-item-editor__muted">No other collections are available.</p>';
+      return `<details><summary>Collections</summary><section class="k-item-editor__section">${memberRows}${addControl}</section></details>`;
+    }
+
+    bindCollectionControls(content) {
+      content.querySelectorAll('[data-item-collection-remove]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const collectionId = Number(button.dataset.itemCollectionRemove);
+          const revision = Number(button.dataset.itemCollectionRevision);
+          if (!Number.isSafeInteger(collectionId) || collectionId <= 0 || !Number.isSafeInteger(revision) || revision <= 0) return;
+          const action = this.collectionActionSource();
+          if (!action) return;
+          await this.mutateCollection(
+            `${action}/${collectionId}/remove`,
+            {revision: String(revision)}
+          );
+        });
+      });
+      content.querySelector('[data-item-collection-add]')?.addEventListener('click', async () => {
+        const target = content.querySelector('[data-item-collection-target]');
+        const relationship = content.querySelector('[data-item-collection-relationship]');
+        if (!(target instanceof HTMLSelectElement) || !(relationship instanceof HTMLSelectElement)) return;
+        if (!/^([1-9]\d*):([1-9]\d*)$/.test(target.value)) return;
+        await this.mutateCollection(this.collectionActionSource(), {
+          collection_target: target.value,
+          relationship: relationship.value
+        });
+      });
+    }
+
+    collectionActionSource() {
+      const action = this.getAttribute('action-source');
+      return action ? `${action}/collections` : '';
+    }
+
+    async mutateCollection(action, values) {
+      if (!action || !this.status) return;
+      this.status.textContent = 'Saving collection membership…';
+      try {
+        const response = await fetch(action, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          credentials: 'same-origin',
+          body: new URLSearchParams(values)
+        });
+        if (!response.ok) throw new Error('Collection membership could not be saved.');
+        window.location.reload();
+      } catch (error) {
+        this.status.textContent = error?.message || 'Collection membership could not be saved.';
+      }
     }
 
     renderKindFields(kind, item) {

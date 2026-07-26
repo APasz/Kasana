@@ -26,6 +26,33 @@ class ParsedMediaKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class EpisodeIdentifier:
+    """A season and episode number parsed from a filename."""
+
+    season_number: int
+    episode_number: int
+
+
+@dataclass(frozen=True)
+class EpisodeRange:
+    """One episode or an ordered, combined-episode range in a media filename."""
+
+    start: EpisodeIdentifier
+    end: EpisodeIdentifier | None = None
+
+    @property
+    def is_combined(self) -> bool:
+        return self.end is not None
+
+    @property
+    def is_forward(self) -> bool:
+        return self.end is None or (self.end.season_number, self.end.episode_number) > (
+            self.start.season_number,
+            self.start.episode_number,
+        )
+
+
+@dataclass(frozen=True)
 class ParsedMedia:
     kind: ParsedMediaKind
     title: str
@@ -33,6 +60,8 @@ class ParsedMedia:
     series_title: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
+    episode_end_season_number: int | None = None
+    episode_end_number: int | None = None
     parent_movie_title: str | None = None
     parent_series_title: str | None = None
     is_directory_movie: bool = False
@@ -44,7 +73,7 @@ class ParseFailure:
 
 
 _DECADE_PATTERN: Pattern[str] = re.compile(
-    r"^(?:(?:18|19|20)\d{2}s|(?:0\d|1\d|2\d)'s)$", re.IGNORECASE
+    r"^(?:(?:18|19|20)\d{2}'?s|\d{2}'s)$", re.IGNORECASE
 )
 _YEAR_SUFFIX_PATTERN: Pattern[str] = re.compile(r"\s*\((?P<year>(?:18|19|20)\d{2})\)$")
 _SEASON_PATTERN: Pattern[str] = re.compile(
@@ -52,6 +81,13 @@ _SEASON_PATTERN: Pattern[str] = re.compile(
 )
 _SEASON_EPISODE_PATTERN: Pattern[str] = re.compile(
     r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})(?:$|[. _-])",
+    re.IGNORECASE,
+)
+_SEASON_EPISODE_RANGE_PATTERN: Pattern[str] = re.compile(
+    r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})"
+    r"(?:[. _-]*(?:-|&|and)[. _-]*|[. _-]*)"
+    r"(?:s(?P<end_season>\d{1,2})[. _-]*)?e(?P<end_episode>\d{1,3})"
+    r"(?:$|[. _-])",
     re.IGNORECASE,
 )
 _ALTERNATE_SEASON_EPISODE_PATTERN: Pattern[str] = re.compile(
@@ -62,7 +98,9 @@ _EPISODE_PATTERN: Pattern[str] = re.compile(
     r"(?:^|[. _-])e(?P<episode>\d{1,3})(?:$|[. _-])", re.IGNORECASE
 )
 _EPISODE_MARKER_PATTERN: Pattern[str] = re.compile(
-    r"(?:^|[. _-])s\d{1,2}[. _-]*e\d{1,3}(?:$|[. _-])"
+    r"(?:^|[. _-])s\d{1,2}[. _-]*e\d{1,3}"
+    r"(?:(?:[. _-]*(?:-|&|and)[. _-]*|[. _-]*)(?:s\d{1,2}[. _-]*)?e\d{1,3})?"
+    r"(?:$|[. _-])"
     r"|(?:^|[. _-])e\d{1,3}(?:$|[. _-])"
     r"|\[\d{1,2}[xX]\d{1,3}\]"
     r"|\(\d{1,2}[xX]\d{1,3}\)",
@@ -73,6 +111,7 @@ _RECOGNISED_EXTRA_PATTERN: Pattern[str] = re.compile(
     r"behind[. _-]*the[. _-]*scenes|deleted[. _-]*scenes?)(?:$|[. _-])",
     re.IGNORECASE,
 )
+_EXTRA_DIRECTORY_NAMES = frozenset({"extra", "extras"})
 
 
 def infer_library_layout(root_path: Path) -> LibraryLayout:
@@ -103,6 +142,30 @@ def parse_season_number(directory_name: str, *, allow_volume: bool) -> int | Non
 def parse_episode_numbers(
     filename_stem: str, *, season_from_directory: int | None
 ) -> tuple[int, int] | None:
+    episode_range = parse_episode_range(
+        filename_stem, season_from_directory=season_from_directory
+    )
+    if episode_range is None:
+        return None
+    return episode_range.start.season_number, episode_range.start.episode_number
+
+
+def parse_episode_range(
+    filename_stem: str, *, season_from_directory: int | None
+) -> EpisodeRange | None:
+    season_episode_range: Match[str] | None = _SEASON_EPISODE_RANGE_PATTERN.search(
+        filename_stem
+    )
+    if season_episode_range is not None:
+        start = EpisodeIdentifier(
+            season_number=int(season_episode_range.group("season")),
+            episode_number=int(season_episode_range.group("episode")),
+        )
+        end = EpisodeIdentifier(
+            season_number=int(season_episode_range.group("end_season") or start.season_number),
+            episode_number=int(season_episode_range.group("end_episode")),
+        )
+        return EpisodeRange(start=start, end=end)
     alternate_season_episode: Match[str] | None = _ALTERNATE_SEASON_EPISODE_PATTERN.search(
         filename_stem
     )
@@ -115,16 +178,29 @@ def parse_episode_numbers(
         ) or alternate_season_episode.group("parenthetical_episode")
         assert marker_season is not None
         assert marker_episode is not None
-        return int(marker_season), int(marker_episode)
+        return EpisodeRange(
+            start=EpisodeIdentifier(
+                season_number=int(marker_season), episode_number=int(marker_episode)
+            )
+        )
     season_episode: Match[str] | None = _SEASON_EPISODE_PATTERN.search(filename_stem)
     if season_episode is not None:
-        return int(season_episode.group("season")), int(season_episode.group("episode"))
+        return EpisodeRange(
+            start=EpisodeIdentifier(
+                season_number=int(season_episode.group("season")),
+                episode_number=int(season_episode.group("episode")),
+            )
+        )
     if season_from_directory is None:
         return None
     episode: Match[str] | None = _EPISODE_PATTERN.search(filename_stem)
     if episode is None:
         return None
-    return season_from_directory, int(episode.group("episode"))
+    return EpisodeRange(
+        start=EpisodeIdentifier(
+            season_number=season_from_directory, episode_number=int(episode.group("episode"))
+        )
+    )
 
 
 def parse_media_path(
@@ -207,8 +283,8 @@ def _parse_anime_path(
 def _parse_episode_path(
     directories: tuple[str, ...], filename_stem: str, *, allow_volume: bool
 ) -> ParsedMedia | ParseFailure:
-    if any(directory.casefold() == "extras" for directory in directories):
-        if not directories or directories[0].casefold() == "extras":
+    if any(directory.casefold() in _EXTRA_DIRECTORY_NAMES for directory in directories):
+        if not directories or directories[0].casefold() in _EXTRA_DIRECTORY_NAMES:
             return ParseFailure("Series extras must be below a show title directory.")
         return ParsedMedia(
             kind=ParsedMediaKind.EXTRA,
@@ -227,19 +303,28 @@ def _parse_episode_path(
             title=_special_title(filename_stem, series_title=series_title),
             series_title=series_title,
         )
-    episode_numbers = parse_episode_numbers(filename_stem, season_from_directory=season_number)
-    if episode_numbers is None:
+    episode_range = parse_episode_range(filename_stem, season_from_directory=season_number)
+    if episode_range is None:
         return ParseFailure("The episode filename has no unambiguous episode identifier.")
-    parsed_season, episode_number = episode_numbers
+    parsed_season = episode_range.start.season_number
+    episode_number = episode_range.start.episode_number
     if parsed_season != season_number:
         return ParseFailure(
             "The filename season number conflicts with its containing season directory."
         )
+    if not episode_range.is_forward:
+        return ParseFailure("A combined episode filename must end after its starting episode.")
     title = _episode_title(
         filename_stem,
         series_title=series_title,
         season_number=season_number,
         episode_number=episode_number,
+        episode_end_season_number=(
+            episode_range.end.season_number if episode_range.end is not None else None
+        ),
+        episode_end_number=(
+            episode_range.end.episode_number if episode_range.end is not None else None
+        ),
     )
     return ParsedMedia(
         kind=ParsedMediaKind.EPISODE,
@@ -247,6 +332,12 @@ def _parse_episode_path(
         series_title=series_title,
         season_number=season_number,
         episode_number=episode_number,
+        episode_end_season_number=(
+            episode_range.end.season_number if episode_range.end is not None else None
+        ),
+        episode_end_number=(
+            episode_range.end.episode_number if episode_range.end is not None else None
+        ),
     )
 
 
@@ -282,12 +373,25 @@ def _episode_title(
     series_title: str,
     season_number: int,
     episode_number: int,
+    episode_end_season_number: int | None,
+    episode_end_number: int | None,
 ) -> str:
     stripped = _EPISODE_MARKER_PATTERN.sub(" ", filename_stem)
     normalised = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
+    episode_label = f"S{season_number:02d}E{episode_number:02d}"
+    if episode_end_season_number is not None and episode_end_number is not None:
+        end_label = (
+            f"S{episode_end_season_number:02d}E{episode_end_number:02d}"
+            if episode_end_season_number != season_number
+            else f"E{episode_end_number:02d}"
+        )
+        episode_label = f"{episode_label}-{end_label}"
+        if normalised and normalised.casefold() != series_title.casefold():
+            return f"{episode_label} - {normalised}"
+        return episode_label
     if normalised and normalised.casefold() != series_title.casefold():
         return normalised
-    return f"S{season_number:02d}E{episode_number:02d}"
+    return episode_label
 
 
 def _special_title(filename_stem: str, *, series_title: str) -> str:

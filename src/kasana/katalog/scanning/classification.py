@@ -26,6 +26,11 @@ class ExistingFile:
     item_kind: ZaisanKind
     item_title: str
     item_release_year: int | None
+    item_has_matched_metadata: bool
+    item_season_number: int | None
+    item_episode_number: int | None
+    item_episode_end_season_number: int | None
+    item_episode_end_number: int | None
     path: Path
     size_bytes: int
     mtime_ns: int
@@ -108,13 +113,18 @@ def plan_files(
             seen_episode_identifiers.add(identifier)
         if known is not None:
             unseen_ids.discard(known.id)
+            reclassified_parsed: ParsedMedia | None = (
+                parsed
+                if isinstance(parsed, ParsedMedia) and _requires_reclassification(known, parsed)
+                else None
+            )
             if known.size_bytes == snapshot.size_bytes and known.mtime_ns == snapshot.mtime_ns:
-                if isinstance(parsed, ParsedMedia) and _requires_reclassification(known, parsed):
+                if reclassified_parsed is not None:
                     plans.append(
                         PlannedFile(
                             PlanAction.CHANGE,
                             snapshot,
-                            parsed=parsed,
+                            parsed=reclassified_parsed,
                             existing_file_id=known.id,
                         )
                     )
@@ -127,7 +137,7 @@ def plan_files(
                 PlannedFile(
                     PlanAction.CHANGE,
                     snapshot,
-                    parsed=parsed if isinstance(parsed, ParsedMedia) else None,
+                    parsed=reclassified_parsed,
                     existing_file_id=known.id,
                 )
             )
@@ -196,13 +206,18 @@ def _reject_ambiguous_movie_candidates(
 
 
 def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> bool:
+    if existing.item_has_matched_metadata:
+        return False
     match parsed.kind:
         case ParsedMediaKind.MOVIE:
-            return existing.item_kind is ZaisanKind.MOVIE and (
-                existing.item_title != parsed.title
-                or (
-                    parsed.release_year is not None
-                    and existing.item_release_year != parsed.release_year
+            return (
+                existing.item_kind is ZaisanKind.MOVIE
+                and (
+                    existing.item_title != parsed.title
+                    or (
+                        parsed.release_year is not None
+                        and existing.item_release_year != parsed.release_year
+                    )
                 )
             )
         case ParsedMediaKind.SPECIAL:
@@ -210,4 +225,10 @@ def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> b
         case ParsedMediaKind.EXTRA:
             return existing.item_kind is not ZaisanKind.EXTRA
         case ParsedMediaKind.EPISODE:
-            return False
+            return (
+                existing.item_kind is not ZaisanKind.EPISODE
+                or existing.item_season_number != parsed.season_number
+                or existing.item_episode_number != parsed.episode_number
+                or existing.item_episode_end_season_number != parsed.episode_end_season_number
+                or existing.item_episode_end_number != parsed.episode_end_number
+            )

@@ -58,6 +58,7 @@ class PosterView(BaseModel):
 
     id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=1_000)
+    header: str | None = Field(default=None, max_length=200)
     subtitle: str | None = Field(default=None, max_length=200)
     href: str = Field(pattern=r"^/item/\d+$")
     poster_url: str | None = Field(default=None, alias="posterUrl")

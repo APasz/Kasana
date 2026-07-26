@@ -42,6 +42,10 @@ class WatchOrderCardView(BaseModel):
     kind: str = Field(min_length=1, max_length=32)
     entry_count: int = Field(ge=0, alias="entryCount")
     revision: int = Field(ge=1)
+    is_default: bool = Field(default=False, alias="isDefault")
+    completed_entry_count: int | None = Field(
+        default=None, ge=0, alias="completedEntryCount"
+    )
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     next_item_title: str | None = Field(default=None, max_length=1_000, alias="nextItemTitle")
     has_unavailable_entries: bool = Field(default=False, alias="hasUnavailableEntries")
@@ -58,6 +62,10 @@ class CollectionDetailView(BaseModel):
     item_count: int = Field(ge=0, alias="itemCount")
     watch_order_count: int = Field(ge=0, alias="watchOrderCount")
     revision: int = Field(ge=1)
+    artwork_item_id: int | None = Field(default=None, gt=0, alias="artworkItemId")
+    default_watch_order_id: int | None = Field(
+        default=None, gt=0, alias="defaultWatchOrderId"
+    )
     artwork_url: str | None = Field(default=None, alias="artworkUrl")
     mosaic_urls: tuple[str, ...] = Field(default=(), max_length=4, alias="mosaicUrls")
     movies: tuple[CollectionMemberView, ...] = ()
@@ -84,7 +92,7 @@ class ItemPickerView(BaseModel):
 
 
 class WatchOrderRowView(BaseModel):
-    """A dense, serialisable entry row for the virtual browser component."""
+    """One order entry with the shared poster representation used by Kanvas grids."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -96,6 +104,34 @@ class WatchOrderRowView(BaseModel):
     year: int | None = Field(default=None, ge=1, le=9999)
     available: bool
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    poster: PosterView | None = None
+
+
+class WatchOrderSourceView(BaseModel):
+    """A collection item that may add itself or its playable descendants as one block."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=1_000)
+    kind: str = Field(min_length=1, max_length=32)
+    year: int | None = Field(default=None, ge=1, le=9999)
+    series_title: str | None = Field(default=None, max_length=1_000, alias="seriesTitle")
+    season_number: int | None = Field(default=None, ge=0, alias="seasonNumber")
+    entry_count: int = Field(ge=0, le=5_000, alias="entryCount")
+    addable: bool
+    available: bool
+    poster: PosterView
+
+
+class WatchOrderWorkspaceView(BaseModel):
+    """The editable order and eligible collection sources in one browser payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    revision: int = Field(ge=1)
+    entries: tuple[WatchOrderRowView, ...] = Field(default=(), max_length=10_000)
+    sources: tuple[WatchOrderSourceView, ...] = Field(default=(), max_length=10_000)
 
 
 class WatchOrderEditorView(BaseModel):

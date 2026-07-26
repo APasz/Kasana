@@ -20,6 +20,7 @@ class BrowserComponent(StrEnum):
     ITEM_PICKER = "kanvas-item-picker"
     POSTER_GRID = "kanvas-poster-grid"
     WATCH_ORDER_LIST = "kanvas-watch-order-list"
+    WATCH_ORDER_WORKSPACE = "kanvas-watch-order-workspace"
 
 
 type BrowserAttribute = str | int | bool

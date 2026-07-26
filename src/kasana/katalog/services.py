@@ -207,6 +207,11 @@ def create_watch_order(
     )
     session.add(watch_order)
     session.flush()
+    collection = session.get(Collection, collection_id)
+    if collection is None:
+        raise ValueError("The collection does not exist.")
+    if collection.default_watch_order_id is None:
+        collection.default_watch_order_id = watch_order.id
     return watch_order
 
 

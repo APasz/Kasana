@@ -21,11 +21,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from kasana.katalog.api.app import create_app
-from kasana.katalog.api.runtime import KatalogApiRuntime
+from kasana.katalog.api.runtime import (
+    KatalogApiRuntime,
+    hierarchy_item_label,
+    hierarchy_target_label,
+)
 from kasana.katalog.client import KatalogClient, KatalogClientError, KatalogClientErrorKind
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MetadataProvider, MetadataWorkflow, SearchOutcome
+from kasana.katalog.metadata.review import MetadataIdentityConflictError
 from kasana.katalog.models import (
+    AuditCategory,
+    AuditIssue,
     AvailabilityState,
     CachedArtwork,
     CachedArtworkKind,
@@ -36,8 +43,21 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.public import JobStatus, UserAuthentication, UserCreate, UserUpdate
-from kasana.katalog.repair import HierarchyRepairPlan, HierarchyRepairResult, RepairImpact
+from kasana.katalog.public import (
+    DuplicateResolutionBatchRequest,
+    DuplicateResolutionPair,
+    JobStatus,
+    UserAuthentication,
+    UserCreate,
+    UserUpdate,
+)
+from kasana.katalog.repair import (
+    HierarchyRepairPlan,
+    HierarchyRepairResult,
+    RepairAction,
+    RepairActionKind,
+    RepairImpact,
+)
 from kasana.katalog.scanning import ScanResult, ScanTotals
 from kasana.katalog.services import (
     add_collection_membership,
@@ -60,6 +80,39 @@ class ApiFixture:
     runtime: KatalogApiRuntime
     settings: KatalogSettings
     database: KatalogDatabase
+
+
+def test_hierarchy_preview_labels_describe_incomplete_items_and_create_actions() -> None:
+    incomplete_episode = Zaisan(
+        library_root_id=1,
+        item_kind=ZaisanKind.EPISODE,
+        title="Unnumbered episode",
+        sort_title="Unnumbered episode",
+    )
+    create_series = RepairAction(
+        kind=RepairActionKind.CREATE,
+        rootId=1,
+        targetKind=ZaisanKind.SERIES,
+        targetTitle="XFiles",
+        explanation="Create the path-proven series.",
+    )
+
+    assert hierarchy_item_label(incomplete_episode) == (
+        "Episode: Unnumbered episode (missing episode numbers)"
+    )
+    assert hierarchy_target_label(create_series, {}) == "Series: XFiles"
+
+
+def test_duplicate_resolution_batch_contract_accepts_all_selected_pairs() -> None:
+    request = DuplicateResolutionBatchRequest(
+        resolutions=tuple(
+            DuplicateResolutionPair(source_item_id=index * 2, target_item_id=index * 2 + 1)
+            for index in range(1, 112)
+        ),
+        confirmed=True,
+    )
+
+    assert len(request.resolutions) == 111
 
 
 @pytest.fixture
@@ -558,6 +611,8 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
         "/api/v1/metadata/review",
         "/api/v1/jobs",
         "/api/v1/repairs/hierarchy/preview",
+        "/api/v1/repairs/duplicates/preview",
+        "/api/v1/scans/duplicate-episodes",
     )
     for path in expected_gets:
         assert (await api_fixture.client.get(path)).status_code == 200
@@ -596,6 +651,62 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     assert (
         await api_fixture.client.post("/api/v1/repairs/hierarchy", json={"apply": True})
     ).status_code == 422
+    assert (
+        await api_fixture.client.post(
+            "/api/v1/repairs/duplicates",
+            json={"source_item_id": 1, "target_item_id": 2},
+        )
+    ).status_code == 422
+
+
+async def test_duplicate_episode_issues_only_returns_unresolved_duplicate_findings(
+    api_fixture: ApiFixture,
+) -> None:
+    def add_issues(session: Session) -> None:
+        session.add_all(
+            (
+                AuditIssue(
+                    library_root_id=1,
+                    category=AuditCategory.DUPLICATE_EPISODE_IDENTIFIER,
+                    path="/library/Show/Season 1/S01E01 alternate.mkv",
+                    message=(
+                        "Episode identifier ('show', 1, 1) appears more than once in this scan."
+                    ),
+                    is_resolved=False,
+                    detected_at=datetime.now(UTC),
+                ),
+                AuditIssue(
+                    library_root_id=1,
+                    category=AuditCategory.DUPLICATE_EPISODE_IDENTIFIER,
+                    path="/library/Show/Season 1/S01E01 resolved.mkv",
+                    message="Resolved duplicate.",
+                    is_resolved=True,
+                    detected_at=datetime.now(UTC),
+                ),
+                AuditIssue(
+                    library_root_id=1,
+                    category=AuditCategory.MISSING_SEASON_INFORMATION,
+                    path="/library/Show/episode.mkv",
+                    message="Missing season.",
+                    is_resolved=False,
+                    detected_at=datetime.now(UTC),
+                ),
+            )
+        )
+
+    api_fixture.database.run_transaction(add_issues)
+
+    response = await api_fixture.client.get("/api/v1/scans/duplicate-episodes")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": 1,
+            "library_root_id": 1,
+            "path": "/library/Show/Season 1/S01E01 alternate.mkv",
+            "message": "Episode identifier ('show', 1, 1) appears more than once in this scan.",
+        }
+    ]
 
 
 async def test_metadata_review_only_returns_unresolved_suggestions(
@@ -973,6 +1084,29 @@ async def test_errors_are_structured_and_database_errors_are_mapped(
     failed = await api_fixture.client.get("/api/v1/library/items")
     assert failed.status_code == 503
     assert failed.json()["code"] == "service_unavailable"
+
+
+async def test_metadata_identity_conflicts_are_actionable(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def conflict(_item_id: int, _provider: str, _provider_id: str) -> None:
+        raise MetadataIdentityConflictError(
+            "Lock the sort title or resolve the duplicate before matching."
+        )
+
+    monkeypatch.setattr(api_fixture.runtime, "match_item", conflict)
+
+    response = await api_fixture.client.post(
+        "/api/v1/metadata/items/1/match",
+        json={"provider": "tmdb", "provider_id": "314"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "metadata_identity_conflict"
+    assert response.json()["message"] == (
+        "Lock the sort title or resolve the duplicate before matching."
+    )
+    assert response.json()["request_id"] == response.headers["x-request-id"]
 
 
 async def test_openapi_uses_versioned_stable_operation_ids(api_fixture: ApiFixture) -> None:

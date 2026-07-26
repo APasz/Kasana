@@ -17,6 +17,7 @@ from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.kanvas.viewmodels.item import ItemDetailView
 from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
@@ -35,7 +36,9 @@ async def render_item(
     with page_shell(settings, "/library", "Item detail", profile):
         catalogue = KanvasKatalogService(settings, profile.user.id)
         try:
-            detail = await catalogue.item_detail(item_id)
+            detail = await catalogue.item_detail(
+                item_id, include_collection_choices=profile.is_administrator
+            )
         except KatalogClientError as error:
             detail_text = "This item is no longer available."
             if error.kind in {KatalogClientErrorKind.TRANSPORT, KatalogClientErrorKind.UNAVAILABLE}:
@@ -80,6 +83,8 @@ async def render_item(
                     status,
                     playback_session.id if playback_session is not None else None,
                 )
+
+        _included_collections(detail)
 
         if detail.children:
             with ui.element("section").classes("k-item-children").props('aria-label="Children"'):
@@ -167,3 +172,20 @@ def _item_editor_button(item_id: int, profile: SessionProfile) -> None:
             "action-source": f"/kanvas/actions/items/{item_id}",
         },
     )
+
+
+def _included_collections(detail: ItemDetailView) -> None:
+    """Render direct collection placement when the item has collection memberships."""
+
+    if not detail.included_collections:
+        return
+    with ui.element("section").classes("k-item-collections").props('aria-label="Included in"'):
+        section_title("Included in")
+        for collection in detail.included_collections:
+            with ui.element("div").classes("k-member-editor-row"):
+                with ui.element("a").props(f'href="/collections/{collection.id}"'):
+                    ui.label(collection.name).classes("k-member-editor-row__title")
+                if collection.relationship is not None:
+                    ui.label(collection.relationship.replace("_", " ")).classes(
+                        "k-member-editor-row__relationship"
+                    )

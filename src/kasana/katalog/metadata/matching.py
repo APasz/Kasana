@@ -30,6 +30,7 @@ from kasana.katalog.metadata.refresh import (
 )
 from kasana.katalog.metadata.review import (
     MetadataBindingView,
+    MetadataIdentityConflictError,
     ProviderDetails,
     accept_binding,
     ignore_item,
@@ -121,14 +122,17 @@ class MetadataWorkflow:
         if selected is None:
             return SearchOutcome(item_id=item_id, candidates=persisted.candidates)
         provider = provider_for(selected.result.reference.provider, provider_tuple)
-        await self._accept_search_result(
-            item_id,
-            provider,
-            selected,
-            actor="automatic",
-            action=MetadataReviewAction.AUTO_MATCHED,
-            manual=False,
-        )
+        try:
+            await self._accept_search_result(
+                item_id,
+                provider,
+                selected,
+                actor="automatic",
+                action=MetadataReviewAction.AUTO_MATCHED,
+                manual=False,
+            )
+        except MetadataIdentityConflictError:
+            return SearchOutcome(item_id=item_id, candidates=persisted.candidates)
         return SearchOutcome(
             item_id=item_id,
             candidates=persisted.candidates,

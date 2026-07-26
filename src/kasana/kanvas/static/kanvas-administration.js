@@ -13,6 +13,39 @@
     if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
     return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   };
+  const adminOperationLabel = (operation) => ({
+    scan: 'Library scan',
+    'library-consistency': 'Library cleanup',
+    'artwork-fetch': 'Artwork fetch',
+    'hierarchy-repair': 'Hierarchy repair',
+    'duplicate-resolve': 'Duplicate merge',
+    'duplicate-resolve-batch': 'Duplicate merge',
+    'duplicate-resolution': 'Duplicate merge',
+    'root-create': 'Library root update',
+    'root-update': 'Library root update',
+    'root-delete': 'Library root update',
+    'cancel-job': 'Job cancellation',
+    match: 'Metadata match',
+    reject: 'Metadata rejection',
+    ignore: 'Metadata update',
+    refresh: 'Metadata refresh',
+  }[operation] || 'Administration action');
+  const jobProgress = (job) => {
+    const total = Number.isInteger(job?.progressTotal) ? job.progressTotal : null;
+    const current = Number.isInteger(job?.progressCurrent) ? job.progressCurrent : 0;
+    if (total !== null && total > 0) return `${current}/${total} ${job.progressUnit || 'items'}`;
+    if (current > 0) return `${current} ${job.progressUnit || 'items'}`;
+    return '';
+  };
+  const hierarchyActionLabel = (kind) => ({
+    create: 'Create',
+    merge: 'Merge',
+    rename: 'Rename',
+    reparent: 'Move',
+    reassign_media: 'Reassign media',
+    retype: 'Change type',
+    remove_empty: 'Remove empty record',
+  }[kind] || 'Other change');
   const providerEntryUrl = (candidate) => {
     const provider = typeof candidate?.provider === 'string' ? candidate.provider.toLowerCase() : '';
     const providerId = typeof candidate?.providerId === 'string' ? candidate.providerId : '';
@@ -35,12 +68,16 @@
       this.section = 'overview';
       this.overview = null;
       this.hierarchy = null;
+      this.duplicates = null;
+      this.selectedDuplicatePairs = new Set();
       this.jobs = [];
       this.roots = [];
       this.reviewItems = [];
       this.reviewIndex = 0;
       this.candidateIndex = 0;
       this.cursor = null;
+      this.submittedJobId = null;
+      this.activity = null;
       this.inFlight = false;
       this.timer = null;
       this.abort = null;
@@ -107,6 +144,10 @@
         if (this.section === 'hierarchy') {
           this.hierarchy = await this.fetchJson(this.source('hierarchy-source'));
         }
+        if (this.section === 'duplicates') {
+          this.duplicates = await this.fetchJson(this.source('duplicates-source'));
+        }
+        await this.checkSubmittedJob();
         if (!this.hasOpenDialog()) this.render();
       } catch (error) {
         if (error?.name !== 'AbortError') this.renderError();
@@ -120,7 +161,8 @@
       window.clearTimeout(this.timer);
       if (document.visibilityState === 'hidden') return;
       const active = Number(this.overview?.activeJobCount || 0);
-      this.timer = window.setTimeout(() => this.load(), active ? 5000 : 30000);
+      const interval = this.submittedJobId ? 2000 : active ? 5000 : 30000;
+      this.timer = window.setTimeout(() => this.load(), interval);
     }
 
     visibilityChanged() {
@@ -142,12 +184,23 @@
     }
 
     render() {
-      if (this.section === 'metadata') return this.renderMetadata();
-      if (this.section === 'libraries') return this.renderLibraries();
-      if (this.section === 'jobs') return this.renderJobs();
-      if (this.section === 'artwork') return this.renderArtwork();
-      if (this.section === 'hierarchy') return this.renderHierarchy();
-      this.renderOverview();
+      if (this.section === 'metadata') this.renderMetadata();
+      else if (this.section === 'libraries') this.renderLibraries();
+      else if (this.section === 'jobs') this.renderJobs();
+      else if (this.section === 'artwork') this.renderArtwork();
+      else if (this.section === 'hierarchy') this.renderHierarchy();
+      else if (this.section === 'duplicates') this.renderDuplicates();
+      else this.renderOverview();
+      this.renderActivity();
+    }
+
+    renderActivity() {
+      if (!this.activity?.message) return;
+      const status = document.createElement('div');
+      status.className = `k-admin-status k-admin-status--${this.activity.state || 'active'} k-admin-activity`;
+      status.setAttribute('aria-live', this.activity.state === 'error' ? 'assertive' : 'polite');
+      status.textContent = this.activity.message;
+      (this.querySelector('section') || this).prepend(status);
     }
 
     statusRow(label, value, action, destination) {
@@ -205,17 +258,64 @@
       const data = this.hierarchy;
       if (!data || !Array.isArray(data.actions) || !Array.isArray(data.manual_reviews)) return this.renderError();
       const impact = data.impact || {};
-      const actions = data.actions.map((action) => `<li><strong>${escapeHtml(action.kind || 'repair')}</strong> · ${escapeHtml(action.explanation || 'No explanation.')}</li>`).join('');
-      const reviews = data.manual_reviews.map((review) => `<li>${escapeHtml(review.reason || 'Manual review required.')}</li>`).join('');
+      const actionGroups = new Map();
+      data.actions.forEach((action) => {
+        const kind = typeof action.kind === 'string' ? action.kind : 'other';
+        const entries = actionGroups.get(kind) || [];
+        entries.push(action);
+        actionGroups.set(kind, entries);
+      });
+      const actionCounts = [...actionGroups.entries()].map(([kind, entries]) => `<span><strong>${entries.length}</strong> ${escapeHtml(hierarchyActionLabel(kind).toLowerCase())}</span>`).join(' · ');
+      const showActionDetails = data.actions.length <= 100 ? ' open' : '';
+      const actionGroupsMarkup = [...actionGroups.entries()].map(([kind, entries]) => {
+        const rows = entries.map((action) => {
+          const itemId = Number(action.item_id);
+          const itemLabel = typeof action.item_label === 'string' ? action.item_label : itemId ? `Item ${itemId}` : 'New catalogue record';
+          const source = itemId ? `<a href="/item/${itemId}">${escapeHtml(itemLabel)}</a>` : escapeHtml(itemLabel);
+          const targetId = Number(action.target_item_id);
+          const targetLabel = typeof action.target_label === 'string' ? action.target_label : null;
+          const target = targetLabel ? (targetId ? `<a href="/item/${targetId}">${escapeHtml(targetLabel)}</a>` : escapeHtml(targetLabel)) : '';
+          return `<li class="k-hierarchy-action"><div><strong>${source}</strong>${target ? ` <span aria-hidden="true">→</span> ${target}` : ''}</div><small>${escapeHtml(action.explanation || 'No explanation.')}</small></li>`;
+        }).join('');
+        return `<details class="k-hierarchy-group"${showActionDetails}><summary>${escapeHtml(hierarchyActionLabel(kind))} · ${entries.length}</summary><ol class="k-admin-detail-list">${rows}</ol></details>`;
+      }).join('');
+      const reviews = data.manual_reviews.map((review) => {
+        const itemId = Number(review.item_id);
+        const itemLabel = typeof review.item_label === 'string' ? review.item_label : itemId ? `Item ${itemId}` : null;
+        const item = itemLabel ? (itemId ? `<a href="/item/${itemId}">${escapeHtml(itemLabel)}</a> · ` : `${escapeHtml(itemLabel)} · `) : '';
+        return `<li>${item}${escapeHtml(review.reason || 'Manual review required.')}</li>`;
+      }).join('');
       this.innerHTML = `<section class="k-admin-panel" aria-live="polite">
-        <div class="k-admin-row"><span>Proposed repairs</span><span class="k-admin-row__value">${data.actions.length}</span></div>
+        <div class="k-admin-row"><span>Planned changes</span><span class="k-admin-row__value">${data.actions.length} total${actionCounts ? ` · ${actionCounts}` : ''}</span></div>
         <div class="k-admin-row"><span>Manual review</span><span class="k-admin-row__value">${data.manual_reviews.length}</span></div>
         <div class="k-admin-row"><span>Affected references</span><span class="k-admin-row__value">${Number(impact.playback_states || 0)} playback · ${Number(impact.metadata_bindings || 0)} metadata · ${Number(impact.collection_memberships || 0)} collections · ${Number(impact.watch_order_entries || 0)} watch-order entries</span></div>
         <div class="k-action-row"><button type="button" class="k-button" data-admin-hierarchy-dry>Run durable dry run</button><button type="button" class="k-button k-button--primary" data-admin-hierarchy-apply>Apply repair</button></div>
-        <details open><summary>Proposed repair summary</summary><ul class="k-admin-detail-list">${actions || '<li>No automatic repairs are currently safe.</li>'}</ul></details>
-        <details><summary>Detected structural issues requiring review</summary><ul class="k-admin-detail-list">${reviews || '<li>No ambiguous structural issues were detected.</li>'}</ul></details>
+        <p class="k-quiet-copy">This is a preview of planned hierarchy changes. Expand a group to inspect each affected catalogue record and its destination. Apply affects every listed change; media files are never changed.</p>
+        <section class="k-hierarchy-groups">${actionGroupsMarkup || '<div class="k-admin-status">No automatic repairs are currently safe.</div>'}</section>
+        <details><summary>Detected structural issues requiring review (${data.manual_reviews.length})</summary><ul class="k-admin-detail-list">${reviews || '<li>No ambiguous structural issues were detected.</li>'}</ul></details>
         <p class="k-quiet-copy">Apply creates a database backup and runs as a durable administration job. Media files are never changed.</p>
       </section>`;
+      this.bindActions();
+    }
+
+    renderDuplicates() {
+      const candidates = this.duplicates?.candidates;
+      if (!Array.isArray(candidates)) return this.renderError();
+      const fileIssues = Array.isArray(this.duplicates?.fileIssues) ? this.duplicates.fileIssues : [];
+      const candidateKeys = new Set(candidates.map((candidate) => `${Number(candidate.source_item_id)}:${Number(candidate.target_item_id)}`));
+      this.selectedDuplicatePairs = new Set([...this.selectedDuplicatePairs].filter((key) => candidateKeys.has(key)));
+      const rows = candidates.map((candidate) => {
+        const impact = candidate.impact || {};
+        const key = `${Number(candidate.source_item_id)}:${Number(candidate.target_item_id)}`;
+        const source = `${candidate.source_title || 'Untitled'}${candidate.source_year ? ` (${candidate.source_year})` : ''}`;
+        const target = `${candidate.target_title || 'Untitled'}${candidate.target_year ? ` (${candidate.target_year})` : ''}`;
+        const references = `${Number(impact.playback_states || 0)} playback · ${Number(impact.metadata_bindings || 0)} metadata · ${Number(impact.collection_memberships || 0)} collections · ${Number(impact.watch_order_entries || 0)} watch-order entries`;
+        return `<article class="k-root-row"><div><strong>Media-less record</strong><small><a href="/item/${Number(candidate.source_item_id)}">${escapeHtml(source)}</a></small></div><div><strong>File-backed record</strong><small><a href="/item/${Number(candidate.target_item_id)}">${escapeHtml(target)}</a> · ${escapeHtml(candidate.provider || 'provider')} ${escapeHtml(candidate.provider_id || '')}</small><small>${escapeHtml(references)}</small></div><div class="k-row-actions"><label class="k-check"><input type="checkbox" data-admin-duplicate-select="${escapeHtml(key)}"${this.selectedDuplicatePairs.has(key) ? ' checked' : ''}> Select</label><button type="button" class="k-button k-button--primary" data-admin-duplicate-resolve data-admin-duplicate-source="${Number(candidate.source_item_id)}" data-admin-duplicate-target="${Number(candidate.target_item_id)}">Merge</button></div></article>`;
+      }).join('');
+      const fileRows = fileIssues.map((issue) => `<article class="k-root-row k-duplicate-file-row"><div><strong>Duplicate episode file</strong><small>${escapeHtml(issue.path || '')}</small></div><div><small>${escapeHtml(issue.message || 'This file was not catalogued.')}</small></div></article>`).join('');
+      const selectedCount = this.selectedDuplicatePairs.size;
+      const batchAction = candidates.length > 1 ? `<div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-duplicates-merge${selectedCount ? '' : ' disabled'}>Merge selected (${selectedCount})</button></div>` : '';
+      this.innerHTML = `<section class="k-admin-list" aria-live="polite"><p class="k-quiet-copy">Only one-to-one matches are shown. Merging transfers catalogue state and matching empty hierarchy records to the file-backed item, creates one database backup, then deletes the media-less duplicates. Media files are never changed.</p>${batchAction}${rows || '<div class="k-admin-status">No unambiguous media-less record duplicates are currently ready to merge.</div>'}<section class="k-admin-list"><p class="k-quiet-copy">Duplicate episode files are left uncatalogued. Rename, move, or remove the unwanted file, then scan the library again.</p><div class="k-action-row"><button type="button" class="k-button" data-admin-operation="scan">Scan after resolving</button></div>${fileRows || '<div class="k-admin-status">No duplicate episode files need attention.</div>'}</section></section>`;
       this.bindActions();
     }
 
@@ -228,6 +328,7 @@
       const candidates = Array.isArray(item.candidates) ? item.candidates : [];
       this.candidateIndex = Math.min(this.candidateIndex, Math.max(0, candidates.length - 1));
       const candidate = candidates[this.candidateIndex];
+      const reviewPosition = `${this.reviewIndex + 1} of ${this.reviewItems.length}`;
       const candidateRows = candidates.map((entry, index) => `<button type="button" class="k-metadata-candidate${index === this.candidateIndex ? ' k-metadata-candidate--selected' : ''}" data-admin-candidate="${index}"><span>${escapeHtml(entry.title)}</span><small>${escapeHtml(entry.provider)} · ${Math.round(Number(entry.confidence || 0) * 100)}%</small><span class="k-progress-edge"><span style="--k-progress:${Math.round(Number(entry.confidence || 0) * 100)}%"></span></span></button>`).join('');
       const selectedUrl = providerEntryUrl(candidate);
       const selectedTitle = candidate
@@ -236,7 +337,7 @@
           : `<strong>${escapeHtml(candidate.title)}</strong>`
         : '';
       const selected = candidate ? `<div class="k-metadata-selected">${selectedTitle}<small>${escapeHtml(candidate.provider)} · ${candidate.year || '—'} · ${Math.round(Number(candidate.confidence || 0) * 100)}%</small><details><summary>Scoring</summary><p>Confidence is supplied by ${escapeHtml(candidate.provider)}. Match only when the local title, year, and kind agree.</p></details></div>` : '<div class="k-admin-status">No candidates.</div>';
-      this.innerHTML = `<section class="k-metadata-review" aria-live="polite"><div class="k-metadata-local">${item.posterUrl ? `<img src="${escapeHtml(item.posterUrl)}" alt="">` : '<span class="k-metadata-poster">?</span>'}<div><strong>${escapeHtml(item.title)}</strong><small>${item.year || '—'} · ${escapeHtml(item.kind)}</small></div></div><div class="k-metadata-candidates">${candidateRows}</div><div class="k-metadata-actions">${selected}<div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-metadata="match">Match</button><button type="button" class="k-button" data-admin-metadata="reject">Reject</button><button type="button" class="k-button" data-admin-metadata="ignore">Ignore</button><button type="button" class="k-button" data-admin-metadata="refresh">Refresh</button></div><div class="k-action-row"><button type="button" class="k-button" data-admin-review-nav="previous">Previous</button><button type="button" class="k-button" data-admin-review-nav="next">Next</button></div></div></section>`;
+      this.innerHTML = `<section class="k-metadata-review" aria-live="polite"><div class="k-metadata-local"><span class="k-metadata-panel__heading">Library item</span><div class="k-metadata-local__body">${item.posterUrl ? `<img src="${escapeHtml(item.posterUrl)}" alt="">` : '<span class="k-metadata-poster">?</span>'}<div><strong>${escapeHtml(item.title)}</strong><small>${item.year || '—'} · ${escapeHtml(item.kind)}</small></div></div></div><div class="k-metadata-candidates"><div class="k-metadata-panel__heading"><span>Candidate matches</span><small>${candidates.length} available</small></div><div class="k-metadata-candidate-list">${candidateRows}</div></div><div class="k-metadata-actions"><div><span class="k-metadata-panel__heading">Selected match</span>${selected}</div><div class="k-metadata-decision"><span class="k-metadata-panel__heading">Decision</span><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-metadata="match">Match</button><button type="button" class="k-button" data-admin-metadata="reject">Reject</button><button type="button" class="k-button" data-admin-metadata="ignore">Ignore</button><button type="button" class="k-button" data-admin-metadata="refresh">Refresh</button></div></div><div class="k-metadata-navigation"><span>Review ${reviewPosition}</span><div class="k-action-row"><button type="button" class="k-button" data-admin-review-nav="previous">Previous</button><button type="button" class="k-button" data-admin-review-nav="next">Next</button></div></div></div></section>`;
       this.bindActions();
     }
 
@@ -249,6 +350,31 @@
       this.querySelector('[data-admin-hierarchy-apply]')?.addEventListener('click', () => {
         if (window.confirm('Apply the proposed hierarchy repair? A database backup will be created first.')) {
           this.operation('hierarchy-repair', {apply: true, confirmed: true});
+        }
+      });
+      this.querySelectorAll('[data-admin-duplicate-resolve]').forEach((button) => button.addEventListener('click', () => {
+        const sourceItemId = Number(button.dataset.adminDuplicateSource);
+        const targetItemId = Number(button.dataset.adminDuplicateTarget);
+        if (!Number.isInteger(sourceItemId) || !Number.isInteger(targetItemId)) return;
+        if (window.confirm('Merge this duplicate? The media-less catalogue record and matching empty hierarchy will be deleted after their metadata, collections, and watch state are transferred. A database backup will be created first.')) {
+          this.operation('duplicate-resolve', {sourceItemId, targetItemId, confirmed: true});
+        }
+      }));
+      this.querySelectorAll('[data-admin-duplicate-select]').forEach((input) => input.addEventListener('change', () => {
+        const key = input.dataset.adminDuplicateSelect;
+        if (!key) return;
+        if (input.checked) this.selectedDuplicatePairs.add(key);
+        else this.selectedDuplicatePairs.delete(key);
+        this.renderDuplicates();
+      }));
+      this.querySelector('[data-admin-duplicates-merge]')?.addEventListener('click', () => {
+        const resolutions = [...this.selectedDuplicatePairs].map((key) => {
+          const [source_item_id, target_item_id] = key.split(':').map(Number);
+          return {source_item_id, target_item_id};
+        });
+        if (!resolutions.length) return;
+        if (window.confirm(`Merge ${resolutions.length} selected duplicates? The media-less catalogue records and matching empty hierarchy will be deleted after their metadata, collections, and watch state are transferred. One database backup will be created first.`)) {
+          this.operation('duplicate-resolve-batch', {resolutions, confirmed: true});
         }
       });
       this.querySelectorAll('[data-admin-cancel]').forEach((button) => button.addEventListener('click', () => { if (window.confirm('Cancel this job?')) this.operation('cancel-job', {jobId: button.dataset.adminCancel}); }));
@@ -267,22 +393,62 @@
       try {
         const response = await fetch(source, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({operation, ...extra})});
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || 'Action failed');
-        if (payload.job?.id) window.location.assign(`/administration/jobs#${encodeURIComponent(payload.job.id)}`);
-        else if (refresh) this.load();
+        if (!response.ok) {
+          const message = payload.error || 'Action failed';
+          const requestId = typeof payload.requestId === 'string' ? payload.requestId : null;
+          throw new Error(requestId ? `${message} (Katalog request ID: ${requestId})` : message);
+        }
+        if (typeof payload.job?.id === 'string' && payload.job.id) {
+          this.submittedJobId = payload.job.id;
+          this.activity = {state: 'active', message: `${adminOperationLabel(operation)} queued. Waiting for Katalog to start it.`};
+        } else {
+          this.activity = {state: 'complete', message: `${adminOperationLabel(operation)} completed.`};
+        }
+        if (refresh) this.load();
         return true;
       } catch (error) {
-        this.renderInlineError(error?.message || 'Action could not be applied.');
+        this.activity = {state: 'error', message: error?.message || 'Action could not be applied.'};
+        this.render();
         return false;
       }
     }
 
     renderInlineError(message) {
-      const status = this.querySelector('.k-admin-status') || this.querySelector('.k-admin-panel') || this;
+      const status = this.querySelector('section') || this;
       const error = document.createElement('div');
       error.className = 'k-admin-status k-admin-status--error';
       error.textContent = message;
       status.prepend(error);
+    }
+
+    async checkSubmittedJob() {
+      if (!this.submittedJobId) return;
+      const page = await this.fetchJson(this.source('jobs-source'));
+      const jobs = Array.isArray(page.items) ? page.items : [];
+      const job = jobs.find((entry) => entry?.id === this.submittedJobId);
+      if (!job) {
+        this.activity = {state: 'active', message: 'Action submitted. Waiting for Katalog to report its progress.'};
+        return;
+      }
+      const label = adminOperationLabel(job.kind);
+      const phase = typeof job.phase === 'string' && job.phase ? ` · ${job.phase}` : '';
+      const progress = jobProgress(job);
+      if (job.status === 'failed' || job.status === 'interrupted') {
+        this.activity = {state: 'error', message: job.failure || job.message || `${label} ${job.status}. Opening job details.`};
+        window.location.assign(`/administration/jobs#${encodeURIComponent(this.submittedJobId)}`);
+        return;
+      }
+      if (job.status === 'completed') {
+        this.activity = {state: 'complete', message: job.message || `${label} completed.`};
+        this.submittedJobId = null;
+        return;
+      }
+      if (job.status === 'cancelled') {
+        this.activity = {state: 'cancelled', message: job.message || `${label} was cancelled.`};
+        this.submittedJobId = null;
+        return;
+      }
+      this.activity = {state: 'active', message: `${label} ${job.status || 'in progress'}${phase}${progress ? ` · ${progress}` : ''}`};
     }
 
     async metadataAction(action) {

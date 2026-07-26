@@ -44,7 +44,12 @@ class KanvasPlaybackService:
         return launch_uri(launch.launch_token)
 
     async def create_watch_order_launch_uri(
-        self, watch_order_id: int, *, start_item_id: int | None = None
+        self,
+        watch_order_id: int,
+        *,
+        start_item_id: int | None = None,
+        resume: bool = False,
+        skip_unavailable: bool = False,
     ) -> str:
         """Launch an order while retaining its Katalog watch-order context."""
 
@@ -56,6 +61,8 @@ class KanvasPlaybackService:
                     watch_order_id,
                     user_id=self._user_id,
                     start_item_id=start_item_id,
+                    resume=resume,
+                    skip_unavailable=skip_unavailable,
                 )
             )
         return launch_uri(launch.launch_token)
@@ -78,7 +85,12 @@ class KanvasPlaybackService:
             return await client.launch_playback_plan(launch.launch_token)
 
     async def create_watch_order_playback_session(
-        self, watch_order_id: int, *, start_item_id: int | None = None
+        self,
+        watch_order_id: int,
+        *,
+        start_item_id: int | None = None,
+        resume: bool = False,
+        skip_unavailable: bool = False,
     ) -> PlaybackSessionResponse:
         """Create and consume a browser-owned watch-order playback plan."""
 
@@ -90,6 +102,8 @@ class KanvasPlaybackService:
                     watch_order_id,
                     user_id=self._user_id,
                     start_item_id=start_item_id,
+                    resume=resume,
+                    skip_unavailable=skip_unavailable,
                 )
             )
             return await client.launch_playback_plan(launch.launch_token)
@@ -226,7 +240,12 @@ def playback_plan_request(
 
 
 def watch_order_playback_plan_request(
-    watch_order_id: int, *, user_id: int, start_item_id: int | None = None
+    watch_order_id: int,
+    *,
+    user_id: int,
+    start_item_id: int | None = None,
+    resume: bool = False,
+    skip_unavailable: bool = False,
 ) -> PlaybackPlanRequest:
     """Build an order-aware plan request for play and play-from-here controls."""
 
@@ -235,6 +254,8 @@ def watch_order_playback_plan_request(
         context=WatchOrderPlaybackContext(
             watch_order_id=watch_order_id,
             start_item_id=start_item_id,
+            resume=resume,
+            skip_unavailable=skip_unavailable,
         ),
     )
 

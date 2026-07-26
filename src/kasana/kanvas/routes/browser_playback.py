@@ -33,6 +33,10 @@ def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
         )
     ):
         ui.label("Loading player…").classes("k-player__status").props('aria-live="polite"')
+        if session.skipped_unavailable_titles:
+            ui.label(
+                "Skipped unavailable entries: " + " · ".join(session.skipped_unavailable_titles)
+            ).classes("k-player__warning").props('aria-live="polite"')
         ui.element("a").classes("k-player__kestrel").props(
             'data-player-kestrel hidden aria-live="polite"'
         )

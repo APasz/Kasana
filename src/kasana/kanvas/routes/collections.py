@@ -14,6 +14,7 @@ from kasana.kanvas.components.collections import (
     watch_order_card,
     watch_order_header,
     watch_order_rows,
+    watch_order_workspace,
 )
 from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.feedback import feedback_state
@@ -48,7 +49,8 @@ async def render_collections_index(
     with page_shell(settings, "/collections", "Collections", profile):
         with ui.element("div").classes("k-collection-page-heading"):
             page_title("Collections")
-            action_button("Create", lambda: ui.navigate.to("/collections/new"), primary=True)
+            if profile.is_administrator:
+                action_button("Create", lambda: ui.navigate.to("/collections/new"), primary=True)
         with (
             ui.element("form").classes("k-filter-strip").props('method="get" action="/collections"')
         ):
@@ -69,6 +71,9 @@ async def render_collection_new(settings: Kanvas_Settings, profile: SessionProfi
     """Render a focused native form for a new collection."""
 
     with page_shell(settings, "/collections", "Create collection", profile):
+        if not profile.is_administrator:
+            feedback_state("Collections are read-only", "An administrator can create collections.")
+            return
         page_title("New collection")
         with (
             ui.element("form")
@@ -102,12 +107,23 @@ async def render_collection_detail(
             with ui.element("div").classes("k-collection-detail__content"):
                 with ui.element("div").classes("k-collection-page-heading"):
                     page_title(detail.name)
-                    action_button("Edit", lambda: ui.navigate.to(f"/collections/{detail.id}/edit"))
+                    if profile.is_administrator:
+                        action_button(
+                            "Edit", lambda: ui.navigate.to(f"/collections/{detail.id}/edit")
+                        )
                 ui.label(f"{detail.item_count} items · {detail.watch_order_count} orders").classes(
                     "k-collection-detail__facts"
                 )
                 if detail.overview:
                     ui.label(detail.overview).classes("k-item__overview")
+                if detail.default_watch_order_id is not None:
+                    action_button(
+                        "Resume collection",
+                        lambda: ui.navigate.to(
+                            f"/play/watch-orders/{detail.default_watch_order_id}?resume=true"
+                        ),
+                        primary=True,
+                    )
         if detail.watch_orders:
             section_title("Watch orders")
             with ui.element("div").classes("k-watch-order-grid"):
@@ -132,6 +148,9 @@ async def render_collection_edit(
     """Render focused metadata, membership and relationship controls."""
 
     with page_shell(settings, "/collections", "Edit collection", profile):
+        if not profile.is_administrator:
+            feedback_state("Collections are read-only", "An administrator can edit collections.")
+            return
         try:
             detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
                 collection_id
@@ -148,6 +167,36 @@ async def render_collection_edit(
             hidden_input(name="revision", value=str(detail.revision))
             text_input(name="name", aria_label="Collection name", value=detail.name)
             textarea_input(name="overview", aria_label="Overview", value=detail.overview)
+            select_input(
+                name="default_watch_order_id",
+                aria_label="Default watch order",
+                options=(
+                    *(
+                        SelectOption(str(order.id), order.name)
+                        for order in detail.watch_orders
+                    ),
+                )
+                if detail.watch_orders
+                else (SelectOption("", "No watch orders yet"),),
+                value=(
+                    str(detail.default_watch_order_id)
+                    if detail.default_watch_order_id is not None
+                    else ""
+                ),
+            )
+            select_input(
+                name="artwork_item_id",
+                aria_label="Collection artwork",
+                options=(
+                    SelectOption("", "Poster mosaic"),
+                    *(
+                        SelectOption(str(member.poster.id), member.poster.title)
+                        for member in detail.movies + detail.series + detail.other_members
+                        if member.poster.poster_url is not None
+                    ),
+                ),
+                value=(str(detail.artwork_item_id) if detail.artwork_item_id is not None else ""),
+            )
             action_button("Save", primary=True, button_type=ButtonType.SUBMIT)
         with ui.element("div").classes("k-editor-section-heading"):
             section_title("Members")
@@ -165,6 +214,10 @@ async def render_collection_edit(
             "New watch order",
             lambda: ui.navigate.to(f"/collections/{detail.id}/watch-orders/new"),
         )
+        if detail.watch_orders:
+            with ui.element("div").classes("k-watch-order-grid"):
+                for card in detail.watch_orders:
+                    watch_order_card(card, href=f"/watch-orders/{card.id}/edit")
         with (
             ui.element("form")
             .classes("k-danger-zone")
@@ -186,6 +239,9 @@ async def render_watch_order_new(
     """Render an empty watch-order creation form tied to the collection revision."""
 
     with page_shell(settings, "/collections", "New watch order", profile):
+        if not profile.is_administrator:
+            feedback_state("Collections are read-only", "An administrator can create watch orders.")
+            return
         try:
             detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
                 collection_id
@@ -230,6 +286,9 @@ async def render_watch_order(
     """Render a virtualised order detail/editor with optional explicit generation review."""
 
     with page_shell(settings, "/collections", "Watch order", profile):
+        if editable and not profile.is_administrator:
+            feedback_state("Collections are read-only", "An administrator can edit watch orders.")
+            return
         catalogue = KanvasKatalogService(settings, profile.user.id)
         try:
             editor = await catalogue.watch_order_editor(watch_order_id)
@@ -241,19 +300,19 @@ async def render_watch_order(
         _watch_order_playback_actions(editor.id)
         if editable:
             _watch_order_edit_form(editor)
-            item_picker_overlay(
-                source=f"/kanvas/data/collections/{editor.collection_id}/picker?playable=1",
+            watch_order_workspace(
+                source=f"/kanvas/data/watch-orders/{editor.id}/workspace",
                 action=f"/kanvas/actions/watch-orders/{editor.id}/entries",
+                launch_action=f"/kanvas/actions/watch-orders/{editor.id}/launch",
                 revision=editor.revision,
-                playable_only=True,
-                label="Add playable item",
             )
-        watch_order_rows(
-            source=f"/kanvas/data/watch-orders/{editor.id}",
-            action=f"/kanvas/actions/watch-orders/{editor.id}/entries",
-            launch_action=f"/kanvas/actions/watch-orders/{editor.id}/launch",
-            revision=editor.revision,
-        )
+        else:
+            watch_order_rows(
+                source=f"/kanvas/data/watch-orders/{editor.id}",
+                action=f"/kanvas/actions/watch-orders/{editor.id}/entries",
+                launch_action=f"/kanvas/actions/watch-orders/{editor.id}/launch",
+                revision=editor.revision,
+            )
         if editable:
             _generation_controls(editor.id, editor.revision, preview_mode, apply_mode)
             preview = await _generation_preview(
@@ -270,6 +329,7 @@ async def render_watch_order(
                 .props(f'method="post" action="/kanvas/actions/watch-orders/{editor.id}/delete"')
             ):
                 hidden_input(name="revision", value=str(editor.revision))
+                hidden_input(name="collection_id", value=str(editor.collection_id))
                 text_input(
                     name="confirm",
                     aria_label="Type delete to confirm watch-order deletion",
@@ -308,14 +368,20 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
 
 
 def _watch_order_playback_actions(watch_order_id: int) -> None:
-    def launch(*, resume: bool) -> None:
+    def launch(*, resume: bool, skip_unavailable: bool = False) -> None:
+        skip_query = "&skipUnavailable=true" if skip_unavailable else ""
         ui.navigate.to(
-            f"/play/watch-orders/{watch_order_id}?resume={'true' if resume else 'false'}"
+            f"/play/watch-orders/{watch_order_id}?resume="
+            f"{'true' if resume else 'false'}{skip_query}"
         )
 
     with ui.element("div").classes("k-action-row"):
         action_button("Play", lambda: launch(resume=False), primary=True)
         action_button("Resume", lambda: launch(resume=True))
+        action_button(
+            "Play available entries",
+            lambda: launch(resume=False, skip_unavailable=True),
+        )
 
 
 def _watch_order_edit_form(detail: WatchOrderEditorView) -> None:

@@ -95,12 +95,29 @@ def update_collection(
     """Change a collection using its current revision."""
 
     cli = context_from(context)
-    values: dict[str, str | None] = {}
-    if name is not None:
-        values["name"] = name
-    if overview is not None or clear_overview:
-        values["overview"] = None if clear_overview else overview
-    request = _validated(cli, lambda: CollectionUpdate(expected_revision=revision, **values))
+    if name is not None and (overview is not None or clear_overview):
+        request = _validated(
+            cli,
+            lambda: CollectionUpdate(
+                expected_revision=revision,
+                name=name,
+                overview=None if clear_overview else overview,
+            ),
+        )
+    elif name is not None:
+        request = _validated(
+            cli, lambda: CollectionUpdate(expected_revision=revision, name=name)
+        )
+    elif overview is not None or clear_overview:
+        request = _validated(
+            cli,
+            lambda: CollectionUpdate(
+                expected_revision=revision,
+                overview=None if clear_overview else overview,
+            ),
+        )
+    else:
+        request = _validated(cli, lambda: CollectionUpdate(expected_revision=revision))
     result = with_catalogue_queries(
         cli, lambda queries: queries.update_collection(collection_id, request)
     )

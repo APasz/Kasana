@@ -202,9 +202,14 @@ def materialise_item(
                     sort_title=parsed.title,
                     season_number=parsed.season_number,
                     episode_number=parsed.episode_number,
+                    episode_end_season_number=parsed.episode_end_season_number,
+                    episode_end_number=parsed.episode_end_number,
                 )
                 session.add(episode)
                 cache.episodes[episode_key] = episode
+            else:
+                episode.episode_end_season_number = parsed.episode_end_season_number
+                episode.episode_end_number = parsed.episode_end_number
             return episode
 
 

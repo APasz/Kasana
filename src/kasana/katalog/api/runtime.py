@@ -7,11 +7,15 @@ from datetime import timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from kasana.katalog.api.contracts import (
     BackgroundJob,
     DirectoryEntry,
     DirectoryListing,
+    DuplicateResolutionCandidate,
+    DuplicateResolutionPair,
+    DuplicateResolutionPreview,
     HierarchyRepairActionSummary,
     HierarchyRepairImpact,
     HierarchyRepairManualReview,
@@ -23,9 +27,13 @@ from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTr
 from kasana.katalog.backup import JsonBackupScheduler
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MatchThresholds, MetadataProvider, MetadataWorkflow
+from kasana.katalog.models import Zaisan, ZaisanKind
 from kasana.katalog.repair import (
+    DuplicateResolutionService,
     HierarchyRepairFilters,
     HierarchyRepairService,
+    RepairAction,
+    duplicate_resolution_backup_path,
     repair_backup_path,
 )
 from kasana.katalog.scanning import IncrementalScanner, ScanResult
@@ -325,6 +333,61 @@ class KatalogApiRuntime:
 
         return await self.jobs.submit("library-consistency", consistency, library_root_id=root_id)
 
+    async def submit_duplicate_resolution(
+        self, *, source_item_id: int, target_item_id: int
+    ) -> BackgroundJob:
+        return await self.submit_duplicate_resolutions(
+            resolutions=(
+                DuplicateResolutionPair(
+                    source_item_id=source_item_id,
+                    target_item_id=target_item_id,
+                ),
+            )
+        )
+
+    async def submit_duplicate_resolutions(
+        self, *, resolutions: tuple[DuplicateResolutionPair, ...]
+    ) -> BackgroundJob:
+        """Merge freshly validated duplicate records after creating one SQLite backup."""
+
+        resolution_pairs = tuple(
+            (resolution.source_item_id, resolution.target_item_id) for resolution in resolutions
+        )
+        resolution_count = len(resolution_pairs)
+
+        async def resolve(context: JobContext) -> JobOutcome:
+            await context.report(
+                phase="resolving",
+                current=0,
+                total=resolution_count,
+                unit="duplicates",
+                message="Validating duplicate resolutions.",
+            )
+            backup_path = duplicate_resolution_backup_path(self.database.database_path)
+            await run_blocking(self.database.backup_to, backup_path)
+            await run_blocking(
+                DuplicateResolutionService(self.database).apply_many,
+                resolutions=resolution_pairs,
+                backup_path=backup_path,
+            )
+            await context.report(
+                phase="complete",
+                current=resolution_count,
+                total=resolution_count,
+                unit="duplicates",
+                message="Duplicate resolutions complete.",
+                force=True,
+            )
+            return JobOutcome(
+                message=(
+                    f"Resolved {resolution_count} duplicate catalogue records. "
+                    "A database backup was created."
+                ),
+                counters={"resolved": resolution_count},
+            )
+
+        return await self.jobs.submit("duplicate-resolution", resolve)
+
     async def hierarchy_repair_preview(
         self, *, root_id: int | None, issue_id: int | None, item_id: int | None
     ) -> HierarchyRepairPreview:
@@ -334,12 +397,25 @@ class KatalogApiRuntime:
             HierarchyRepairService(self.database).preview,
             HierarchyRepairFilters(root_id=root_id, issue_id=issue_id, item_id=item_id),
         )
+        action_item_ids = frozenset(
+            action_id
+            for action in plan.actions
+            for action_id in (action.item_id, action.target_item_id)
+            if action_id is not None
+        ) | frozenset(review.item_id for review in plan.manual_reviews if review.item_id is not None)
+        item_labels = await run_blocking(
+            _hierarchy_item_labels, self.database, action_item_ids
+        )
         return HierarchyRepairPreview(
             actions=tuple(
                 HierarchyRepairActionSummary(
                     kind=action.kind.value,
                     item_id=action.item_id,
+                    item_label=(
+                        item_labels.get(action.item_id) if action.item_id is not None else None
+                    ),
                     target_item_id=action.target_item_id,
+                    target_label=hierarchy_target_label(action, item_labels),
                     explanation=action.explanation,
                 )
                 for action in plan.actions
@@ -348,6 +424,9 @@ class KatalogApiRuntime:
                 HierarchyRepairManualReview(
                     root_id=review.root_id,
                     item_id=review.item_id,
+                    item_label=(
+                        item_labels.get(review.item_id) if review.item_id is not None else None
+                    ),
                     reason=review.reason,
                 )
                 for review in plan.manual_reviews
@@ -358,6 +437,32 @@ class KatalogApiRuntime:
                 collection_memberships=plan.impact.collection_memberships,
                 watch_order_entries=plan.impact.watch_order_entries,
             ),
+        )
+
+    async def duplicate_resolution_preview(self) -> DuplicateResolutionPreview:
+        """Expose only currently unambiguous media-less duplicate resolutions."""
+
+        candidates = await run_blocking(DuplicateResolutionService(self.database).preview)
+        return DuplicateResolutionPreview(
+            candidates=tuple(
+                DuplicateResolutionCandidate(
+                    source_item_id=candidate.source_item_id,
+                    source_title=candidate.source_title,
+                    source_year=candidate.source_year,
+                    target_item_id=candidate.target_item_id,
+                    target_title=candidate.target_title,
+                    target_year=candidate.target_year,
+                    provider=candidate.provider,
+                    provider_id=candidate.provider_id,
+                    impact=HierarchyRepairImpact(
+                        playback_states=candidate.impact.playback_states,
+                        metadata_bindings=candidate.impact.metadata_bindings,
+                        collection_memberships=candidate.impact.collection_memberships,
+                        watch_order_entries=candidate.impact.watch_order_entries,
+                    ),
+                )
+                for candidate in candidates
+            )
         )
 
     def _workflow(self) -> MetadataWorkflow:
@@ -395,6 +500,53 @@ def _provider(name: str, providers: tuple[MetadataProvider, ...]) -> MetadataPro
             return provider
     msg = f"Metadata provider {name!r} is not configured."
     raise MetadataProviderConfigurationError(msg)
+
+
+def _hierarchy_item_labels(
+    database: KatalogDatabase, item_ids: frozenset[int]
+) -> dict[int, str]:
+    """Return compact, path-free labels for hierarchy-preview item links."""
+
+    if not item_ids:
+        return {}
+    items = database.run_transaction(
+        lambda session: tuple(
+            session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids))).all()
+        )
+    )
+    return {item.id: hierarchy_item_label(item) for item in items}
+
+
+def hierarchy_item_label(item: Zaisan) -> str:
+    kind = item.item_kind.value.capitalize()
+    if item.item_kind is ZaisanKind.EPISODE:
+        if item.season_number is None or item.episode_number is None:
+            return f"{kind}: {item.title} (missing episode numbers)"
+        return f"{kind}: {item.title} (S{item.season_number:02d} E{item.episode_number:02d})"
+    if item.item_kind is ZaisanKind.SEASON:
+        if item.season_number is None:
+            return f"{kind}: {item.title} (missing season number)"
+        return f"{kind}: {item.title} (Season {item.season_number})"
+    return f"{kind}: {item.title}"
+
+
+def hierarchy_target_label(
+    action: RepairAction, item_labels: dict[int, str]
+) -> str | None:
+    if action.target_item_id is not None:
+        return item_labels.get(action.target_item_id)
+    if action.target_kind is ZaisanKind.SEASON:
+        if action.target_series_title is not None and action.target_season_number is not None:
+            return f"Season {action.target_season_number} of {action.target_series_title}"
+        return None
+    if action.target_kind is ZaisanKind.SERIES:
+        title = action.target_series_title or action.target_title
+        return f"Series: {title}" if title is not None else None
+    if action.target_kind is ZaisanKind.MOVIE:
+        return f"Movie: {action.target_title}" if action.target_title is not None else None
+    if action.target_title is not None:
+        return action.target_title
+    return None
 
 
 def _scan_issue_counters(result: ScanResult) -> dict[str, int]:

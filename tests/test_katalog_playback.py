@@ -24,16 +24,22 @@ from kasana.katalog.api.service import MediaTransferFile
 from kasana.katalog.api.transfer import BoundedFileResponse, RangeStreamingFileTransferPolicy
 from kasana.katalog.client import KatalogClient
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
 from kasana.katalog.models import (
     AvailabilityState,
     KeiroKind,
     PlaybackLaunchToken,
     PlaybackSession,
     PlaybackState,
+    Zaisan,
     ZaisanKind,
 )
 from kasana.katalog.public import (
+    PlaybackContext,
+    PlaybackContextKind,
+    PlaybackPlanEntry,
     PlaybackPlanRequest,
+    PlaybackSessionResponse,
     SessionProgressUpdate,
     StandalonePlaybackContext,
 )
@@ -57,6 +63,32 @@ class PlaybackFixture:
     database: KatalogDatabase
     settings: KatalogSettings
     ids: dict[str, int]
+
+
+def test_playback_session_response_accepts_the_configurable_queue_maximum() -> None:
+    entry = PlaybackPlanEntry(
+        position=0,
+        item_id=1,
+        display_title="Queue item",
+        saved_resume_position_seconds=0,
+        stream_url="/api/v1/media/token",
+        download_url="/api/v1/downloads/token",
+    )
+    now = datetime.now(UTC)
+
+    session = PlaybackSessionResponse(
+        id="s" * 32,
+        user_id=1,
+        context=PlaybackContext(kind=PlaybackContextKind.MANUAL_QUEUE),
+        current_entry_position=0,
+        current_item=entry,
+        entries=(entry,) * MAX_PLAYBACK_QUEUE_SIZE,
+        created_at=now,
+        expires_at=now + timedelta(hours=8),
+        closed_at=None,
+    )
+
+    assert len(session.entries) == MAX_PLAYBACK_QUEUE_SIZE
 
 
 @pytest.fixture
@@ -185,6 +217,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             "episode_two": episode_two.id,
             "episode_three": episode_three.id,
             "user": user.id,
+            "collection": collection.id,
             "watch_order": watch_order.id,
         }
     settings = KatalogSettings(
@@ -373,6 +406,178 @@ async def test_progress_seek_completion_expiry_and_unavailable_items(
         f"/api/v1/playback/sessions/{session['id']}"
     )
     assert expired_session.status_code == 404
+
+
+async def test_collection_order_workflow_preserves_default_resume_and_explicit_skips(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+
+    created = await client.post("/api/v1/collections", json={"name": "Stargate"})
+    assert created.status_code == 201
+    collection_id = created.json()["collection_id"]
+    collection_revision = created.json()["revision"]
+    collection_item_ids = (
+        ids["movie"],
+        ids["series"],
+        ids["episode_one"],
+        ids["unavailable"],
+        ids["episode_two"],
+    )
+    for item_id in collection_item_ids:
+        membership = await client.post(
+            f"/api/v1/collections/{collection_id}/items",
+            json={"expected_revision": collection_revision, "library_item_id": item_id},
+        )
+        assert membership.status_code == 200
+        collection_revision = membership.json()["revision"]
+
+    order = await client.post(
+        f"/api/v1/collections/{collection_id}/watch-orders",
+        json={
+            "expected_collection_revision": collection_revision,
+            "name": "Stargate release order",
+            "kind": "custom",
+        },
+    )
+    assert order.status_code == 201
+    order_id = order.json()["watch_order_id"]
+    order_revision = order.json()["revision"]
+    for item_id in (ids["movie"], ids["episode_one"], ids["unavailable"], ids["episode_two"]):
+        entry = await client.post(
+            f"/api/v1/watch-orders/{order_id}/entries",
+            json={"expected_revision": order_revision, "library_item_id": item_id},
+        )
+        assert entry.status_code == 200
+        order_revision = entry.json()["revision"]
+
+    detail = await client.get(f"/api/v1/collections/{collection_id}?user_id={ids['user']}")
+    assert detail.status_code == 200
+    order_summary = detail.json()["watch_orders"][0]
+    assert detail.json()["default_watch_order_id"] == order_id
+    assert order_summary["is_default"] is True
+    assert order_summary["progress"]["completed_entry_count"] == 0
+    assert order_summary["progress"]["progress_percent"] == 0
+    assert order_summary["progress"]["unavailable_entry_count"] == 1
+    assert order_summary["progress"]["next_item"]["id"] == ids["movie"]
+
+    blocked = await client.post(
+        "/api/v1/playback/plans",
+        json={
+            "user_id": ids["user"],
+            "context": {"kind": "watch_order", "watch_order_id": order_id},
+        },
+    )
+    assert blocked.status_code == 422
+    assert "skip_unavailable" in blocked.text
+
+    launched = await _create_plan(
+        playback_fixture,
+        {
+            "kind": "watch_order",
+            "watch_order_id": order_id,
+            "skip_unavailable": True,
+        },
+    )
+    session = (await client.get(f"/api/v1/playback/plans/{launched}")).json()
+    assert [entry["item_id"] for entry in session["entries"]] == [
+        ids["movie"],
+        ids["episode_one"],
+        ids["episode_two"],
+    ]
+    assert session["skipped_unavailable_titles"] == ["Unavailable Movie"]
+
+    completed = await client.post(f"/api/v1/playback/sessions/{session['id']}/complete")
+    assert completed.status_code == 200
+    advanced = await client.post(f"/api/v1/playback/sessions/{session['id']}/advance")
+    assert advanced.status_code == 200
+    assert advanced.json()["current_item"]["item_id"] == ids["episode_one"]
+
+    resumed_launch = await _create_plan(
+        playback_fixture,
+        {
+            "kind": "watch_order",
+            "watch_order_id": order_id,
+            "resume": True,
+            "skip_unavailable": True,
+        },
+    )
+    resumed = (await client.get(f"/api/v1/playback/plans/{resumed_launch}")).json()
+    assert resumed["current_item"]["item_id"] == ids["episode_one"]
+
+    on_deck = await client.get(f"/api/v1/users/{ids['user']}/on-deck")
+    assert on_deck.status_code == 200
+    active_order = next(
+        entry
+        for entry in on_deck.json()["items"]
+        if entry["source_watch_order_id"] == order_id
+    )
+    assert active_order["item"]["id"] == ids["episode_one"]
+    assert active_order["source_collection_name"] == "Stargate"
+
+    continue_watching = await client.get(f"/api/v1/users/{ids['user']}/continue-watching")
+    assert continue_watching.status_code == 200
+    assert all(
+        entry["item"]["id"] not in {ids["movie"], ids["episode_one"], ids["episode_two"]}
+        for entry in continue_watching.json()["items"]
+    )
+
+    with playback_fixture.database.transaction() as database_session:
+        movie = database_session.get(Zaisan, ids["movie"])
+        assert movie is not None
+        missing_media = create_library_item(
+            database_session,
+            library_root_id=movie.library_root_id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Missing media",
+        )
+        missing_media_id = missing_media.id
+
+    current_collection = await client.get(f"/api/v1/collections/{collection_id}")
+    membership = await client.post(
+        f"/api/v1/collections/{collection_id}/items",
+        json={
+            "expected_revision": current_collection.json()["revision"],
+            "library_item_id": missing_media_id,
+        },
+    )
+    assert membership.status_code == 200
+    missing_media_order = await client.post(
+        f"/api/v1/collections/{collection_id}/watch-orders",
+        json={
+            "expected_collection_revision": membership.json()["revision"],
+            "name": "Missing media order",
+            "kind": "custom",
+        },
+    )
+    assert missing_media_order.status_code == 201
+    missing_media_order_id = missing_media_order.json()["watch_order_id"]
+    missing_media_revision = missing_media_order.json()["revision"]
+    for item_id in (missing_media_id, ids["movie"]):
+        entry = await client.post(
+            f"/api/v1/watch-orders/{missing_media_order_id}/entries",
+            json={
+                "expected_revision": missing_media_revision,
+                "library_item_id": item_id,
+            },
+        )
+        assert entry.status_code == 200
+        missing_media_revision = entry.json()["revision"]
+
+    missing_media_launch = await _create_plan(
+        playback_fixture,
+        {
+            "kind": "watch_order",
+            "watch_order_id": missing_media_order_id,
+            "skip_unavailable": True,
+        },
+    )
+    missing_media_session = (
+        await client.get(f"/api/v1/playback/plans/{missing_media_launch}")
+    ).json()
+    assert [entry["item_id"] for entry in missing_media_session["entries"]] == [ids["movie"]]
+    assert missing_media_session["skipped_unavailable_titles"] == ["Missing media"]
 
 
 async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFixture) -> None:

@@ -36,6 +36,7 @@ async def render_library(
 
     with page_shell(settings, "/library", "Library", profile):
         page_title("Library")
+        grid_revision = await _library_grid_revision(settings, profile)
         tag_options, tag_error = await _tag_options(settings, profile, filters)
         _filter_strip(filters, tag_options)
         if tag_error is not None:
@@ -46,11 +47,21 @@ async def render_library(
             {
                 "source": source,
                 "state-user": profile.user.id,
+                "catalogue-revision": grid_revision,
                 "development-mode": settings.development_mode,
             },
         )
         with grid:
             ui.label("Loading library…").classes("k-grid-status").props('aria-live="polite"')
+
+
+async def _library_grid_revision(settings: Kanvas_Settings, profile: SessionProfile) -> str:
+    """Use completed scans to invalidate browser-saved library pages."""
+
+    try:
+        return await KanvasKatalogService(settings, profile.user.id).library_grid_revision()
+    except KatalogClientError:
+        return "unavailable"
 
 
 async def _tag_options(

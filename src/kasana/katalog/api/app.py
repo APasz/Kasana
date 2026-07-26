@@ -32,6 +32,10 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     DirectoryListing,
+    DuplicateEpisodeIssue,
+    DuplicateResolutionBatchRequest,
+    DuplicateResolutionPreview,
+    DuplicateResolutionRequest,
     HealthResponse,
     HierarchyRepairPreview,
     HierarchyRepairRequest,
@@ -72,6 +76,7 @@ from kasana.katalog.api.contracts import (
     WatchedFilter,
     WatchOrderCreate,
     WatchOrderDetail,
+    WatchOrderEntriesCreate,
     WatchOrderEntryCreate,
     WatchOrderEntryMove,
     WatchOrderGenerationPreview,
@@ -90,6 +95,7 @@ from kasana.katalog.api.service import (
 )
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.metadata import MetadataWorkflowError
+from kasana.katalog.metadata.review import MetadataIdentityConflictError
 from kasana.katalog.models import MediaAccessOperation
 from kasana.katalog.settings import KatalogSettings
 from kasana.kourier.errors import KourierError
@@ -301,6 +307,17 @@ def create_app(
         return await run_blocking(runtime.queries.list_item_tags)
 
     @app.get(
+        "/api/v1/scans/duplicate-episodes",
+        response_model=tuple[DuplicateEpisodeIssue, ...],
+        operation_id="v1_list_duplicate_episode_issues",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_duplicate_episode_issues(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[DuplicateEpisodeIssue, ...]:
+        return await run_blocking(runtime.queries.list_duplicate_episode_issues)
+
+    @app.get(
         "/api/v1/library/items",
         response_model=PaginatedResponse[LibraryItemSummary],
         operation_id="v1_list_library_items",
@@ -487,9 +504,10 @@ def create_app(
     )
     async def get_collection(
         collection_id: Annotated[int, Path(gt=0)],
+        user_id: Annotated[int | None, Query(gt=0)] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> CollectionDetail:
-        return await run_blocking(runtime.queries.get_collection, collection_id)
+        return await run_blocking(runtime.queries.get_collection, collection_id, user_id=user_id)
 
     @app.patch(
         "/api/v1/collections/{collection_id}",
@@ -603,6 +621,7 @@ def create_app(
         collection_id: Annotated[int, Path(gt=0)],
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        user_id: Annotated[int | None, Query(gt=0)] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PaginatedResponse[WatchOrderSummary]:
         return await run_blocking(
@@ -610,6 +629,7 @@ def create_app(
             collection_id,
             cursor=cursor,
             limit=limit,
+            user_id=user_id,
         )
 
     @app.post(
@@ -636,10 +656,15 @@ def create_app(
         watch_order_id: Annotated[int, Path(gt=0)],
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        user_id: Annotated[int | None, Query(gt=0)] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> WatchOrderDetail:
         return await run_blocking(
-            runtime.queries.get_watch_order, watch_order_id, cursor=cursor, limit=limit
+            runtime.queries.get_watch_order,
+            watch_order_id,
+            cursor=cursor,
+            limit=limit,
+            user_id=user_id,
         )
 
     @app.patch(
@@ -684,6 +709,19 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> WatchOrderMutationResult:
         return await run_blocking(runtime.queries.add_watch_order_entry, watch_order_id, entry)
+
+    @app.post(
+        "/api/v1/watch-orders/{watch_order_id}/entries/batch",
+        response_model=WatchOrderMutationResult,
+        operation_id="v1_add_watch_order_entries",
+        responses=_ERROR_RESPONSES,
+    )
+    async def add_watch_order_entries(
+        watch_order_id: Annotated[int, Path(gt=0)],
+        entries: WatchOrderEntriesCreate,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> WatchOrderMutationResult:
+        return await run_blocking(runtime.queries.add_watch_order_entries, watch_order_id, entries)
 
     @app.patch(
         "/api/v1/watch-orders/{watch_order_id}/entries/{entry_id}",
@@ -1228,6 +1266,48 @@ def create_app(
             item_id=item_id,
         )
 
+    @app.get(
+        "/api/v1/repairs/duplicates/preview",
+        response_model=DuplicateResolutionPreview,
+        operation_id="v1_get_duplicate_resolution_preview",
+        responses=_ERROR_RESPONSES,
+    )
+    async def duplicate_resolution_preview(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> DuplicateResolutionPreview:
+        return await runtime.duplicate_resolution_preview()
+
+    @app.post(
+        "/api/v1/repairs/duplicates",
+        response_model=JobSubmission,
+        status_code=status.HTTP_202_ACCEPTED,
+        operation_id="v1_submit_duplicate_resolution",
+        responses=_ERROR_RESPONSES,
+    )
+    async def submit_duplicate_resolution(
+        resolution: DuplicateResolutionRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> JobSubmission:
+        job = await runtime.submit_duplicate_resolution(
+            source_item_id=resolution.source_item_id,
+            target_item_id=resolution.target_item_id,
+        )
+        return JobSubmission(job=job)
+
+    @app.post(
+        "/api/v1/repairs/duplicates/batch",
+        response_model=JobSubmission,
+        status_code=status.HTTP_202_ACCEPTED,
+        operation_id="v1_submit_duplicate_resolution_batch",
+        responses=_ERROR_RESPONSES,
+    )
+    async def submit_duplicate_resolution_batch(
+        resolution: DuplicateResolutionBatchRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> JobSubmission:
+        job = await runtime.submit_duplicate_resolutions(resolutions=resolution.resolutions)
+        return JobSubmission(job=job)
+
     return app
 
 
@@ -1257,7 +1337,13 @@ async def _request_context(
     except asyncio.CancelledError:
         raise
     response.headers["X-Request-ID"] = request_id
-    _LOGGER.info("Katalog API request", extra={"request_id": request_id, "path": request.url.path})
+    _LOGGER.info(
+        "Katalog API request: method=%s path=%s status=%s request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        request_id,
+    )
     return response
 
 
@@ -1273,6 +1359,24 @@ def _install_exception_handlers(app: FastAPI) -> None:
         request: Request, error: CatalogueConflictError | JobConflictError
     ) -> JSONResponse:
         return _error_response(request, status.HTTP_409_CONFLICT, "revision_conflict", str(error))
+
+    @app.exception_handler(MetadataIdentityConflictError)
+    async def metadata_identity_conflict(
+        request: Request, error: MetadataIdentityConflictError
+    ) -> JSONResponse:
+        _LOGGER.warning(
+            "Metadata identity conflict: method=%s path=%s request_id=%s detail=%s",
+            request.method,
+            request.url.path,
+            getattr(request.state, "request_id", None),
+            str(error),
+        )
+        return _error_response(
+            request,
+            status.HTTP_409_CONFLICT,
+            "metadata_identity_conflict",
+            str(error),
+        )
 
     @app.exception_handler(CatalogueValidationError)
     @app.exception_handler(ValueError)
@@ -1303,7 +1407,13 @@ def _install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(KourierError)
     @app.exception_handler(SQLAlchemyError)
     async def unavailable(request: Request, error: Exception) -> JSONResponse:
-        _LOGGER.exception("Katalog API dependency failure", exc_info=error)
+        _LOGGER.exception(
+            "Katalog API dependency failure: method=%s path=%s request_id=%s",
+            request.method,
+            request.url.path,
+            getattr(request.state, "request_id", None),
+            exc_info=error,
+        )
         return _error_response(
             request,
             status.HTTP_503_SERVICE_UNAVAILABLE,

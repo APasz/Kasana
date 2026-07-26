@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,13 +13,19 @@ from kasana.katalog.models import (
     HierarchyRepairRun,
     KeiroKind,
     MediaFile,
+    MetadataBinding,
+    MetadataCandidate,
+    MetadataCandidateStatus,
     MetadataField,
+    MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
 )
 from kasana.katalog.repair import (
+    DuplicateResolutionService,
     HierarchyRepairService,
     RepairActionKind,
+    duplicate_resolution_backup_path,
     repair_backup_path,
 )
 from kasana.katalog.services import (
@@ -176,6 +183,439 @@ def test_hierarchy_repair_merge_preserves_playback_collections_and_watch_order_e
     assert counts == (1, 1, 1, 1)
 
 
+def test_duplicate_resolution_merges_unambiguous_media_less_movie_into_file_backed_item(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        source = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Everything Everywhere All at Once",
+            release_year=2022,
+        )
+        source.overview = "A family crosses the multiverse."
+        source.tags = ["science fiction"]
+        target = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Everything, Everywhere, All At Once",
+            release_year=2022,
+        )
+        attach_media_file(
+            session,
+            library_item_id=target.id,
+            absolute_path=movies / "Everything Everywhere All at Once (2022).mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        session.add(
+            MetadataBinding(
+                library_item_id=source.id,
+                provider="tmdb",
+                provider_id="545611",
+                provider_media_kind=ZaisanKind.MOVIE,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        session.add(
+            MetadataCandidate(
+                library_item_id=target.id,
+                provider="tmdb",
+                provider_id="545611",
+                provider_media_kind=ZaisanKind.MOVIE,
+                provider_title="Everything Everywhere All at Once",
+                confidence=1.0,
+                scoring_explanation=[],
+                status=MetadataCandidateStatus.SUGGESTED,
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        user = create_user(session, username="duplicate-resolution-user")
+        record_playback_progress(
+            session,
+            user_id=user.id,
+            library_item_id=source.id,
+            position_seconds=30,
+            duration_seconds=60,
+            completed=False,
+        )
+        collection = create_collection(session, name="Duplicate resolution collection")
+        add_collection_membership(
+            session,
+            collection_id=collection.id,
+            library_item_id=source.id,
+        )
+        order = create_watch_order(
+            session,
+            collection_id=collection.id,
+            name="Duplicate resolution order",
+            order_kind=KeiroKind.CUSTOM,
+        )
+        append_watch_order_entry(
+            session,
+            watch_order_id=order.id,
+            library_item_id=source.id,
+        )
+        return source.id, target.id
+
+    source_id, target_id = database.run_transaction(seed)
+    service = DuplicateResolutionService(database)
+
+    candidates = service.preview()
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert (candidate.source_item_id, candidate.target_item_id) == (source_id, target_id)
+    assert candidate.impact.model_dump() == {
+        "playback_states": 1,
+        "metadata_bindings": 1,
+        "collection_memberships": 1,
+        "watch_order_entries": 1,
+    }
+    backup = duplicate_resolution_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(source_item_id=source_id, target_item_id=target_id, backup_path=backup)
+
+    def resolved(
+        session: Session,
+    ) -> tuple[Zaisan | None, Zaisan, int, int, int, int, int, MetadataCandidateStatus]:
+        target = session.get(Zaisan, target_id)
+        assert target is not None
+        return (
+            session.get(Zaisan, source_id),
+            target,
+            len(target.media_files),
+            len(target.playback_states),
+            len(target.collection_memberships),
+            len(target.watch_order_entries),
+            len(target.metadata_bindings),
+            target.metadata_candidates[0].status,
+        )
+
+    (
+        removed,
+        target,
+        media_count,
+        playback_count,
+        membership_count,
+        entry_count,
+        binding_count,
+        candidate_status,
+    ) = database.run_transaction(resolved)
+    assert backup.is_file()
+    assert removed is None
+    assert target.title == "Everything Everywhere All at Once"
+    assert target.tags == ["science fiction"]
+    assert target.overview == "A family crosses the multiverse."
+    assert candidate_status is MetadataCandidateStatus.ACCEPTED
+    assert (media_count, playback_count, membership_count, entry_count, binding_count) == (
+        1,
+        1,
+        1,
+        1,
+        1,
+    )
+
+
+def test_duplicate_resolution_batch_merges_all_selected_candidates(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[tuple[int, int], tuple[int, int]]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        pairs: list[tuple[int, int]] = []
+        for title, provider_id in (("First Film", "101"), ("Second Film", "202")):
+            source = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.MOVIE,
+                title=title,
+            )
+            target = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.MOVIE,
+                title=f"{title} (local)",
+            )
+            attach_media_file(
+                session,
+                library_item_id=target.id,
+                absolute_path=movies / f"{provider_id}.mkv",
+                size_bytes=1,
+                mtime_ns=1,
+                container="matroska",
+            )
+            session.add(
+                MetadataBinding(
+                    library_item_id=source.id,
+                    provider="tmdb",
+                    provider_id=provider_id,
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    status=MetadataMatchStatus.MATCHED,
+                    scoring_explanation=[],
+                    provider_external_ids=[],
+                )
+            )
+            session.add(
+                MetadataCandidate(
+                    library_item_id=target.id,
+                    provider="tmdb",
+                    provider_id=provider_id,
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    provider_title=title,
+                    confidence=1.0,
+                    scoring_explanation=[],
+                    status=MetadataCandidateStatus.SUGGESTED,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+            pairs.append((source.id, target.id))
+        first_pair, second_pair = pairs
+        return first_pair, second_pair
+
+    pairs = database.run_transaction(seed)
+    service = DuplicateResolutionService(database)
+    candidate_pairs = {
+        (candidate.source_item_id, candidate.target_item_id) for candidate in service.preview()
+    }
+    assert candidate_pairs == set(pairs)
+    backup = duplicate_resolution_backup_path(database.database_path)
+    database.backup_to(backup)
+
+    service.apply_many(resolutions=pairs, backup_path=backup)
+
+    def resolved(session: Session) -> tuple[Zaisan | None, Zaisan | None, int]:
+        return (
+            session.get(Zaisan, pairs[0][0]),
+            session.get(Zaisan, pairs[1][0]),
+            len(session.scalars(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.MOVIE)).all()),
+        )
+
+    assert database.run_transaction(resolved) == (None, None, 2)
+
+
+def test_duplicate_resolution_merges_media_less_series_hierarchy_into_file_backed_series(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    series_root = tmp_path / "Series"
+
+    def seed(session: Session) -> tuple[int, int, int, int]:
+        root = create_library_root(session, path=series_root, expected_media_kind=ZaisanKind.SERIES)
+        source = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="Star Trek: Enterprise",
+        )
+        source_season = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=source.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        target = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="Star Trek; Enterprise",
+        )
+        target_season = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=target.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        episode = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=target_season.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="Broken Bow",
+            season_number=1,
+            episode_number=1,
+        )
+        attach_media_file(
+            session,
+            library_item_id=episode.id,
+            absolute_path=series_root / "Season 1" / "S01E01.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        session.add(
+            MetadataBinding(
+                library_item_id=source.id,
+                provider="tmdb",
+                provider_id="314",
+                provider_media_kind=ZaisanKind.SERIES,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        session.add(
+            MetadataCandidate(
+                library_item_id=target.id,
+                provider="tmdb",
+                provider_id="314",
+                provider_media_kind=ZaisanKind.SERIES,
+                provider_title="Star Trek: Enterprise",
+                confidence=1.0,
+                scoring_explanation=[],
+                status=MetadataCandidateStatus.SUGGESTED,
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        collection = create_collection(session, name="Duplicate series collection")
+        add_collection_membership(
+            session,
+            collection_id=collection.id,
+            library_item_id=source_season.id,
+        )
+        return source.id, source_season.id, target.id, target_season.id
+
+    source_id, source_season_id, target_id, target_season_id = database.run_transaction(seed)
+    service = DuplicateResolutionService(database)
+
+    candidates = service.preview()
+
+    assert len(candidates) == 1
+    assert (candidates[0].source_item_id, candidates[0].target_item_id) == (source_id, target_id)
+    backup = duplicate_resolution_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(source_item_id=source_id, target_item_id=target_id, backup_path=backup)
+
+    def resolved(
+        session: Session,
+    ) -> tuple[Zaisan | None, Zaisan, Zaisan | None, Zaisan, int, str, MetadataCandidateStatus]:
+        target = session.get(Zaisan, target_id)
+        target_season = session.get(Zaisan, target_season_id)
+        assert target is not None
+        assert target_season is not None
+        binding = session.scalar(
+            select(MetadataBinding).where(MetadataBinding.library_item_id == target.id)
+        )
+        candidate = session.scalar(
+            select(MetadataCandidate).where(MetadataCandidate.library_item_id == target.id)
+        )
+        assert binding is not None
+        assert candidate is not None
+        return (
+            session.get(Zaisan, source_id),
+            target,
+            session.get(Zaisan, source_season_id),
+            target_season,
+            len(target_season.collection_memberships),
+            binding.provider_id,
+            candidate.status,
+        )
+
+    (
+        removed,
+        target,
+        removed_season,
+        target_season,
+        membership_count,
+        provider_id,
+        candidate_status,
+    ) = database.run_transaction(resolved)
+    assert backup.is_file()
+    assert removed is None
+    assert removed_season is None
+    assert target.title == "Star Trek: Enterprise"
+    assert provider_id == "314"
+    assert candidate_status is MetadataCandidateStatus.ACCEPTED
+    assert target_season.parent_id == target_id
+    assert membership_count == 1
+
+
+def test_duplicate_resolution_excludes_conflicting_provider_bindings(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> None:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        source = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Canonical title",
+        )
+        target = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="File title",
+        )
+        attach_media_file(
+            session,
+            library_item_id=target.id,
+            absolute_path=movies / "File title.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        session.add_all(
+            (
+                MetadataBinding(
+                    library_item_id=source.id,
+                    provider="tmdb",
+                    provider_id="1",
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    status=MetadataMatchStatus.MATCHED,
+                    scoring_explanation=[],
+                    provider_external_ids=[],
+                ),
+                MetadataBinding(
+                    library_item_id=source.id,
+                    provider="imdb",
+                    provider_id="tt0000001",
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    status=MetadataMatchStatus.MATCHED,
+                    scoring_explanation=[],
+                    provider_external_ids=[],
+                ),
+                MetadataBinding(
+                    library_item_id=target.id,
+                    provider="imdb",
+                    provider_id="tt0000002",
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    status=MetadataMatchStatus.MATCHED,
+                    scoring_explanation=[],
+                    provider_external_ids=[],
+                ),
+                MetadataCandidate(
+                    library_item_id=target.id,
+                    provider="tmdb",
+                    provider_id="1",
+                    provider_media_kind=ZaisanKind.MOVIE,
+                    provider_title="Canonical title",
+                    confidence=1.0,
+                    scoring_explanation=[],
+                    status=MetadataCandidateStatus.SUGGESTED,
+                    last_seen_at=datetime.now(UTC),
+                ),
+            )
+        )
+
+    database.run_transaction(seed)
+
+    assert DuplicateResolutionService(database).preview() == ()
+
+
 def test_hierarchy_repair_creates_series_context_for_episode_catalogued_as_movie(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -230,6 +670,66 @@ def test_hierarchy_repair_creates_series_context_for_episode_catalogued_as_movie
         ZaisanKind.SERIES,
         "Show Name",
     )
+
+
+def test_hierarchy_repair_does_not_reparent_already_correct_episodes_or_specials(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    shows = tmp_path / "TVShows"
+
+    def seed(session: Session) -> None:
+        root = create_library_root(session, path=shows, expected_media_kind=ZaisanKind.SERIES)
+        series = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="The Show Name",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        episode = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=season.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="Pilot",
+            season_number=1,
+            episode_number=1,
+        )
+        special = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SPECIAL,
+            title="Bonus",
+            season_number=0,
+        )
+        attach_media_file(
+            session,
+            library_item_id=episode.id,
+            absolute_path=shows / "Show Name" / "Season 01" / "S01E01.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        attach_media_file(
+            session,
+            library_item_id=special.id,
+            absolute_path=shows / "Show Name" / "Season 00" / "Bonus.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+
+    database.run_transaction(seed)
+
+    assert HierarchyRepairService(database).preview().actions == ()
 
 
 def test_hierarchy_repair_leaves_title_locked_container_for_manual_review(

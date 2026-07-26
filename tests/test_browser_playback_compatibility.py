@@ -261,6 +261,23 @@ def test_next_episode_replaces_the_media_source_and_pagehide_flushes_progress() 
     assert "window.location.assign(payload.nextUrl)" not in script
 
 
+def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_skips() -> None:
+    repository_root = Path(__file__).parents[1]
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    collection_route = (repository_root / "src/kasana/kanvas/routes/collections.py").read_text(
+        encoding="utf-8"
+    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Skipped unavailable entries" in player
+    assert "Play available entries" in collection_route
+    assert "Use Play available entries to skip it" in script
+
+
 def test_browser_playback_card_contains_a_source_less_compatibility_player() -> None:
     entry = _entry(container="isobmff")
     now = datetime.now(UTC)

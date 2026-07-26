@@ -160,6 +160,9 @@ const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
   "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, libraryGridPayload};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
 ).replace(
+  "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
+  "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
+).replace(
   "if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);",
   "globalThis.__administrationTest = {KanvasAdministration};\n  if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);"
 ).replace(
@@ -199,6 +202,7 @@ const grid = (developmentMode = true) => {
   const instance = new globalThis.__libraryTest.KanvasPosterGrid();
   instance.setAttribute('source', '/kanvas/data/library?kind=movie&search=alpha');
   instance.setAttribute('state-user', '4');
+  instance.setAttribute('catalogue-revision', '1:2026-07-24T11:50:00+00:00');
   instance.setAttribute('development-mode', String(developmentMode));
   instance.grid = new FakeElement('div');
   instance.status = new FakeElement('div');
@@ -224,17 +228,56 @@ async function testValidPageRetainsAvailable() {
 function testPosterPlaceholderNormalisation() {
   const poster = globalThis.__libraryTest.normalisePoster({
     ...validPoster(11),
+    header: ' The show ',
     posterUrl: null,
     placeholder: {lines: [' Main title ', '', 'Subtitle'], footer: ' S01 E02 '}
   });
 
   assert.equal(poster.posterUrl, null);
+  assert.equal(poster.header, 'The show');
   assert.deepEqual(poster.placeholder.lines, ['Main title', 'Subtitle']);
   assert.equal(poster.placeholder.footer, 'S01 E02');
   assert.deepEqual(
     globalThis.__libraryTest.normalisePoster(validPoster(12)).placeholder.lines,
     ['Poster 12']
   );
+}
+
+function testWatchOrderInsertionSlotsRejectOnlyNoOpMoves() {
+  const workspace = new globalThis.__watchOrderTest.KanvasWatchOrderWorkspace();
+  workspace.entries = [{id: 1}, {id: 2}, {id: 3}];
+
+  assert.equal(workspace.isNoopMove('1', '2'), true);
+  assert.equal(workspace.isNoopMove('1', '3'), false);
+  assert.equal(workspace.isNoopMove('3', null), true);
+  assert.equal(workspace.isNoopMove('2', '1'), false);
+  assert.match(workspace.insertionSlot(2), /data-insert-before="2"/);
+  assert.match(workspace.insertionSlot(null), /Add to end of order/);
+
+  workspace.order = {scrollLeft: 12};
+  workspace.activeSlot = {};
+  workspace.isDragging = true;
+  let prevented = false;
+  workspace.onOrderWheel({
+    deltaX: 0,
+    deltaY: 28,
+    preventDefault() { prevented = true; }
+  });
+  assert.equal(workspace.order.scrollLeft, 40);
+  assert.equal(prevented, true);
+
+  workspace.revision = 9;
+  let boundaryIntent = null;
+  workspace.mutate = (intent) => { boundaryIntent = intent; };
+  workspace.moveBoundary('2', 'start');
+  assert.deepEqual(boundaryIntent, {
+    operation: 'move', entryId: 2, boundary: 'start', revision: 9
+  });
+
+  workspace.addSources([4, 5], 2);
+  assert.deepEqual(boundaryIntent, {
+    operation: 'add_sources', sourceItemIds: [4, 5], beforeEntryId: 2, revision: 9
+  });
 }
 
 async function testCategorisedFailureAndRetry() {
@@ -318,10 +361,13 @@ async function testCancellationStateAndDevelopmentDiagnostics() {
 
 async function testStateInvalidationAndRenderingFailure() {
   const instance = grid();
-  assert.match(instance.stateKey, /v4:asset=test-asset:user=4:filters=/);
+  assert.match(instance.stateKey, /v5:asset=test-asset:catalogue=1%3A2026-07-24T11%3A50%3A00%2B00%3A00:user=4:filters=/);
   assert.match(decodeURIComponent(instance.stateKey), /kind=movie&search=alpha/);
+  const previousKey = instance.stateKey;
+  instance.setAttribute('catalogue-revision', '1:2026-07-24T12:00:00+00:00');
+  assert.notEqual(instance.buildStateKey(instance.getAttribute('source')), previousKey);
   storage.set(instance.stateKey, JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 5,
     asset: 'test-asset',
     filters: '/kanvas/data/library?kind=movie&search=alpha',
     user: '4',
@@ -376,6 +422,71 @@ async function testAdministrationPollingWaitsForOpenDialog() {
   assert.equal(renders, 0);
   assert.equal(schedules, 1);
   assert.equal(instance.inFlight, false);
+}
+
+async function testAdministrationReportsTrackedJobProgressWithoutChangingTab() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.submittedJobId = 'job-17';
+  instance.fetchJson = async () => ({items: [{
+    id: 'job-17',
+    kind: 'scan',
+    status: 'running',
+    phase: 'classifying',
+    progressCurrent: 12,
+    progressTotal: 40,
+    progressUnit: 'files'
+  }]});
+
+  await instance.checkSubmittedJob();
+
+  assert.equal(instance.submittedJobId, 'job-17');
+  assert.equal(instance.activity.state, 'active');
+  assert.equal(instance.activity.message, 'Library scan running · classifying · 12/40 files');
+
+  instance.fetchJson = async () => ({items: [{
+    id: 'job-17',
+    kind: 'scan',
+    status: 'completed',
+    message: '42 files scanned.'
+  }]});
+  await instance.checkSubmittedJob();
+
+  assert.equal(instance.submittedJobId, null);
+  assert.deepEqual(instance.activity, {state: 'complete', message: '42 files scanned.'});
+}
+
+function testAdministrationPollsTrackedJobsFrequently() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.submittedJobId = 'job-17';
+  let interval = null;
+  const setTimeout = window.setTimeout;
+  window.setTimeout = (_callback, delay) => {
+    interval = delay;
+    return 1;
+  };
+
+  instance.schedule();
+
+  window.setTimeout = setTimeout;
+  assert.equal(interval, 2000);
+}
+
+async function testAdministrationReplacesPriorCompletionWithActionFailure() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.setAttribute('action-source', '/kanvas/actions/administration');
+  instance.activity = {state: 'complete', message: 'Resolved 11 duplicate catalogue records.'};
+  let renders = 0;
+  instance.render = () => { renders += 1; };
+  global.fetch = async () => response({status: 422, body: {error: 'A batch may not contain duplicate sources.'}});
+
+  const succeeded = await instance.operation('duplicate-resolve-batch', {resolutions: []});
+
+  assert.equal(succeeded, false);
+  assert.equal(renders, 1);
+  assert.deepEqual(instance.activity, {
+    state: 'error',
+    message: 'A batch may not contain duplicate sources.'
+  });
 }
 
 function fakeFormValues(values) {
@@ -456,12 +567,16 @@ function testItemEditorPayloadPreservesHiddenState() {
 async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
+  testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();
   await testCancellationStateAndDevelopmentDiagnostics();
   await testStateInvalidationAndRenderingFailure();
   await testRowAwareTrimPreservesScrollAnchor();
   await testAdministrationPollingWaitsForOpenDialog();
+  await testAdministrationReportsTrackedJobProgressWithoutChangingTab();
+  testAdministrationPollsTrackedJobsFrequently();
+  await testAdministrationReplacesPriorCompletionWithActionFailure();
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorPayloadPreservesHiddenState();
   process.stdout.write('browser library grid checks passed\n');

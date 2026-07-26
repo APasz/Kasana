@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,9 @@ from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionMembershipCreate,
     CollectionRelationship,
+    CollectionUpdate,
     WatchOrderCreate,
+    WatchOrderEntriesCreate,
     WatchOrderEntryCreate,
     WatchOrderEntryMove,
     WatchOrderGenerationApplyMode,
@@ -24,9 +26,17 @@ from kasana.katalog.api.service import (
     CatalogueConflictError,
     CatalogueValidationError,
     KatalogQueryService,
+    _watch_order_entry_is_unavailable,  # pyright: ignore[reportPrivateUsage]
 )
 from kasana.katalog.database import KatalogDatabase
-from kasana.katalog.models import AvailabilityState, KeiroEntry, Zaisan, ZaisanKind
+from kasana.katalog.models import (
+    AvailabilityState,
+    CachedArtwork,
+    CachedArtworkKind,
+    KeiroEntry,
+    Zaisan,
+    ZaisanKind,
+)
 from kasana.katalog.services import create_library_item, create_library_root
 
 
@@ -274,3 +284,242 @@ def test_watch_order_entry_moves_and_generation_preview(
         library["second_episode"],
         library["unavailable_extra"],
     ]
+
+
+def test_watch_order_batch_entry_insertion_is_contiguous_and_atomic(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Mixed"))
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=collection.revision,
+            name="Chronological",
+            kind=WatchOrderKind.CHRONOLOGICAL,
+        ),
+    )
+    movie = queries.add_watch_order_entry(
+        order.watch_order_id,
+        WatchOrderEntryCreate(expected_revision=order.revision, library_item_id=library["movie"]),
+    )
+    assert movie.entry is not None
+    batch = queries.add_watch_order_entries(
+        order.watch_order_id,
+        WatchOrderEntriesCreate(
+            expected_revision=movie.revision,
+            library_item_ids=(library["first_episode"], library["second_episode"]),
+            insert_before_entry_id=movie.entry.id,
+        ),
+    )
+    entries = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10).entries.items
+    assert batch.revision == movie.revision + 1
+    assert [entry.item.id for entry in entries] == [
+        library["first_episode"],
+        library["second_episode"],
+        library["movie"],
+    ]
+    with pytest.raises(CatalogueValidationError, match="already in this watch order"):
+        queries.add_watch_order_entries(
+            order.watch_order_id,
+            WatchOrderEntriesCreate(
+                expected_revision=batch.revision,
+                library_item_ids=(library["second_episode"],),
+            ),
+        )
+
+
+def test_watch_order_batch_contract_rejects_duplicate_items_and_dual_anchors() -> None:
+    with pytest.raises(ValueError, match="cannot contain duplicate"):
+        WatchOrderEntriesCreate(expected_revision=1, library_item_ids=(1, 1))
+    with pytest.raises(ValueError, match="before and after"):
+        WatchOrderEntriesCreate(
+            expected_revision=1,
+            library_item_ids=(1,),
+            insert_before_entry_id=2,
+            insert_after_entry_id=3,
+        )
+
+
+def test_collection_preferences_select_artwork_and_default_order(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Stargate"))
+    membership = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=collection.revision,
+            library_item_id=library["movie"],
+        ),
+    )
+    release = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=membership.revision,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+        ),
+    )
+    alternative = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=release.collection_revision,
+            name="Chronological",
+            kind=WatchOrderKind.CHRONOLOGICAL,
+        ),
+    )
+
+    def add_poster(session: Session) -> int:
+        movie = session.get(Zaisan, library["movie"])
+        assert movie is not None
+        poster = CachedArtwork(
+            library_item_id=movie.id,
+            provider="fixture",
+            provider_id="movie",
+            artwork_kind=CachedArtworkKind.POSTER,
+            provider_revision="1",
+            source_url="https://example.test/movie.jpg",
+            attribution=None,
+            content_type="image/jpeg",
+            cache_relative_path="movie.jpg",
+            size_bytes=1,
+            downloaded_at=datetime.now(UTC),
+        )
+        session.add(poster)
+        session.flush()
+        movie.selected_artwork_ids = {"poster": poster.id}
+        return poster.id
+
+    poster_id = database.run_transaction(add_poster)
+    updated = queries.update_collection(
+        collection.collection_id,
+        CollectionUpdate(
+            expected_revision=alternative.collection_revision,
+            artwork_item_id=library["movie"],
+            default_watch_order_id=alternative.watch_order_id,
+        ),
+    )
+    detail = queries.get_collection(collection.collection_id)
+    movie_detail = queries.get_item(library["movie"])
+
+    assert updated.revision == alternative.collection_revision + 1
+    assert detail.artwork_item_id == library["movie"]
+    assert detail.default_watch_order_id == alternative.watch_order_id
+    assert detail.representative_artwork is not None
+    assert detail.representative_artwork.id == poster_id
+    assert [(order.id, order.is_default) for order in detail.watch_orders] == [
+        (alternative.watch_order_id, True),
+        (release.watch_order_id, False),
+    ]
+    assert [(entry.id, entry.relationship) for entry in movie_detail.collections] == [
+        (collection.collection_id, None)
+    ]
+
+
+def test_collection_preferences_reject_invalid_choices_and_reassign_a_deleted_default(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Stargate"))
+    movie_membership = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=collection.revision,
+            library_item_id=library["movie"],
+        ),
+    )
+    series_membership = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=movie_membership.revision,
+            library_item_id=library["series"],
+        ),
+    )
+    release = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=series_membership.revision,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+        ),
+    )
+    chronological = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=release.collection_revision,
+            name="Chronological",
+            kind=WatchOrderKind.CHRONOLOGICAL,
+        ),
+    )
+    other_collection = queries.create_collection(CollectionCreate(name="Atlantis"))
+    other_order = queries.create_watch_order(
+        other_collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=other_collection.revision,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+        ),
+    )
+
+    with pytest.raises(CatalogueValidationError, match="direct collection member"):
+        queries.update_collection(
+            collection.collection_id,
+            CollectionUpdate(
+                expected_revision=chronological.collection_revision,
+                artwork_item_id=library["first_episode"],
+            ),
+        )
+    with pytest.raises(CatalogueValidationError, match="cached poster"):
+        queries.update_collection(
+            collection.collection_id,
+            CollectionUpdate(
+                expected_revision=chronological.collection_revision,
+                artwork_item_id=library["series"],
+            ),
+        )
+    with pytest.raises(CatalogueValidationError, match="requires a default"):
+        queries.update_collection(
+            collection.collection_id,
+            CollectionUpdate(
+                expected_revision=chronological.collection_revision,
+                default_watch_order_id=None,
+            ),
+        )
+    with pytest.raises(CatalogueValidationError, match="must belong"):
+        queries.update_collection(
+            collection.collection_id,
+            CollectionUpdate(
+                expected_revision=chronological.collection_revision,
+                default_watch_order_id=other_order.watch_order_id,
+            ),
+        )
+
+    queries.delete_watch_order(release.watch_order_id, expected_revision=release.revision)
+    detail = queries.get_collection(collection.collection_id)
+
+    assert detail.default_watch_order_id == chronological.watch_order_id
+
+
+def test_watch_order_unavailability_distinguishes_non_playable_members(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+
+    def availability(session: Session) -> tuple[bool, bool, bool]:
+        movie = session.get(Zaisan, library["movie"])
+        series = session.get(Zaisan, library["series"])
+        unavailable_extra = session.get(Zaisan, library["unavailable_extra"])
+        assert movie is not None
+        assert series is not None
+        assert unavailable_extra is not None
+        return (
+            _watch_order_entry_is_unavailable(session, movie),
+            _watch_order_entry_is_unavailable(session, series),
+            _watch_order_entry_is_unavailable(session, unavailable_extra),
+        )
+
+    assert database.run_transaction(availability) == (True, False, True)

@@ -22,9 +22,9 @@ from kasana.katalog.public import (
     LibraryItemKind,
     LibraryItemSummary,
     PlaybackStateResponse,
-    WatchOrderDetail,
     WatchOrderEntryDetail,
     WatchOrderKind,
+    WatchOrderSummary,
     WatchOrderUpdate,
 )
 
@@ -107,31 +107,23 @@ def collection_artwork(
     return None, mosaic
 
 
-def watch_order_card(
-    detail: WatchOrderDetail, progress: dict[int, PlaybackStateResponse]
-) -> WatchOrderCardView:
-    """Derive a compact watch-order card from one bounded public detail response."""
+def watch_order_card(summary: WatchOrderSummary) -> WatchOrderCardView:
+    """Map server-derived per-user progress without duplicating ordering rules in Kanvas."""
 
-    next_entry = next(
-        (
-            entry
-            for entry in detail.entries.items
-            if not progress.get(entry.item.id, None) or not progress[entry.item.id].completed
-        ),
-        None,
-    )
-    next_playback = progress.get(next_entry.item.id) if next_entry is not None else None
+    progress = summary.progress
     return WatchOrderCardView(
-        id=detail.watch_order.id,
-        collectionId=detail.watch_order.collection_id,
-        name=detail.watch_order.name,
-        kind=detail.watch_order.kind.value,
-        entryCount=detail.watch_order.entry_count,
-        revision=detail.watch_order.revision,
-        progressPercent=progress_percent(next_playback),
-        nextItemTitle=next_entry.item.title if next_entry is not None else None,
-        hasUnavailableEntries=any(
-            entry.item.availability is not Availability.AVAILABLE for entry in detail.entries.items
+        id=summary.id,
+        collectionId=summary.collection_id,
+        name=summary.name,
+        kind=summary.kind.value,
+        entryCount=summary.entry_count,
+        revision=summary.revision,
+        isDefault=summary.is_default,
+        completedEntryCount=(progress.completed_entry_count if progress is not None else None),
+        progressPercent=progress.progress_percent if progress is not None else None,
+        nextItemTitle=(progress.next_item.title if progress and progress.next_item else None),
+        hasUnavailableEntries=(
+            progress.unavailable_entry_count > 0 if progress is not None else False
         ),
     )
 
@@ -151,7 +143,7 @@ def item_picker_view(item: LibraryItemSummary, *, already_member: bool) -> ItemP
 
 
 def watch_order_row(entry: WatchOrderEntryDetail) -> WatchOrderRowView:
-    """Map a typed entry into browser-virtualised dense-row data."""
+    """Map a typed entry into the reusable watch-order poster contract."""
 
     item = entry.item
     return WatchOrderRowView(
@@ -163,6 +155,7 @@ def watch_order_row(entry: WatchOrderEntryDetail) -> WatchOrderRowView:
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
         posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+        poster=poster_from_summary(item),
     )
 
 
@@ -191,13 +184,23 @@ def artwork_proxy_from_api_url(url: str) -> str | None:
 
 
 def collection_update_request(
-    *, revision: int, name: str | None, overview: str | None
+    *,
+    revision: int,
+    name: str | None,
+    overview: str | None,
+    artwork_item_id: int | None = None,
+    default_watch_order_id: int | None = None,
+    update_preferences: bool = False,
 ) -> CollectionUpdate:
-    if name is not None and overview is not None:
-        return CollectionUpdate(expected_revision=revision, name=name, overview=overview)
-    if name is not None:
-        return CollectionUpdate(expected_revision=revision, name=name)
-    return CollectionUpdate(expected_revision=revision, overview=overview)
+    if update_preferences:
+        return CollectionUpdate(
+            expected_revision=revision,
+            name=name,
+            overview=overview,
+            artwork_item_id=artwork_item_id,
+            default_watch_order_id=default_watch_order_id,
+        )
+    return CollectionUpdate(expected_revision=revision, name=name, overview=overview)
 
 
 def watch_order_update_request(
@@ -229,10 +232,13 @@ def poster_from_summary(
         selected=selected,
         loading=loading,
     )
-    subtitle = " · ".join(part for part in (item.year and str(item.year), item.kind.value) if part)
+    subtitle = None if item.series_title else " · ".join(
+        part for part in (item.year and str(item.year), item.kind.value) if part
+    )
     return PosterView(
         id=item.id,
         title=item.title,
+        header=item.series_title,
         subtitle=subtitle or None,
         href=f"/item/{item.id}",
         posterUrl=poster_url,

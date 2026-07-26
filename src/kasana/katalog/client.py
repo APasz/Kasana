@@ -29,6 +29,10 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     DirectoryListing,
+    DuplicateEpisodeIssue,
+    DuplicateResolutionBatchRequest,
+    DuplicateResolutionPreview,
+    DuplicateResolutionRequest,
     HealthResponse,
     HierarchyRepairPreview,
     HierarchyRepairRequest,
@@ -67,6 +71,7 @@ from kasana.katalog.api.contracts import (
     WatchedFilter,
     WatchOrderCreate,
     WatchOrderDetail,
+    WatchOrderEntriesCreate,
     WatchOrderEntryCreate,
     WatchOrderEntryDetail,
     WatchOrderEntryMove,
@@ -94,6 +99,9 @@ _ITEM_DETAIL_ADAPTER: TypeAdapter[LibraryItemDetail] = TypeAdapter(LibraryItemDe
 _LIBRARY_TAGS_ADAPTER: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...])
 _ITEM_EDIT_AUDIT_ADAPTER: TypeAdapter[tuple[LibraryItemEditAudit, ...]] = TypeAdapter(
     tuple[LibraryItemEditAudit, ...]
+)
+_DUPLICATE_EPISODE_ISSUES_ADAPTER: TypeAdapter[tuple[DuplicateEpisodeIssue, ...]] = TypeAdapter(
+    tuple[DuplicateEpisodeIssue, ...]
 )
 _PLAYBACK_STATE_ADAPTER: TypeAdapter[PlaybackStateResponse | None] = TypeAdapter(
     PlaybackStateResponse | None
@@ -408,8 +416,14 @@ class KatalogClient:
             params=_params(cursor=cursor, limit=limit, search=search),
         )
 
-    async def get_collection(self, collection_id: int) -> CollectionDetail:
-        return await self._get_model(f"/api/v1/collections/{collection_id}", CollectionDetail)
+    async def get_collection(
+        self, collection_id: int, *, user_id: int | None = None
+    ) -> CollectionDetail:
+        return await self._get_model(
+            f"/api/v1/collections/{collection_id}",
+            CollectionDetail,
+            params=_params(user_id=user_id),
+        )
 
     async def create_collection(self, request: CollectionCreate) -> CollectionMutationResult:
         return await self._send_model(
@@ -485,12 +499,17 @@ class KatalogClient:
         return _validate_response(CollectionMutationResult, response.payload, response.request_id)
 
     async def list_collection_watch_orders(
-        self, collection_id: int, *, cursor: str | None = None, limit: int = 50
+        self,
+        collection_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        user_id: int | None = None,
     ) -> PaginatedResponse[WatchOrderSummary]:
         return await self._get_model(
             f"/api/v1/collections/{collection_id}/watch-orders",
             PaginatedResponse[WatchOrderSummary],
-            params=_params(cursor=cursor, limit=limit),
+            params=_params(cursor=cursor, limit=limit, user_id=user_id),
         )
 
     async def create_collection_watch_order(
@@ -504,12 +523,17 @@ class KatalogClient:
         )
 
     async def get_watch_order(
-        self, watch_order_id: int, *, cursor: str | None = None, limit: int = 50
+        self,
+        watch_order_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        user_id: int | None = None,
     ) -> WatchOrderDetail:
         return await self._get_model(
             f"/api/v1/watch-orders/{watch_order_id}",
             WatchOrderDetail,
-            params=_params(cursor=cursor, limit=limit),
+            params=_params(cursor=cursor, limit=limit, user_id=user_id),
         )
 
     async def iter_watch_order_entries(
@@ -547,6 +571,16 @@ class KatalogClient:
         return await self._send_model(
             "POST",
             f"/api/v1/watch-orders/{watch_order_id}/entries",
+            request,
+            WatchOrderMutationResult,
+        )
+
+    async def add_watch_order_entries(
+        self, watch_order_id: int, request: WatchOrderEntriesCreate
+    ) -> WatchOrderMutationResult:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/watch-orders/{watch_order_id}/entries/batch",
             request,
             WatchOrderMutationResult,
         )
@@ -799,6 +833,15 @@ class KatalogClient:
     async def submit_scan(self, request: ScanRequest) -> JobSubmission:
         return await self._send_model("POST", "/api/v1/scans", request, JobSubmission)
 
+    async def list_duplicate_episode_issues(self) -> tuple[DuplicateEpisodeIssue, ...]:
+        response = await self._request("GET", "/api/v1/scans/duplicate-episodes")
+        try:
+            return _DUPLICATE_EPISODE_ISSUES_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid duplicate episode issues.", response.request_id
+            ) from error
+
     async def submit_library_consistency(
         self, request: LibraryConsistencyRequest
     ) -> JobSubmission:
@@ -823,6 +866,25 @@ class KatalogClient:
             "/api/v1/repairs/hierarchy/preview",
             HierarchyRepairPreview,
             params=_params(library_root_id=root_id, issue_id=issue_id, item_id=item_id),
+        )
+
+    async def duplicate_resolution_preview(self) -> DuplicateResolutionPreview:
+        return await self._get_model(
+            "/api/v1/repairs/duplicates/preview", DuplicateResolutionPreview
+        )
+
+    async def submit_duplicate_resolution(
+        self, request: DuplicateResolutionRequest
+    ) -> JobSubmission:
+        return await self._send_model(
+            "POST", "/api/v1/repairs/duplicates", request, JobSubmission
+        )
+
+    async def submit_duplicate_resolution_batch(
+        self, request: DuplicateResolutionBatchRequest
+    ) -> JobSubmission:
+        return await self._send_model(
+            "POST", "/api/v1/repairs/duplicates/batch", request, JobSubmission
         )
 
     async def _get_model[ModelT: BaseModel](

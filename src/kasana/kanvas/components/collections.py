@@ -78,19 +78,26 @@ def collection_members(title: str, members: tuple[CollectionMemberView, ...]) ->
                 poster_card(member.poster)
 
 
-def watch_order_card(card: WatchOrderCardView) -> None:
+def watch_order_card(card: WatchOrderCardView, *, href: str | None = None) -> None:
     """Render a focused watch-order summary without Quasar card chrome."""
 
+    destination = href or f"/watch-orders/{card.id}"
     with ui.element("article").classes("k-watch-order-card"):
         with (
             ui.element("a")
             .classes("k-watch-order-card__link")
-            .props(f'href="/watch-orders/{card.id}" aria-label="{escape(card.name, quote=True)}"')
+            .props(
+                f'href="{escape(destination, quote=True)}" '
+                f'aria-label="{escape(card.name, quote=True)}"'
+            )
         ):
             with ui.element("div").classes("k-watch-order-card__topline"):
                 ui.label(card.name).classes("k-watch-order-card__title")
-                ui.label(card.kind).classes("k-watch-order-card__kind")
+                label = "Default" if card.is_default else card.kind
+                ui.label(label).classes("k-watch-order-card__kind")
             detail = f"{card.entry_count} entries"
+            if card.completed_entry_count is not None:
+                detail += f" · {card.completed_entry_count} complete"
             if card.next_item_title is not None:
                 detail += f" · Next: {card.next_item_title}"
             ui.label(detail).classes("k-watch-order-card__facts")
@@ -119,6 +126,20 @@ def watch_order_rows(*, source: str, action: str, launch_action: str, revision: 
 
     mount_browser_component(
         BrowserComponent.WATCH_ORDER_LIST,
+        {
+            "source": source,
+            "action": action,
+            "launch-action": launch_action,
+            "revision": revision,
+        },
+    )
+
+
+def watch_order_workspace(*, source: str, action: str, launch_action: str, revision: int) -> None:
+    """Mount the collection-source workspace used by editable watch orders."""
+
+    mount_browser_component(
+        BrowserComponent.WATCH_ORDER_WORKSPACE,
         {
             "source": source,
             "action": action,

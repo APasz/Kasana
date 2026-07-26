@@ -33,6 +33,10 @@ class MetadataWorkflowError(RuntimeError):
     """An administrator-requested metadata operation could not be completed."""
 
 
+class MetadataIdentityConflictError(MetadataWorkflowError):
+    """Provider metadata would collide with another catalogue item's identity."""
+
+
 class MetadataBindingView(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -60,6 +64,7 @@ def accept_binding(
 
     def accept(session: Session) -> MetadataBindingView:
         item = require_item(session, item_id)
+        _assert_unlocked_sort_title_available(session, item, details)
         reference = details.reference
         binding = session.scalar(
             select(MetadataBinding).where(
@@ -242,6 +247,30 @@ def apply_unlocked_metadata(item: Zaisan, details: ProviderDetails) -> None:
         item.release_year = details.release_date.year
     if MetadataField.OVERVIEW not in locks and details.overview is not None:
         item.overview = details.overview
+
+
+def _assert_unlocked_sort_title_available(
+    session: Session, item: Zaisan, details: ProviderDetails
+) -> None:
+    if MetadataField.SORT_TITLE in locked_fields(item):
+        return
+    statement = select(Zaisan.id).where(
+        Zaisan.library_root_id == item.library_root_id,
+        Zaisan.item_kind == item.item_kind,
+        Zaisan.sort_title == details.title,
+        Zaisan.id != item.id,
+    )
+    if item.parent_id is None:
+        statement = statement.where(Zaisan.parent_id.is_(None))
+    else:
+        statement = statement.where(Zaisan.parent_id == item.parent_id)
+    conflict_id = session.scalar(statement.limit(1))
+    if conflict_id is not None:
+        msg = (
+            f"Provider title {details.title!r} conflicts with library item {conflict_id}. "
+            "Lock the sort title or resolve the duplicate before matching."
+        )
+        raise MetadataIdentityConflictError(msg)
 
 
 def locked_fields(item: Zaisan) -> frozenset[MetadataField]:

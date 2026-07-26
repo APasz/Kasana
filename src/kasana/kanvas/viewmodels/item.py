@@ -9,6 +9,27 @@ from pydantic import BaseModel, ConfigDict, Field
 from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterView
 
 
+class IncludedCollectionView(BaseModel):
+    """One direct collection placement rendered on an item page."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    revision: int = Field(ge=1)
+    relationship: str | None = Field(default=None, max_length=32)
+
+
+class CollectionChoiceView(BaseModel):
+    """One writable collection target for an administrator item-page control."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    revision: int = Field(ge=1)
+
+
 class ItemDetailView(BaseModel):
     """Safe detail data for the first Kanvas item page."""
 
@@ -30,3 +51,9 @@ class ItemDetailView(BaseModel):
         default="Episodes", alias="childSectionTitle"
     )
     children: tuple[PosterView, ...] = ()
+    included_collections: tuple[IncludedCollectionView, ...] = Field(
+        default=(), alias="includedCollections"
+    )
+    available_collections: tuple[CollectionChoiceView, ...] = Field(
+        default=(), alias="availableCollections"
+    )

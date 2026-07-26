@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 from asyncio import CancelledError
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,7 @@ from kasana.kanvas.dashboard import (
     administration_action,
     administration_artwork_page,
     administration_directories_data,
+    administration_duplicates_data,
     administration_jobs_data,
     administration_jobs_page,
     administration_libraries_page,
@@ -123,9 +125,14 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderCardView,
     WatchOrderEditorView,
     WatchOrderRowView,
+    WatchOrderSourceView,
 )
 from kasana.kanvas.viewmodels.home import MediaRailView
-from kasana.kanvas.viewmodels.item import ItemDetailView
+from kasana.kanvas.viewmodels.item import (
+    CollectionChoiceView,
+    IncludedCollectionView,
+    ItemDetailView,
+)
 from kasana.kanvas.viewmodels.library import (
     CursorPager,
     LibraryFilters,
@@ -142,8 +149,11 @@ from kasana.katalog.public import (
     BackgroundJob,
     CollectionDetail,
     CollectionMembership,
+    CollectionSummary,
     DirectoryEntry,
     DirectoryListing,
+    DuplicateEpisodeIssue,
+    DuplicateResolutionPreview,
     JobProgress,
     JobStatus,
     KatalogClientError,
@@ -170,6 +180,9 @@ from kasana.katalog.public import (
     UserRole,
     UserSummary,
     WatchedFilter,
+    WatchOrderEntriesCreate,
+    WatchOrderEntryDetail,
+    WatchOrderKind,
     WatchOrderPlaybackContext,
 )
 from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
@@ -192,6 +205,51 @@ def active_profile(monkeypatch: MonkeyPatch) -> SessionProfile:
 
 def _selected_profile() -> SessionProfile:
     return SessionProfile(UserSummary(id=1, username="tester", role=UserRole.OWNER))
+
+
+def test_watch_order_playback_failure_detail_preserves_validation_cause() -> None:
+    error = KatalogClientError(
+        KatalogClientErrorKind.VALIDATION,
+        "Playback queues cannot contain more than 100 entries.",
+    )
+
+    assert dashboard._watch_order_playback_error_detail(error) == (  # pyright: ignore[reportPrivateUsage]
+        "Playback queues cannot contain more than 100 entries."
+    )
+
+
+def test_watch_order_playback_failure_detail_hides_non_validation_cause() -> None:
+    error = KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "Connection refused")
+
+    assert (
+        dashboard._watch_order_playback_error_detail(error)  # pyright: ignore[reportPrivateUsage]
+        == "Could not start this watch order."
+    )
+
+
+def test_watch_order_playback_failures_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    error = KatalogClientError(
+        KatalogClientErrorKind.RESPONSE,
+        "Katalog returned an invalid playback session response.",
+        status_code=500,
+        request_id="playback-request-1",
+    )
+
+    dashboard._log_watch_order_playback_failure(  # pyright: ignore[reportPrivateUsage]
+        error,
+        watch_order_id=1,
+        user_id=2,
+        start_item_id=None,
+        resume=True,
+        skip_unavailable=False,
+    )
+
+    assert (
+        "Watch-order playback failed: watch_order_id=1 user_id=2 start_item_id=None "
+        "resume=True skip_unavailable=False kind=response status=500 "
+        "request_id=playback-request-1 detail=Katalog returned an invalid playback session "
+        "response."
+    ) in caplog.messages
 
 
 def _item(*, artwork: tuple[ArtworkSelection, ...] = ()) -> LibraryItemSummary:
@@ -422,6 +480,15 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert poster.poster_url == "/kanvas/artwork/7/8"
     assert poster.progress_percent == 25
     assert poster.state is PosterState.IN_PROGRESS
+    episode_poster = poster_from_summary(
+        _summary_with_title(
+            "The Door to Summer",
+            kind=LibraryItemKind.EPISODE,
+            series_title="Aldnoah Zero",
+        )
+    )
+    assert episode_poster.header == "Aldnoah Zero"
+    assert episode_poster.subtitle is None
     assert "playback_url" not in json.dumps(poster.model_dump(mode="json"))
     assert "/tmp/" not in json.dumps(poster.model_dump(mode="json"))
 
@@ -1126,6 +1193,29 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
     ]
 
 
+async def test_watch_order_save_reports_revision_conflicts_without_a_server_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class ConflictCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def update_watch_order(self, _watch_order_id: int, **_arguments: object) -> int:
+            raise KatalogClientError(KatalogClientErrorKind.CONFLICT, "revision changed")
+
+    class FormRequest:
+        async def form(self) -> FormData:
+            return FormData({"revision": "24", "name": "Release", "kind": "custom"})
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalogue)
+
+    with pytest.raises(HTTPException) as error:
+        await update_watch_order_action(9, cast(Request, FormRequest()))
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "This watch order changed. Reload the editor before saving again."
+
+
 async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1180,6 +1270,14 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
             calls.append("add")
             return 7
 
+        async def add_watch_order_source(self, _watch_order_id: int, **_arguments: object) -> int:
+            calls.append("add-source")
+            return 8
+
+        async def add_watch_order_sources(self, _watch_order_id: int, **_arguments: object) -> int:
+            calls.append("add-sources")
+            return 9
+
         async def move_watch_order_entry(self, _watch_order_id: int, **_arguments: object) -> int:
             calls.append("move")
             return 8
@@ -1213,6 +1311,34 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
     add = await watch_order_entry_action(
         9, cast(Request, JsonRequest({"operation": "add", "revision": 6, "itemId": 7}))
     )
+    add_source = await watch_order_entry_action(
+        9,
+        cast(
+            Request,
+            JsonRequest(
+                {
+                    "operation": "add_source",
+                    "revision": 7,
+                    "sourceItemId": 8,
+                    "beforeEntryId": 3,
+                }
+            ),
+        ),
+    )
+    add_sources = await watch_order_entry_action(
+        9,
+        cast(
+            Request,
+            JsonRequest(
+                {
+                    "operation": "add_sources",
+                    "revision": 8,
+                    "sourceItemIds": [8, 9],
+                    "beforeEntryId": 3,
+                }
+            ),
+        ),
+    )
     move = await watch_order_entry_action(
         9,
         cast(
@@ -1220,7 +1346,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
             JsonRequest(
                 {
                     "operation": "move",
-                    "revision": 7,
+                    "revision": 8,
                     "entryId": 3,
                     "beforeEntryId": None,
                     "afterEntryId": None,
@@ -1232,11 +1358,11 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
         9,
         cast(
             Request,
-            JsonRequest({"operation": "move", "revision": 8, "entryId": 3, "boundary": "end"}),
+            JsonRequest({"operation": "move", "revision": 9, "entryId": 3, "boundary": "end"}),
         ),
     )
     removed = await watch_order_entry_action(
-        9, cast(Request, JsonRequest({"operation": "remove", "revision": 9, "entryId": 3}))
+        9, cast(Request, JsonRequest({"operation": "remove", "revision": 10, "entryId": 3}))
     )
     launched = await watch_order_launch_action(9, cast(Request, JsonRequest({"itemId": 7})))
 
@@ -1244,14 +1370,26 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
     assert json.loads(bytes(rows_response.body))["revision"] == 6
     assert json.loads(bytes(launched.body))["playbackUrl"] == "/play/watch-orders/9?itemId=7"
     assert [
-        json.loads(bytes(response.body))["revision"] for response in (add, move, boundary, removed)
+        json.loads(bytes(response.body))["revision"]
+        for response in (add, add_source, add_sources, move, boundary, removed)
     ] == [
         7,
         8,
         9,
+        8,
+        9,
         10,
     ]
-    assert calls == ["picker", "rows", "add", "move", "boundary", "remove"]
+    assert calls == [
+        "picker",
+        "rows",
+        "add",
+        "add-source",
+        "add-sources",
+        "move",
+        "boundary",
+        "remove",
+    ]
 
 
 async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_states(
@@ -1330,6 +1468,355 @@ async def test_browser_data_endpoints_return_typed_katalog_failure_states(
     ]
 
 
+async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode_blocks() -> None:
+    series = _library_summary(item_id=40, title="SG-1", kind=LibraryItemKind.SERIES)
+    movie = _library_summary(item_id=41, title="Stargate", kind=LibraryItemKind.MOVIE)
+    season = _library_summary(
+        item_id=42,
+        title="Season 8",
+        kind=LibraryItemKind.SEASON,
+        parent_id=series.id,
+        season_number=8,
+        series_title="SG-1",
+    )
+    earlier_season = _library_summary(
+        item_id=45,
+        title="Season 7",
+        kind=LibraryItemKind.SEASON,
+        parent_id=series.id,
+        season_number=7,
+        series_title="SG-1",
+    )
+    earlier_episode = _library_summary(
+        item_id=46,
+        title="Fallen",
+        kind=LibraryItemKind.EPISODE,
+        parent_id=earlier_season.id,
+        season_number=7,
+        episode_number=1,
+        series_title="SG-1",
+    )
+    first_episode = _library_summary(
+        item_id=43,
+        title="New Order, Part 1",
+        kind=LibraryItemKind.EPISODE,
+        parent_id=season.id,
+        season_number=8,
+        episode_number=1,
+        series_title="SG-1",
+    )
+    unavailable_episode = _library_summary(
+        item_id=44,
+        title="New Order, Part 2",
+        kind=LibraryItemKind.EPISODE,
+        parent_id=season.id,
+        season_number=8,
+        episode_number=2,
+        series_title="SG-1",
+    ).model_copy(update={"availability": Availability.UNAVAILABLE})
+
+    class SourceClient:
+        async def iter_collection_members(
+            self, _collection_id: int, *, limit: int
+        ) -> AsyncIterator[CollectionMembership]:
+            assert limit == 100
+            yield CollectionMembership(id=1, collection_id=4, item=series)
+            yield CollectionMembership(id=2, collection_id=4, item=movie)
+
+        async def list_library_item_children(
+            self, item_id: int, *, cursor: str | None, limit: int
+        ) -> PaginatedResponse[LibraryItemSummary]:
+            assert cursor is None
+            assert limit == 100
+            children_by_parent = {
+                series.id: (season, earlier_season),
+                season.id: (unavailable_episode, first_episode),
+                earlier_season.id: (earlier_episode,),
+            }
+            children = children_by_parent.get(item_id, ())
+            return PaginatedResponse[LibraryItemSummary](items=children, limit=limit)
+
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+    sources = await service._watch_order_sources(  # pyright: ignore[reportPrivateUsage]
+        SourceClient(),  # pyright: ignore[reportArgumentType]
+        4,
+    )
+
+    source_details = [
+        (source.id, source.entry_count, source.available, item_ids)
+        for source, item_ids in sources
+    ]
+    assert source_details == [
+        (
+            series.id,
+            3,
+            False,
+            (earlier_episode.id, first_episode.id, unavailable_episode.id),
+        ),
+        (earlier_season.id, 1, True, (earlier_episode.id,)),
+        (earlier_episode.id, 1, True, (earlier_episode.id,)),
+        (season.id, 2, False, (first_episode.id, unavailable_episode.id)),
+        (first_episode.id, 1, True, (first_episode.id,)),
+        (unavailable_episode.id, 1, False, (unavailable_episode.id,)),
+        (movie.id, 1, True, (movie.id,)),
+    ]
+
+
+async def test_watch_order_source_addition_uses_one_contiguous_batch(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    source = WatchOrderSourceView(
+        id=42,
+        title="Season 8",
+        kind="season",
+        seasonNumber=8,
+        entryCount=2,
+        addable=True,
+        available=True,
+        poster=PosterView(
+            id=42,
+            title="Season 8",
+            href="/item/42",
+            available=True,
+        ),
+    )
+    requests: list[WatchOrderEntriesCreate] = []
+
+    class MutationClient:
+        async def get_watch_order(self, _watch_order_id: int, *, limit: int) -> object:
+            assert limit == 1
+            return SimpleNamespace(watch_order=SimpleNamespace(collection_id=4))
+
+        async def add_watch_order_entries(
+            self, watch_order_id: int, request: WatchOrderEntriesCreate
+        ) -> object:
+            assert watch_order_id == 9
+            requests.append(request)
+            return SimpleNamespace(revision=8)
+
+    @asynccontextmanager
+    async def client_context() -> AsyncGenerator[MutationClient]:
+        yield MutationClient()
+
+    async def sources(_client: object, _collection_id: int) -> tuple[object, ...]:
+        return ((source, (43, 44)),)
+
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+    monkeypatch.setattr(service, "_client", client_context)
+    monkeypatch.setattr(service, "_watch_order_sources", sources)
+
+    revision = await service.add_watch_order_source(
+        9, revision=7, source_item_id=42, before_entry_id=3
+    )
+
+    request = requests[0]
+    assert revision == 8
+    assert request.library_item_ids == (43, 44)
+    assert request.insert_before_entry_id == 3
+
+    additional_source = source.model_copy(update={"id": 52, "title": "Movie"})
+
+    async def multiple_sources(_client: object, _collection_id: int) -> tuple[object, ...]:
+        return ((source, (43, 44)), (additional_source, (45,)))
+
+    monkeypatch.setattr(service, "_watch_order_sources", multiple_sources)
+    revision = await service.add_watch_order_sources(
+        9, revision=8, source_item_ids=(42, 52), before_entry_id=3
+    )
+
+    request = requests[1]
+    assert revision == 8
+    assert request.library_item_ids == (43, 44, 45)
+    assert request.insert_before_entry_id == 3
+
+    async def missing_source(_client: object, _collection_id: int) -> tuple[object, ...]:
+        return ()
+
+    monkeypatch.setattr(service, "_watch_order_sources", missing_source)
+    with pytest.raises(ValueError, match="not available"):
+        await service.add_watch_order_source(9, revision=8, source_item_id=99)
+
+    async def series_source(_client: object, _collection_id: int) -> tuple[object, ...]:
+        return ((source.model_copy(update={"addable": False, "entry_count": 0}), ()),)
+
+    monkeypatch.setattr(service, "_watch_order_sources", series_source)
+    with pytest.raises(ValueError, match="no playable descendants"):
+        await service.add_watch_order_source(9, revision=8, source_item_id=42)
+
+
+async def test_watch_order_workspace_removes_sources_represented_by_order_entries(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    episode = _library_summary(
+        item_id=43,
+        title="New Order, Part 1",
+        kind=LibraryItemKind.EPISODE,
+        episode_number=1,
+    )
+    season_source = WatchOrderSourceView(
+        id=42,
+        title="Season 8",
+        kind="season",
+        entryCount=2,
+        addable=True,
+        available=True,
+        poster=PosterView(id=42, title="Season 8", href="/item/42", available=True),
+    )
+    series_source = WatchOrderSourceView(
+        id=40,
+        title="SG-1",
+        kind="series",
+        entryCount=2,
+        addable=True,
+        available=True,
+        poster=PosterView(id=40, title="SG-1", href="/item/40", available=True),
+    )
+
+    class WorkspaceClient:
+        async def get_watch_order(self, _watch_order_id: int, **_filters: object) -> object:
+            return SimpleNamespace(watch_order=SimpleNamespace(collection_id=4, revision=7))
+
+        async def iter_watch_order_entries(
+            self, _watch_order_id: int, *, limit: int
+        ) -> AsyncIterator[WatchOrderEntryDetail]:
+            assert limit == 100
+            yield WatchOrderEntryDetail(id=3, position=0, item=episode)
+
+    @asynccontextmanager
+    async def client_context() -> AsyncGenerator[WorkspaceClient]:
+        yield WorkspaceClient()
+
+    async def sources(_client: object, _collection_id: int) -> tuple[object, ...]:
+        return ((season_source, (43, 44)), (series_source, (43, 44)))
+
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+    monkeypatch.setattr(service, "_client", client_context)
+    monkeypatch.setattr(service, "_watch_order_sources", sources)
+
+    workspace = await service.watch_order_workspace(9)
+
+    assert workspace.revision == 7
+    assert [entry.item_id for entry in workspace.entries] == [episode.id]
+    assert workspace.entries[0].poster is not None
+    assert workspace.entries[0].poster.id == episode.id
+    assert workspace.sources == ()
+
+
+async def test_watch_order_service_mutation_wrappers_preserve_request_state(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    episode = _library_summary(item_id=43, title="New Order", kind=LibraryItemKind.EPISODE)
+    entry = WatchOrderEntryDetail(id=3, position=0, item=episode)
+    calls: list[str] = []
+
+    class WatchOrderClient:
+        async def get_watch_order(self, watch_order_id: int, **filters: object) -> object:
+            assert watch_order_id == 9
+            assert filters == {"cursor": "after-2", "limit": 100}
+            calls.append("page")
+            return SimpleNamespace(
+                watch_order=SimpleNamespace(revision=7),
+                entries=PaginatedResponse(items=(entry,), next_cursor="after-3", limit=100),
+            )
+
+        async def create_collection_watch_order(
+            self, collection_id: int, _request: object
+        ) -> object:
+            assert collection_id == 4
+            calls.append("create")
+            return SimpleNamespace(watch_order_id=10)
+
+        async def update_watch_order(self, watch_order_id: int, _request: object) -> object:
+            assert watch_order_id == 9
+            calls.append("update")
+            return SimpleNamespace(revision=8)
+
+        async def delete_watch_order(
+            self, watch_order_id: int, *, expected_revision: int
+        ) -> object:
+            assert (watch_order_id, expected_revision) == (9, 8)
+            calls.append("delete")
+            return SimpleNamespace(collection_revision=6)
+
+        async def add_watch_order_entry(self, watch_order_id: int, _request: object) -> object:
+            assert watch_order_id == 9
+            calls.append("add")
+            return SimpleNamespace(revision=9)
+
+        async def move_watch_order_entry(
+            self, watch_order_id: int, entry_id: int, _request: object
+        ) -> object:
+            assert (watch_order_id, entry_id) == (9, 3)
+            calls.append("move")
+            return SimpleNamespace(revision=10)
+
+        async def remove_watch_order_entry(
+            self, watch_order_id: int, entry_id: int, *, expected_revision: int
+        ) -> object:
+            assert (watch_order_id, entry_id, expected_revision) == (9, 3, 10)
+            calls.append("remove")
+            return SimpleNamespace(revision=11)
+
+    @asynccontextmanager
+    async def client_context() -> AsyncGenerator[WatchOrderClient]:
+        yield WatchOrderClient()
+
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+    monkeypatch.setattr(service, "_client", client_context)
+
+    rows, next_cursor, revision = await service.watch_order_page(9, cursor="after-2")
+    assert ([row.item_id for row in rows], next_cursor, revision) == ([episode.id], "after-3", 7)
+    assert await service.create_watch_order(
+        4, collection_revision=5, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
+    ) == 10
+    assert await service.update_watch_order(
+        9, revision=7, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
+    ) == 8
+    assert await service.delete_watch_order(9, revision=8) == 6
+    assert await service.add_watch_order_entry(9, revision=8, item_id=43, before_entry_id=3) == 9
+    assert await service.move_watch_order_entry(9, revision=9, entry_id=3, after_entry_id=4) == 10
+    assert await service.remove_watch_order_entry(9, revision=10, entry_id=3) == 11
+    assert calls == ["page", "create", "update", "delete", "add", "move", "remove"]
+
+
+async def test_watch_order_editor_loads_collection_identity(monkeypatch: MonkeyPatch) -> None:
+    class EditorClient:
+        async def get_watch_order(self, _watch_order_id: int, **_filters: object) -> object:
+            return SimpleNamespace(
+                watch_order=SimpleNamespace(
+                    id=9,
+                    collection_id=4,
+                    name="Chronological",
+                    kind=SimpleNamespace(value="chronological"),
+                    entry_count=12,
+                    revision=7,
+                )
+            )
+
+        async def get_collection(self, collection_id: int) -> object:
+            assert collection_id == 4
+            return SimpleNamespace(name="Stargate")
+
+    @asynccontextmanager
+    async def client_context() -> AsyncGenerator[EditorClient]:
+        yield EditorClient()
+
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+    monkeypatch.setattr(service, "_client", client_context)
+
+    editor = await service.watch_order_editor(9)
+
+    assert editor.model_dump(by_alias=True) == {
+        "id": 9,
+        "collectionId": 4,
+        "collectionName": "Stargate",
+        "name": "Chronological",
+        "kind": "chronological",
+        "entryCount": 12,
+        "revision": 7,
+    }
+
+
 async def test_administration_data_and_mutation_endpoints_stay_within_katalog_boundary(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1403,6 +1890,21 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
             assert cursor is None
             return (review,), None
+
+        async def duplicate_resolution_preview(self) -> DuplicateResolutionPreview:
+            return DuplicateResolutionPreview(candidates=())
+
+        async def duplicate_episode_issues(self) -> tuple[DuplicateEpisodeIssue, ...]:
+            return (
+                DuplicateEpisodeIssue(
+                    id=3,
+                    library_root_id=1,
+                    path="/media/Show/Season 1/S01E01 alternate.mkv",
+                    message=(
+                        "Episode identifier ('show', 1, 1) appears more than once in this scan."
+                    ),
+                ),
+            )
 
         async def submit_scan(self, _request: object) -> JobView:
             calls.append("scan")
@@ -1483,6 +1985,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     metadata_response = await administration_metadata_data(
         Request({"type": "http", "query_string": b"", "headers": []})
     )
+    duplicates_response = await administration_duplicates_data(request)
     payloads: tuple[dict[str, object], ...] = (
         {"operation": "scan", "rootId": 1, "dryRun": True},
         {"operation": "library-consistency", "rootId": 1, "includeUnavailable": True},
@@ -1506,6 +2009,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     assert json.loads(bytes(roots_response.body))["items"][0]["path"] == "/media"
     assert json.loads(bytes(directories_response.body))["entries"][0]["path"] == "/media/Movies"
     assert json.loads(bytes(metadata_response.body))["items"][0]["itemId"] == 7
+    assert json.loads(bytes(duplicates_response.body))["fileIssues"][0]["id"] == 3
     assert all(response.status_code == 200 for response in actions)
     assert calls == [
         "scan",
@@ -1749,6 +2253,24 @@ async def test_katalog_service_item_edit_contracts(
             calls.append("audit")
             return (audit,)
 
+        async def list_collections(self, *, limit: int) -> PaginatedResponse[CollectionSummary]:
+            assert limit == 100
+            calls.append("collections")
+            return PaginatedResponse(
+                items=(
+                    CollectionSummary(
+                        id=4,
+                        name="Stargate",
+                        overview=None,
+                        item_count=3,
+                        watch_order_count=1,
+                        revision=8,
+                    ),
+                ),
+                next_cursor=None,
+                limit=100,
+            )
+
     monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", FakeClient)
     service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
 
@@ -1762,11 +2284,13 @@ async def test_katalog_service_item_edit_contracts(
         ),
     )
     audits = await service.item_edit_audit(7)
+    collection_choices = await service.item_edit_collection_choices(detail)
 
     assert detail.title == "A title"
     assert result.audit.changed_fields == ("title", "selected_artwork")
     assert audits == (audit,)
-    assert calls == ["detail", "update", "audit"]
+    assert collection_choices == (CollectionChoiceView(id=4, name="Stargate", revision=8),)
+    assert calls == ["detail", "update", "audit", "collections"]
 
 
 async def test_item_edit_endpoints_report_data_and_validation(
@@ -1791,6 +2315,11 @@ async def test_item_edit_endpoints_report_data_and_validation(
         async def item_edit_audit(self, item_id: int) -> tuple[LibraryItemEditAudit, ...]:
             assert item_id == 7
             return (audit,)
+
+        async def item_edit_collection_choices(
+            self, _item: LibraryItemDetail
+        ) -> tuple[CollectionChoiceView, ...]:
+            return (CollectionChoiceView(id=4, name="Stargate", revision=8),)
 
         async def update_item(
             self, item_id: int, request: LibraryItemUpdate
@@ -1848,6 +2377,18 @@ async def test_item_edit_endpoints_report_data_and_validation(
         {"kind": "poster", "artwork_id": 8}
     ]
     assert json.loads(bytes(detail_response.body))["audit"][0]["actor"] == "tester"
+    assert json.loads(bytes(detail_response.body))["collectionChoices"] == [
+        {"id": 4, "name": "Stargate", "revision": 8}
+    ]
+    assert json.loads(bytes(detail_response.body))["collectionRelationships"] == [
+        "primary",
+        "sequel",
+        "prequel",
+        "spinoff",
+        "remake",
+        "alternate_continuity",
+        "related",
+    ]
     assert json.loads(bytes(action_response.body))["audit"]["changed_fields"] == ["title", "tags"]
     assert invalid_action_response.status_code == 422
 
@@ -1909,6 +2450,124 @@ async def test_administration_error_states_and_local_section_routes(
         await administration_artwork_page(request)
 
 
+async def test_administration_match_failure_is_logged_with_katalog_request_id(
+    monkeypatch: MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingAdminCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def match_metadata_candidate(
+            self, _item_id: int, *, provider: str, provider_id: str
+        ) -> None:
+            assert (provider, provider_id) == ("tmdb", "314")
+            raise KatalogClientError(
+                KatalogClientErrorKind.UNAVAILABLE,
+                "TMDB detail request timed out.",
+                status_code=503,
+                request_id="katalog-match-314",
+            )
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {
+                "operation": "match",
+                "itemId": 7,
+                "provider": "tmdb",
+                "providerId": "314",
+            }
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalogue)
+    caplog.set_level("WARNING", logger="kasana.kanvas.dashboard")
+
+    response = await administration_action(cast(Request, JsonRequest()))
+
+    assert response.status_code == 503
+    assert json.loads(bytes(response.body)) == {
+        "error": "Metadata match could not be applied.",
+        "requestId": "katalog-match-314",
+    }
+    assert "Metadata match could not be applied." in caplog.text
+    assert "request_id=katalog-match-314" in caplog.text
+    assert "TMDB detail request timed out." in caplog.text
+
+
+async def test_administration_match_conflict_keeps_its_resolution_guidance(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class ConflictingAdminCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def match_metadata_candidate(
+            self, _item_id: int, *, provider: str, provider_id: str
+        ) -> None:
+            assert (provider, provider_id) == ("tmdb", "314")
+            raise KatalogClientError(
+                KatalogClientErrorKind.CONFLICT,
+                "Lock the sort title or resolve the duplicate before matching.",
+                status_code=409,
+                request_id="katalog-match-conflict",
+            )
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {
+                "operation": "match",
+                "itemId": 7,
+                "provider": "tmdb",
+                "providerId": "314",
+            }
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictingAdminCatalogue)
+
+    response = await administration_action(cast(Request, JsonRequest()))
+
+    assert response.status_code == 409
+    assert json.loads(bytes(response.body)) == {
+        "error": "Lock the sort title or resolve the duplicate before matching.",
+        "requestId": "katalog-match-conflict",
+    }
+
+
+async def test_administration_batch_duplicate_route_explains_when_katalog_needs_restart(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class StaleKatalogAdminCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def submit_duplicate_resolution_batch(self, _request: object) -> object:
+            raise KatalogClientError(
+                KatalogClientErrorKind.NOT_FOUND,
+                "Katalog returned HTTP 404.",
+                status_code=404,
+                request_id="katalog-batch-404",
+            )
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {
+                "operation": "duplicate-resolve-batch",
+                "confirmed": True,
+                "resolutions": [{"source_item_id": 1, "target_item_id": 2}],
+            }
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", StaleKatalogAdminCatalogue)
+
+    response = await administration_action(cast(Request, JsonRequest()))
+
+    assert response.status_code == 404
+    assert json.loads(bytes(response.body)) == {
+        "error": (
+            "The running Katalog API does not support batch duplicate merging yet. "
+            "Restart Katalog, then try again."
+        ),
+        "requestId": "katalog-batch-404",
+    }
+
+
 def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> None:
     settings = Kanvas_Settings()
     poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
@@ -1944,7 +2603,7 @@ def test_shell_does_not_mount_search_overlay() -> None:
 
 
 def test_administration_sections_mount_distinct_browser_states_and_active_tabs() -> None:
-    sections = ("overview", "metadata", "libraries", "jobs", "artwork", "hierarchy")
+    sections = ("overview", "metadata", "libraries", "jobs", "artwork", "hierarchy", "duplicates")
 
     for section in sections:
         with Client(page("")) as client:
@@ -2045,8 +2704,11 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
-        async def item_detail(self, item_id: int) -> ItemDetailView:
+        async def item_detail(
+            self, item_id: int, *, include_collection_choices: bool = False
+        ) -> ItemDetailView:
             assert item_id == 7
+            assert include_collection_choices is True
             return ItemDetailView(
                 id=7,
                 title="Poster",
@@ -2057,6 +2719,15 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
                 progressPercent=30,
                 available=True,
                 children=(poster,),
+                includedCollections=(
+                    IncludedCollectionView(
+                        id=4,
+                        name="Stargate",
+                        revision=8,
+                        relationship="primary",
+                    ),
+                ),
+                availableCollections=(CollectionChoiceView(id=5, name="Atlantis", revision=3),),
             )
 
         async def mark_watched(self, _item_id: int) -> None:
@@ -2067,6 +2738,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
 
         async def library_tags(self) -> tuple[str, ...]:
             return ("anime",)
+
+        async def library_grid_revision(self) -> str:
+            return "test-revision"
 
     with Client(page("")) as client:
         monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalogue)
@@ -2085,8 +2759,41 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         browser_components = [
             element for element in client.elements.values() if element.tag in set(BrowserComponent)
         ]
+        collection_sections = [
+            element
+            for element in client.elements.values()
+            if "k-item-collections" in _element_classes(element)
+        ]
+        item_editors = [
+            element
+            for element in client.elements.values()
+            if element.tag == BrowserComponent.ITEM_EDITOR
+        ]
         assert browser_components
         assert all(element.tag != "nicegui-html" for element in browser_components)
+        assert collection_sections
+        assert len(item_editors) == 1
+        assert _element_props(item_editors[0])["action-source"] == "/kanvas/actions/items/7"
+
+
+def test_item_page_omits_the_included_in_section_without_collection_memberships() -> None:
+    item = ItemDetailView(
+        id=7,
+        title="Standalone",
+        kind="movie",
+        posterPlaceholder=PlaceholderArtView(lines=("Standalone",)),
+        available=True,
+    )
+
+    with Client(page("")) as client:
+        item_route._included_collections(item)  # pyright: ignore[reportPrivateUsage]
+        collection_sections = [
+            element
+            for element in client.elements.values()
+            if "k-item-collections" in _element_classes(element)
+        ]
+
+    assert collection_sections == []
 
 
 async def test_collection_and_watch_order_routes_render_the_editor_states(
@@ -2252,6 +2959,9 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives(
         async def library_tags(self) -> tuple[str, ...]:
             return ("anime", "favourite")
 
+        async def library_grid_revision(self) -> str:
+            return "test-revision"
+
     monkeypatch.setattr(library_route, "KanvasKatalogService", TagCatalogue)
     with Client(page("")) as library_client:
         await render_library(
@@ -2306,6 +3016,7 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives(
         )
         assert _element_props(apply_button)["type"] == "submit"
         assert _element_props(poster_grid)["state-user"] == "1"
+        assert _element_props(poster_grid)["catalogue-revision"] == "test-revision"
         assert _element_props(poster_grid)["development-mode"] == "false"
         assert "search=poster" in cast(str, _element_props(poster_grid)["source"])
         assert "kind=movie" in cast(str, _element_props(poster_grid)["source"])
@@ -2335,6 +3046,9 @@ async def test_library_tag_filter_reports_katalog_failure_without_losing_active_
             pass
 
         async def library_tags(self) -> tuple[str, ...]:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def library_grid_revision(self) -> str:
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
     monkeypatch.setattr(library_route, "KanvasKatalogService", UnavailableCatalogue)
@@ -2645,6 +3359,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/administration/jobs",
         "/administration/artwork",
         "/administration/hierarchy",
+        "/administration/duplicates",
         "/_design",
     } <= paths
     assert "/search" not in paths
@@ -2692,6 +3407,9 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-collection-grid" in javascript
     assert "kanvas-item-picker" in javascript
     assert "kanvas-watch-order-list" in javascript
+    assert "k-watch-order-poster" in javascript
+    assert "data-insert-before" in javascript
+    assert "isNoopMove" in javascript
     assert "dragstart" in javascript
     assert "onDrop" in javascript
     assert "moveBoundary" in javascript
@@ -2719,6 +3437,11 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "https://www.imdb.com/title/${providerId}/" in javascript
     assert "https://www.tvmaze.com/shows/${providerId}" in javascript
     assert "k-metadata-selected__title" in css
+    assert 'class="k-metadata-navigation"' in javascript
+    assert ".k-metadata-decision .k-action-row" in css
+    assert 'grid-template-areas: "local candidates" "local actions"' in css
+    assert ".k-metadata-selected__title { display: block; overflow-wrap: anywhere;" in css
+    assert "kanvas-administration { display: block; width: 100%; max-width: 1440px; }" in css
 
 
 def test_administration_overview_transformation_and_adaptive_polling() -> None:

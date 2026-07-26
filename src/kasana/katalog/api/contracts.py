@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
 from kasana.shared.profile_rules import (
     PROFILE_ACCENT_COLOUR_DEFAULT,
     PROFILE_ACCENT_COLOUR_PATTERN,
@@ -227,11 +228,22 @@ class LibraryItemSummary(APIModel):
     parent_id: int | None = Field(default=None, gt=0)
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
+    episode_end_season_number: int | None = Field(default=None, ge=0)
+    episode_end_number: int | None = Field(default=None, ge=0)
     series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
     context_label: str | None = Field(default=None, min_length=1, max_length=80)
     availability: Availability
     tags: tuple[str, ...] = Field(default=(), max_length=50)
     artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=10)
+
+
+class ItemCollectionReference(APIModel):
+    """One collection that directly contains the detailed library item."""
+
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    revision: int = Field(ge=1)
+    relationship: CollectionRelationship | None = None
 
 
 class LibraryItemDetailBase(LibraryItemSummary):
@@ -241,9 +253,12 @@ class LibraryItemDetailBase(LibraryItemSummary):
     air_date: str | None = None
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
+    episode_end_season_number: int | None = Field(default=None, ge=0)
+    episode_end_number: int | None = Field(default=None, ge=0)
     locked_metadata_fields: tuple[MetadataField, ...] = ()
     selected_artwork: tuple[SelectedArtwork, ...] = ()
     playback_url: str = Field(pattern=r"^/api/v1/playback/items/\d+$")
+    collections: tuple[ItemCollectionReference, ...] = Field(default=(), max_length=100)
 
 
 class LibraryItemUpdate(APIModel):
@@ -394,6 +409,8 @@ class CollectionSummary(APIModel):
     item_count: int = Field(ge=0)
     watch_order_count: int = Field(ge=0)
     revision: int = Field(ge=1)
+    artwork_item_id: int | None = Field(default=None, gt=0)
+    default_watch_order_id: int | None = Field(default=None, gt=0)
 
 
 class CollectionCreate(APIModel):
@@ -413,6 +430,8 @@ class CollectionUpdate(APIModel):
     expected_revision: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=1_000)
     overview: str | None = Field(default=None, max_length=20_000)
+    artwork_item_id: int | None = Field(default=None, gt=0)
+    default_watch_order_id: int | None = Field(default=None, gt=0)
 
     @field_validator("name")
     @classmethod
@@ -426,8 +445,13 @@ class CollectionUpdate(APIModel):
 
     @model_validator(mode="after")
     def require_change(self) -> Self:
-        if not {"name", "overview"}.intersection(self.model_fields_set):
-            raise ValueError("Collection update must include name or overview.")
+        if not {
+            "name",
+            "overview",
+            "artwork_item_id",
+            "default_watch_order_id",
+        }.intersection(self.model_fields_set):
+            raise ValueError("Collection update must include a change.")
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("Collection name cannot be null.")
         return self
@@ -464,6 +488,17 @@ class WatchOrderSummary(APIModel):
     kind: WatchOrderKind
     entry_count: int = Field(ge=0)
     revision: int = Field(ge=1)
+    is_default: bool = False
+    progress: WatchOrderProgress | None = None
+
+
+class WatchOrderProgress(APIModel):
+    """Derived, per-user state for one fixed watch-order sequence."""
+
+    completed_entry_count: int = Field(ge=0)
+    progress_percent: int = Field(ge=0, le=100)
+    unavailable_entry_count: int = Field(ge=0)
+    next_item: LibraryItemSummary | None = None
 
 
 class WatchOrderCreate(APIModel):
@@ -514,6 +549,23 @@ class WatchOrderEntryCreate(APIModel):
     def validate_anchor(self) -> Self:
         if self.insert_before_entry_id is not None and self.insert_after_entry_id is not None:
             raise ValueError("An entry cannot be inserted before and after at the same time.")
+        return self
+
+
+class WatchOrderEntriesCreate(APIModel):
+    """Insert a contiguous block of playable items into a watch order."""
+
+    expected_revision: int = Field(ge=1)
+    library_item_ids: tuple[int, ...] = Field(min_length=1, max_length=5_000)
+    insert_before_entry_id: int | None = Field(default=None, gt=0)
+    insert_after_entry_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        if len(set(self.library_item_ids)) != len(self.library_item_ids):
+            raise ValueError("A watch-order batch cannot contain duplicate library items.")
+        if self.insert_before_entry_id is not None and self.insert_after_entry_id is not None:
+            raise ValueError("A batch cannot be inserted before and after at the same time.")
         return self
 
 
@@ -591,6 +643,8 @@ class ContinueWatchingEntry(APIModel):
 class OnDeckEntry(APIModel):
     item: LibraryItemSummary
     source_watch_order_id: int | None = Field(default=None, gt=0)
+    source_watch_order_name: str | None = Field(default=None, min_length=1, max_length=1_000)
+    source_collection_name: str | None = Field(default=None, min_length=1, max_length=1_000)
 
 
 class MetadataReviewCandidate(APIModel):
@@ -738,6 +792,15 @@ class WatchOrderPlaybackContext(APIModel):
     kind: Literal[PlaybackContextKind.WATCH_ORDER] = PlaybackContextKind.WATCH_ORDER
     watch_order_id: int = Field(gt=0)
     start_item_id: int | None = Field(default=None, gt=0)
+    resume: bool = False
+    skip_unavailable: bool = False
+
+    @model_validator(mode="after")
+    def validate_start(self) -> Self:
+        if self.resume and self.start_item_id is not None:
+            msg = "A watch-order context cannot combine resume with start_item_id."
+            raise ValueError(msg)
+        return self
 
 
 class ManualQueuePlaybackContext(APIModel):
@@ -790,6 +853,8 @@ class PlaybackPlanEntry(APIModel):
     series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
+    episode_end_season_number: int | None = Field(default=None, ge=0)
+    episode_end_number: int | None = Field(default=None, ge=0)
     duration_seconds: float | None = Field(default=None, ge=0)
     saved_resume_position_seconds: float = Field(ge=0)
     stream_url: str = Field(pattern=r"^/api/v1/media/[A-Za-z0-9_-]+$")
@@ -815,11 +880,16 @@ class PlaybackSessionResponse(APIModel):
     context: PlaybackContext
     current_entry_position: int = Field(ge=0)
     current_item: PlaybackPlanEntry | None = None
-    entries: tuple[PlaybackPlanEntry, ...] = Field(min_length=1, max_length=100)
+    entries: tuple[PlaybackPlanEntry, ...] = Field(
+        min_length=1, max_length=MAX_PLAYBACK_QUEUE_SIZE
+    )
     created_at: datetime
     expires_at: datetime
     closed_at: datetime | None
     last_event: PlaybackSessionEvent | None = None
+    skipped_unavailable_titles: tuple[str, ...] = Field(
+        default=(), max_length=MAX_PLAYBACK_QUEUE_SIZE
+    )
 
 
 type PlaybackSession = PlaybackSessionResponse
@@ -894,13 +964,16 @@ class HierarchyRepairImpact(APIModel):
 class HierarchyRepairActionSummary(APIModel):
     kind: str = Field(min_length=1, max_length=100)
     item_id: int | None = Field(default=None, gt=0)
+    item_label: str | None = Field(default=None, min_length=1, max_length=2_000)
     target_item_id: int | None = Field(default=None, gt=0)
+    target_label: str | None = Field(default=None, min_length=1, max_length=2_000)
     explanation: str = Field(min_length=1, max_length=2_000)
 
 
 class HierarchyRepairManualReview(APIModel):
     root_id: int = Field(gt=0)
     item_id: int | None = Field(default=None, gt=0)
+    item_label: str | None = Field(default=None, min_length=1, max_length=2_000)
     reason: str = Field(min_length=1, max_length=2_000)
 
 
@@ -908,6 +981,78 @@ class HierarchyRepairPreview(APIModel):
     actions: tuple[HierarchyRepairActionSummary, ...]
     manual_reviews: tuple[HierarchyRepairManualReview, ...]
     impact: HierarchyRepairImpact
+
+
+class DuplicateResolutionRequest(APIModel):
+    """Explicitly merge one previewed media-less record into its file-backed duplicate."""
+
+    source_item_id: int = Field(gt=0)
+    target_item_id: int = Field(gt=0)
+    confirmed: bool = False
+
+    @model_validator(mode="after")
+    def require_confirmation(self) -> Self:
+        if not self.confirmed:
+            msg = "Duplicate resolution requests require confirmed=true."
+            raise ValueError(msg)
+        return self
+
+
+class DuplicateResolutionPair(APIModel):
+    """One source-to-target merge selected from the duplicate-resolution preview."""
+
+    source_item_id: int = Field(gt=0)
+    target_item_id: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def require_distinct_items(self) -> Self:
+        if self.source_item_id == self.target_item_id:
+            msg = "A duplicate source and target must be different items."
+            raise ValueError(msg)
+        return self
+
+
+class DuplicateResolutionBatchRequest(APIModel):
+    """Explicitly merge multiple currently previewed duplicate pairs in one job."""
+
+    resolutions: tuple[DuplicateResolutionPair, ...] = Field(min_length=1)
+    confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_batch(self) -> Self:
+        if not self.confirmed:
+            msg = "Duplicate resolution requests require confirmed=true."
+            raise ValueError(msg)
+        source_ids = tuple(resolution.source_item_id for resolution in self.resolutions)
+        if len(set(source_ids)) != len(source_ids):
+            msg = "A duplicate source can appear only once in a batch."
+            raise ValueError(msg)
+        return self
+
+
+class DuplicateResolutionCandidate(APIModel):
+    source_item_id: int = Field(gt=0)
+    source_title: str = Field(min_length=1, max_length=1_000)
+    source_year: int | None = Field(default=None, ge=1, le=9999)
+    target_item_id: int = Field(gt=0)
+    target_title: str = Field(min_length=1, max_length=1_000)
+    target_year: int | None = Field(default=None, ge=1, le=9999)
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500)
+    impact: HierarchyRepairImpact
+
+
+class DuplicateResolutionPreview(APIModel):
+    candidates: tuple[DuplicateResolutionCandidate, ...]
+
+
+class DuplicateEpisodeIssue(APIModel):
+    """One uncatalogued file that conflicts with an episode identifier already in use."""
+
+    id: int = Field(gt=0)
+    library_root_id: int = Field(gt=0)
+    path: str = Field(min_length=1, max_length=10_000)
+    message: str = Field(min_length=1, max_length=2_000)
 
 
 class MutationResult(APIModel):

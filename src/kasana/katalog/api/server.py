@@ -12,10 +12,11 @@ from kasana.shared import LogDomain, SharedSettings, configure_logging
 def main() -> None:
     settings = KatalogSettings()
     shared_settings = SharedSettings()
-    configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
-    uvicorn.run(
+    config = uvicorn.Config(
         create_app(settings),
         host=settings.api_host,
         port=settings.api_port,
         log_config=None,
     )
+    configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
+    uvicorn.Server(config).run()

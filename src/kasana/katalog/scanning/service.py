@@ -17,6 +17,8 @@ from kasana.katalog.models import (
     AvailabilityState,
     Kura,
     MediaFile,
+    MetadataBinding,
+    MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
 )
@@ -202,9 +204,40 @@ class IncrementalScanner:
 
     def _existing_files(self, root_id: int) -> tuple[ExistingFile, ...]:
         def load(session: Session) -> tuple[ExistingFile, ...]:
-            records = session.execute(
-                select(MediaFile).join(Zaisan).where(Zaisan.library_root_id == root_id)
-            ).scalars()
+            records = tuple(
+                session.execute(
+                    select(MediaFile).join(Zaisan).where(Zaisan.library_root_id == root_id)
+                ).scalars()
+            )
+            items_by_id = {
+                item.id: item
+                for item in session.scalars(
+                    select(Zaisan).where(Zaisan.library_root_id == root_id)
+                ).all()
+            }
+            matched_item_ids = frozenset(
+                session.scalars(
+                    select(MetadataBinding.library_item_id)
+                    .join(Zaisan)
+                    .where(
+                        Zaisan.library_root_id == root_id,
+                        MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                    )
+                )
+            )
+
+            def has_matched_identity(item_id: int) -> bool:
+                current = items_by_id.get(item_id)
+                while current is not None:
+                    if current.id in matched_item_ids:
+                        return True
+                    current = (
+                        items_by_id.get(current.parent_id)
+                        if current.parent_id is not None
+                        else None
+                    )
+                return False
+
             return tuple(
                 ExistingFile(
                     id=file.id,
@@ -212,6 +245,11 @@ class IncrementalScanner:
                     item_kind=file.library_item.item_kind,
                     item_title=file.library_item.title,
                     item_release_year=file.library_item.release_year,
+                    item_has_matched_metadata=has_matched_identity(file.library_item_id),
+                    item_season_number=file.library_item.season_number,
+                    item_episode_number=file.library_item.episode_number,
+                    item_episode_end_season_number=file.library_item.episode_end_season_number,
+                    item_episode_end_number=file.library_item.episode_end_number,
                     path=Path(file.absolute_path),
                     size_bytes=file.size_bytes,
                     mtime_ns=file.mtime_ns,
