@@ -17,6 +17,7 @@ def main() -> None:
         host=settings.api_host,
         port=settings.api_port,
         log_config=None,
+        timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
     )
     configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
     uvicorn.Server(config).run()

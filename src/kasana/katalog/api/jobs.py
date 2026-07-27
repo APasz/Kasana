@@ -8,6 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select, update
@@ -111,8 +112,13 @@ class JobContext:
     async def check_cancelled(self) -> None:
         """Stop at safe worker checkpoints when cancellation was requested."""
 
-        if await self._registry.cancellation_requested(self._job_id):
+        if self.cancellation_requested():
             raise JobCancelledError("Job cancellation was requested.")
+
+    def cancellation_requested(self) -> bool:
+        """Return whether the worker should stop at its next synchronous checkpoint."""
+
+        return self._registry.cancellation_requested_now(self._job_id)
 
 
 type JobOperation = Callable[[], Awaitable[JobOutcome | str | None]]
@@ -128,6 +134,7 @@ class JobRegistry:
         self._database = database
         self._maximum_jobs = maximum_jobs
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancellation_requests: dict[str, Event] = {}
         self._lock = asyncio.Lock()
 
     async def recover_interrupted(self) -> int:
@@ -181,6 +188,7 @@ class JobRegistry:
             )
             task = asyncio.create_task(self._run(job_id, operation), name=f"katalog-job-{job_id}")
             self._tasks[job_id] = task
+            self._cancellation_requests[job_id] = Event()
         return job
 
     async def get(self, job_id: str) -> BackgroundJob:
@@ -249,13 +257,21 @@ class JobRegistry:
             session.flush()
             return _job_view(job)
 
-        return await run_blocking(self._database.run_transaction, cancel)
+        job = await run_blocking(self._database.run_transaction, cancel)
+        self._request_cancellation(job_id)
+        return job
 
     async def cancellation_requested(self, job_id: str) -> bool:
         return await run_blocking(
             self._database.run_transaction,
             lambda session: _require_job(session, job_id).cancellation_requested,
         )
+
+    def cancellation_requested_now(self, job_id: str) -> bool:
+        """Read the in-process cancellation signal without blocking a worker thread."""
+
+        event = self._cancellation_requests.get(job_id)
+        return event.is_set() if event is not None else True
 
     async def prune(self, *, older_than: timedelta | None = None, keep: int | None = None) -> int:
         """Remove terminal history only; active jobs are never pruning candidates."""
@@ -285,12 +301,13 @@ class JobRegistry:
         return await run_blocking(self._database.run_transaction, prune)
 
     async def close(self) -> None:
-        """Cancel only local tasks; persisted recovery handles unclean process exits."""
+        """Request cooperative cancellation before waiting for local work to finish."""
 
         async with self._lock:
+            job_ids = tuple(self._tasks)
             tasks = tuple(self._tasks.values())
-            for task in tasks:
-                task.cancel()
+            for job_id in job_ids:
+                self._request_cancellation(job_id)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -299,6 +316,7 @@ class JobRegistry:
         if not await self._start(job_id, started):
             async with self._lock:
                 self._tasks.pop(job_id, None)
+                self._cancellation_requests.pop(job_id, None)
             return
         context = JobContext(self, job_id)
         try:
@@ -342,6 +360,12 @@ class JobRegistry:
         finally:
             async with self._lock:
                 self._tasks.pop(job_id, None)
+                self._cancellation_requests.pop(job_id, None)
+
+    def _request_cancellation(self, job_id: str) -> None:
+        event = self._cancellation_requests.get(job_id)
+        if event is not None:
+            event.set()
 
     async def _transition(self, job_id: str, **changes: object) -> None:
         now = datetime.now(UTC)

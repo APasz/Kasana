@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from kasana.katalog.models import Base
+from kasana.katalog.numerals import natural_sort_key
 
 Result = TypeVar("Result")
 
@@ -45,6 +46,7 @@ class KatalogDatabase:
             cursor.execute("PRAGMA journal_mode = WAL")
             cursor.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
             cursor.close()
+            connection.create_function("natural_sort_key", 1, natural_sort_key, deterministic=True)
 
         event.listen(self.engine, "connect", configure_connection)
 

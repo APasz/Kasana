@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
 
+_POSTER_HREF_PATTERN = r"^/(?:item/\d+|play/watch-orders/\d+\?resume=true)$"
+
 
 class PlaceholderArtView(BaseModel):
     """Text payload used by generated missing-poster artwork."""
@@ -60,13 +62,14 @@ class PosterView(BaseModel):
     title: str = Field(min_length=1, max_length=1_000)
     header: str | None = Field(default=None, max_length=200)
     subtitle: str | None = Field(default=None, max_length=200)
-    href: str = Field(pattern=r"^/item/\d+$")
+    href: str = Field(pattern=_POSTER_HREF_PATTERN)
     poster_url: str | None = Field(default=None, alias="posterUrl")
     placeholder: PlaceholderArtView = Field(
         default_factory=lambda: PlaceholderArtView(lines=("Untitled",))
     )
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     state: PosterState = PosterState.NORMAL
+    watched: bool = False
     available: bool
 
 

@@ -55,31 +55,41 @@ async def start_fragmented_mp4(
     *,
     audio_stream_index: int,
     transcode_audio: bool,
+    start_seconds: float = 0.0,
 ) -> FragmentedMp4Stream:
-    """Start copy/remux delivery without writing an intermediate media file."""
+    """Start copy/remux delivery at one validated position without intermediate media."""
+
+    if start_seconds < 0:
+        raise ValueError("Fragmented MP4 streams cannot start before zero seconds.")
 
     command = [
         executable,
         "-v",
         "error",
         "-nostdin",
-        "-i",
-        input_url,
-        "-map",
-        "0:v:0",
-        "-map",
-        f"0:a:{audio_stream_index}",
-        "-sn",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac" if transcode_audio else "copy",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
-        "pipe:1",
     ]
+    if start_seconds > 0:
+        command.extend(("-ss", f"{start_seconds:.3f}"))
+    command.extend(
+        (
+            "-i",
+            input_url,
+            "-map",
+            "0:v:0",
+            "-map",
+            f"0:a:{audio_stream_index}",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac" if transcode_audio else "copy",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            "pipe:1",
+        )
+    )
     try:
         process = await asyncio.create_subprocess_exec(
             *command,

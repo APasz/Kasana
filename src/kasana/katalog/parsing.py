@@ -8,6 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from re import Match, Pattern
 
+from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
+
 
 class LibraryLayout(StrEnum):
     MOVIES = "movies"
@@ -77,33 +79,57 @@ _DECADE_PATTERN: Pattern[str] = re.compile(
 )
 _YEAR_SUFFIX_PATTERN: Pattern[str] = re.compile(r"\s*\((?P<year>(?:18|19|20)\d{2})\)$")
 _SEASON_PATTERN: Pattern[str] = re.compile(
-    r"^(?:season|volume)\s*(?P<number>\d{1,3})$", re.IGNORECASE
+    rf"^(?P<label>season|volume|シーズン|시즌)\s*(?P<number>{NUMERAL_TOKEN_PATTERN})$",
+    re.IGNORECASE,
+)
+_ORDINAL_SEASON_PATTERN: Pattern[str] = re.compile(
+    rf"^第\s*(?P<number>{NUMERAL_TOKEN_PATTERN})\s*(?:季|期|기)$"
 )
 _SEASON_EPISODE_PATTERN: Pattern[str] = re.compile(
-    r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})(?:$|[. _-])",
+    rf"(?:^|[. _-])(?:season|s)(?P<season>{NUMERAL_TOKEN_PATTERN})[. _-]*"
+    rf"(?:episode|ep|e)(?P<episode>{NUMERAL_TOKEN_PATTERN})(?:$|[. _-])",
     re.IGNORECASE,
 )
 _SEASON_EPISODE_RANGE_PATTERN: Pattern[str] = re.compile(
-    r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})"
+    rf"(?:^|[. _-])(?:season|s)(?P<season>{NUMERAL_TOKEN_PATTERN})[. _-]*"
+    rf"(?:episode|ep|e)(?P<episode>{NUMERAL_TOKEN_PATTERN})"
     r"(?:[. _-]*(?:-|&|and)[. _-]*|[. _-]*)"
-    r"(?:s(?P<end_season>\d{1,2})[. _-]*)?e(?P<end_episode>\d{1,3})"
+    rf"(?:(?:season|s)(?P<end_season>{NUMERAL_TOKEN_PATTERN})[. _-]*)?"
+    rf"(?:episode|ep|e)(?P<end_episode>{NUMERAL_TOKEN_PATTERN})"
     r"(?:$|[. _-])",
     re.IGNORECASE,
 )
 _ALTERNATE_SEASON_EPISODE_PATTERN: Pattern[str] = re.compile(
-    r"(?:\[(?P<bracket_season>\d{1,2})[xX](?P<bracket_episode>\d{1,3})\]"
-    r"|\((?P<parenthetical_season>\d{1,2})[xX](?P<parenthetical_episode>\d{1,3})\))"
+    rf"(?:\[(?P<bracket_season>{NUMERAL_TOKEN_PATTERN})[xX](?P<bracket_episode>{NUMERAL_TOKEN_PATTERN})\]"
+    rf"|\((?P<parenthetical_season>{NUMERAL_TOKEN_PATTERN})[xX](?P<parenthetical_episode>{NUMERAL_TOKEN_PATTERN})\))"
 )
 _EPISODE_PATTERN: Pattern[str] = re.compile(
-    r"(?:^|[. _-])e(?P<episode>\d{1,3})(?:$|[. _-])", re.IGNORECASE
+    rf"(?:^|[. _-])(?:episode|ep|e)(?P<episode>{NUMERAL_TOKEN_PATTERN})(?:$|[. _-])",
+    re.IGNORECASE,
+)
+_EAST_ASIAN_EPISODE_PATTERN: Pattern[str] = re.compile(
+    rf"(?:第\s*(?P<han_episode>{NUMERAL_TOKEN_PATTERN})\s*(?:話|话|集|回)"
+    rf"|제\s*(?P<hangul_episode>{NUMERAL_TOKEN_PATTERN})\s*(?:화|회))"
+)
+_SEASON_EPISODE_MARKER = (
+    rf"(?:^|[. _-])(?:season|s){NUMERAL_TOKEN_PATTERN}"
+    rf"[. _-]*(?:episode|ep|e){NUMERAL_TOKEN_PATTERN}"
+)
+_EPISODE_RANGE_SUFFIX = (
+    rf"(?:[. _-]*(?:-|&|and)[. _-]*|[. _-]*)"
+    rf"(?:(?:season|s){NUMERAL_TOKEN_PATTERN}[. _-]*)?"
+    rf"(?:episode|ep|e){NUMERAL_TOKEN_PATTERN}"
 )
 _EPISODE_MARKER_PATTERN: Pattern[str] = re.compile(
-    r"(?:^|[. _-])s\d{1,2}[. _-]*e\d{1,3}"
-    r"(?:(?:[. _-]*(?:-|&|and)[. _-]*|[. _-]*)(?:s\d{1,2}[. _-]*)?e\d{1,3})?"
+    _SEASON_EPISODE_MARKER
+    +
+    rf"(?:{_EPISODE_RANGE_SUFFIX})?"
     r"(?:$|[. _-])"
-    r"|(?:^|[. _-])e\d{1,3}(?:$|[. _-])"
-    r"|\[\d{1,2}[xX]\d{1,3}\]"
-    r"|\(\d{1,2}[xX]\d{1,3}\)",
+    rf"|(?:^|[. _-])(?:episode|ep|e){NUMERAL_TOKEN_PATTERN}(?:$|[. _-])"
+    rf"|\[{NUMERAL_TOKEN_PATTERN}[xX]{NUMERAL_TOKEN_PATTERN}\]"
+    rf"|\({NUMERAL_TOKEN_PATTERN}[xX]{NUMERAL_TOKEN_PATTERN}\)"
+    rf"|第\s*{NUMERAL_TOKEN_PATTERN}\s*(?:話|话|集|回)"
+    rf"|제\s*{NUMERAL_TOKEN_PATTERN}\s*(?:화|회)",
     re.IGNORECASE,
 )
 _RECOGNISED_EXTRA_PATTERN: Pattern[str] = re.compile(
@@ -132,11 +158,28 @@ def infer_library_layout(root_path: Path) -> LibraryLayout:
 
 def parse_season_number(directory_name: str, *, allow_volume: bool) -> int | None:
     match: Match[str] | None = _SEASON_PATTERN.fullmatch(directory_name.strip())
-    if match is None:
-        return None
-    if not allow_volume and directory_name.casefold().startswith("volume"):
-        return None
-    return int(match.group("number"))
+    if match is not None:
+        if not allow_volume and match.group("label").casefold() == "volume":
+            return None
+        return _parse_season_numeral(match.group("number"))
+    ordinal_match = _ORDINAL_SEASON_PATTERN.fullmatch(directory_name.strip())
+    return (
+        _parse_season_numeral(ordinal_match.group("number"))
+        if ordinal_match is not None
+        else None
+    )
+
+
+def _parse_season_numeral(value: str) -> int | None:
+    """Parse the bounded season component of a media identifier."""
+
+    return parse_numeral(value, maximum=99)
+
+
+def _parse_episode_numeral(value: str) -> int | None:
+    """Parse the bounded episode component of a media identifier."""
+
+    return parse_numeral(value, maximum=999)
 
 
 def parse_episode_numbers(
@@ -157,13 +200,28 @@ def parse_episode_range(
         filename_stem
     )
     if season_episode_range is not None:
+        season_number = _parse_season_numeral(season_episode_range.group("season"))
+        episode_number = _parse_episode_numeral(season_episode_range.group("episode"))
+        end_season_number = _parse_season_numeral(
+            season_episode_range.group("end_season") or season_episode_range.group("season")
+        )
+        end_episode_number = _parse_episode_numeral(
+            season_episode_range.group("end_episode")
+        )
+        if (
+            season_number is None
+            or episode_number is None
+            or end_season_number is None
+            or end_episode_number is None
+        ):
+            return None
         start = EpisodeIdentifier(
-            season_number=int(season_episode_range.group("season")),
-            episode_number=int(season_episode_range.group("episode")),
+            season_number=season_number,
+            episode_number=episode_number,
         )
         end = EpisodeIdentifier(
-            season_number=int(season_episode_range.group("end_season") or start.season_number),
-            episode_number=int(season_episode_range.group("end_episode")),
+            season_number=end_season_number,
+            episode_number=end_episode_number,
         )
         return EpisodeRange(start=start, end=end)
     alternate_season_episode: Match[str] | None = _ALTERNATE_SEASON_EPISODE_PATTERN.search(
@@ -178,28 +236,55 @@ def parse_episode_range(
         ) or alternate_season_episode.group("parenthetical_episode")
         assert marker_season is not None
         assert marker_episode is not None
+        season_number = _parse_season_numeral(marker_season)
+        episode_number = _parse_episode_numeral(marker_episode)
+        if season_number is None or episode_number is None:
+            return None
         return EpisodeRange(
             start=EpisodeIdentifier(
-                season_number=int(marker_season), episode_number=int(marker_episode)
+                season_number=season_number, episode_number=episode_number
             )
         )
     season_episode: Match[str] | None = _SEASON_EPISODE_PATTERN.search(filename_stem)
     if season_episode is not None:
+        season_number = _parse_season_numeral(season_episode.group("season"))
+        episode_number = _parse_episode_numeral(season_episode.group("episode"))
+        if season_number is None or episode_number is None:
+            return None
         return EpisodeRange(
             start=EpisodeIdentifier(
-                season_number=int(season_episode.group("season")),
-                episode_number=int(season_episode.group("episode")),
+                season_number=season_number,
+                episode_number=episode_number,
             )
         )
     if season_from_directory is None:
         return None
     episode: Match[str] | None = _EPISODE_PATTERN.search(filename_stem)
-    if episode is None:
-        return None
-    return EpisodeRange(
-        start=EpisodeIdentifier(
-            season_number=season_from_directory, episode_number=int(episode.group("episode"))
+    if episode is not None:
+        episode_number = _parse_episode_numeral(episode.group("episode"))
+        if episode_number is None:
+            return None
+        return EpisodeRange(
+            start=EpisodeIdentifier(
+                season_number=season_from_directory, episode_number=episode_number
+            )
         )
+    east_asian_episode = _EAST_ASIAN_EPISODE_PATTERN.search(filename_stem)
+    if east_asian_episode is None:
+        return None
+    numeral = east_asian_episode.group("han_episode") or east_asian_episode.group(
+        "hangul_episode"
+    )
+    assert numeral is not None
+    episode_number = _parse_episode_numeral(numeral)
+    return (
+        EpisodeRange(
+            start=EpisodeIdentifier(
+                season_number=season_from_directory, episode_number=episode_number
+            )
+        )
+        if episode_number is not None
+        else None
     )
 
 

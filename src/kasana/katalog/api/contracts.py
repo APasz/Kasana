@@ -898,11 +898,18 @@ type PlaybackSession = PlaybackSessionResponse
 class SessionProgressUpdate(APIModel):
     position_seconds: float = Field(ge=0)
     seek: bool = False
+    expected_entry_position: int | None = Field(default=None, ge=0)
+
+
+class PlaybackSessionTransitionRequest(APIModel):
+    """Identify the queue entry a player has finished before requesting a transition."""
+
+    expected_entry_position: int = Field(ge=0)
 
 
 class PlaybackProgressResult(APIModel):
     session: PlaybackSessionResponse
-    event: PlaybackSessionEvent
+    event: PlaybackSessionEvent | None = None
 
 
 class PlaybackCompletionResult(APIModel):

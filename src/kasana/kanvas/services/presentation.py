@@ -13,6 +13,7 @@ from kasana.kanvas.viewmodels.collections import (
 )
 from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterState, PosterView
 from kasana.katalog.public import (
+    NUMERAL_TOKEN_PATTERN,
     ArtworkKind,
     ArtworkSelection,
     Availability,
@@ -26,12 +27,17 @@ from kasana.katalog.public import (
     WatchOrderKind,
     WatchOrderSummary,
     WatchOrderUpdate,
+    parse_numeral,
 )
 
 _ARTWORK_URL = re.compile(
     r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$"
 )
 _GENERIC_EPISODE_TITLE = re.compile(r"^(?:episode|ep\.?)\s*(?P<number>\d+)$", re.IGNORECASE)
+_COMBINED_EPISODE_TITLE_PREFIX = re.compile(
+    rf"^(?:episode|ep|e)\s*(?P<number>{NUMERAL_TOKEN_PATTERN})(?:\s*[-:._]\s*)+",
+    re.IGNORECASE,
+)
 
 
 PLAYABLE_KINDS = frozenset(
@@ -224,6 +230,7 @@ def poster_from_summary(
 ) -> PosterView:
     """Translate a Katalog summary to the single poster visual contract."""
 
+    title = display_title(item)
     poster_url = artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER)
     state = poster_state(
         available=item.availability is Availability.AVAILABLE,
@@ -237,14 +244,15 @@ def poster_from_summary(
     )
     return PosterView(
         id=item.id,
-        title=item.title,
+        title=title,
         header=item.series_title,
         subtitle=subtitle or None,
         href=f"/item/{item.id}",
         posterUrl=poster_url,
-        placeholder=placeholder_art_for_summary(item),
+        placeholder=placeholder_art_for_summary(item, title=title),
         progressPercent=progress_percent(playback),
         state=state,
+        watched=playback.completed if playback is not None else False,
         available=item.availability is Availability.AVAILABLE,
     )
 
@@ -274,6 +282,17 @@ def poster_state(
     return PosterState.NORMAL
 
 
+def display_title(item: LibraryItemSummary) -> str:
+    """Hide a redundant combined-episode endpoint left by older scans."""
+
+    if item.kind is not LibraryItemKind.EPISODE or item.episode_end_number is None:
+        return item.title
+    match = _COMBINED_EPISODE_TITLE_PREFIX.match(item.title)
+    if match is None or parse_numeral(match.group("number")) != item.episode_end_number:
+        return item.title
+    return item.title[match.end() :].strip() or item.title
+
+
 def artwork_proxy_url(
     item_id: int, artwork: tuple[ArtworkSelection, ...], kind: ArtworkKind
 ) -> str | None:
@@ -283,11 +302,14 @@ def artwork_proxy_url(
     return f"/kanvas/artwork/{item_id}/{selected.id}" if selected is not None else None
 
 
-def placeholder_art_for_summary(item: LibraryItemSummary) -> PlaceholderArtView:
+def placeholder_art_for_summary(
+    item: LibraryItemSummary, *, title: str | None = None
+) -> PlaceholderArtView:
     """Build deterministic missing-poster text from the strongest known item label."""
 
+    display = title if title is not None else item.title
     if item.kind is LibraryItemKind.EPISODE and _is_generic_episode_title(
-        item.title, item.episode_number, item.series_title
+        display, item.episode_number, item.series_title
     ):
         episode_label = (
             f"Episode {item.episode_number}" if item.episode_number is not None else "Episode"
@@ -296,7 +318,7 @@ def placeholder_art_for_summary(item: LibraryItemSummary) -> PlaceholderArtView:
             lines=(episode_label,),
             footer=item.context_label,
         )
-    return PlaceholderArtView(lines=placeholder_title_lines(item.title), footer=item.context_label)
+    return PlaceholderArtView(lines=placeholder_title_lines(display), footer=item.context_label)
 
 
 def placeholder_title_lines(title: str) -> tuple[str, ...]:

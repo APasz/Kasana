@@ -243,6 +243,26 @@ function testPosterPlaceholderNormalisation() {
   );
 }
 
+function testPosterNormalisationAllowsOnlySafeCollectionResumeLinks() {
+  const resumePoster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(13),
+    href: '/play/watch-orders/4?resume=true'
+  });
+
+  assert.equal(resumePoster.href, '/play/watch-orders/4?resume=true');
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(14), href: '/play/watch-orders/4'}),
+    null
+  );
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({
+      ...validPoster(15),
+      href: '/play/watch-orders/4?resume=false'
+    }),
+    null
+  );
+}
+
 function testWatchOrderInsertionSlotsRejectOnlyNoOpMoves() {
   const workspace = new globalThis.__watchOrderTest.KanvasWatchOrderWorkspace();
   workspace.entries = [{id: 1}, {id: 2}, {id: 3}];
@@ -567,6 +587,7 @@ function testItemEditorPayloadPreservesHiddenState() {
 async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
+  testPosterNormalisationAllowsOnlySafeCollectionResumeLinks();
   testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();

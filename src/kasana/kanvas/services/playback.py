@@ -14,6 +14,7 @@ from kasana.katalog.public import (
     ManualQueuePlaybackContext,
     PlaybackPlanRequest,
     PlaybackSessionResponse,
+    PlaybackSessionTransitionRequest,
     SeriesPlaybackContext,
     SessionProgressUpdate,
     StandalonePlaybackContext,
@@ -129,20 +130,21 @@ class KanvasPlaybackService:
             self._owned_session(session)
             await client.update_playback_session_progress(session_id, update)
 
-    async def complete_playback_entry(self, session_id: str) -> PlaybackSessionResponse | None:
-        """Complete the current entry and advance a queue when another item is available."""
+    async def complete_playback_entry(
+        self, session_id: str, expected_entry_position: int
+    ) -> PlaybackSessionResponse:
+        """Atomically complete the expected entry and transition its owned queue."""
 
         async with KatalogClient(
             str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
         ) as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
-            completion = await client.complete_playback_session(session_id)
-            current = completion.session.current_item
-            if current is None or current.next_entry is None:
-                return None
-            advanced = await client.advance_playback_session(session_id)
-        return self._owned_session(advanced)
+            transitioned = await client.complete_and_advance_playback_session(
+                session_id,
+                PlaybackSessionTransitionRequest(expected_entry_position=expected_entry_position),
+            )
+        return self._owned_session(transitioned)
 
     async def close_playback_session(self, session_id: str) -> None:
         """Close one owned browser session when its inline player is stopped."""

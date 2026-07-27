@@ -12,6 +12,7 @@
     --k-accent-contrast: #050505;
     --k-danger: #e46d6d;
     --k-success: #76b985;
+    --k-watched-marker: #e8893e;
     --k-scrim-soft: rgb(0 0 0 / 52%);
     --k-scrim: rgb(0 0 0 / 64%);
     --k-scrim-strong: rgb(0 0 0 / 78%);
@@ -310,7 +311,16 @@ kanvas-poster {
 
 .k-poster__title { font-size: 0.76rem; font-weight: 600; }
 .k-poster__subtitle { margin-top: 2px; color: var(--k-text-faint); font-size: 0.67rem; }
-.k-poster__watched { position: absolute; z-index: 2; right: 5px; top: 5px; color: var(--k-text-muted); font-size: 0.6rem; letter-spacing: 0.04em; text-transform: uppercase; }
+.k-poster__watched {
+    position: absolute;
+    z-index: 2;
+    bottom: 0;
+    left: 0;
+    width: 18%;
+    aspect-ratio: 1;
+    background: var(--k-watched-marker);
+    clip-path: polygon(0 0, 0 100%, 100% 100%);
+}
 .k-poster--unavailable { opacity: 0.48; }
 .k-poster--unavailable .k-poster__image { filter: grayscale(1); }
 .k-poster--missing_artwork .k-poster__title { display: none; }
@@ -590,6 +600,7 @@ kanvas-poster {
     background: var(--k-surface-1);
 }
 .k-player__video { display: block; width: 100%; max-height: calc(100vh - 130px); background: #000; }
+.k-player--preparing .k-player__video { min-height: var(--k-player-video-height); object-fit: contain; }
 .k-player__progress {
     position: relative;
     display: grid;
@@ -673,6 +684,23 @@ kanvas-poster {
 .k-player__speed-option { min-height: 28px; border: 1px solid var(--k-border-subtle); color: var(--k-text); background: var(--k-surface-2); font: inherit; font-size: 0.76rem; cursor: pointer; }
 .k-player__speed-option[aria-pressed="true"] { border-color: var(--k-accent); color: var(--k-accent); }
 
+.k-playback-queue { width: min(100%, 1100px); margin: -12px 0 28px; border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
+.k-playback-queue__summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); gap: 14px; align-items: center; min-height: 36px; padding: 0 14px; cursor: pointer; list-style: none; }
+.k-playback-queue__summary::-webkit-details-marker { display: none; }
+.k-playback-queue__summary:focus-visible { outline: 1px solid var(--k-accent); outline-offset: -1px; }
+.k-playback-queue__heading { color: var(--k-text-muted); font-size: 0.72rem; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
+.k-playback-queue__next { display: flex; min-width: 0; max-width: min(68vw, 720px); align-items: baseline; gap: 10px; color: var(--k-text-muted); }
+.k-playback-queue__next .k-playback-queue__context { display: flex; align-items: baseline; gap: 10px; }
+.k-playback-queue__next .k-playback-queue__context::before { width: 1px; height: 1em; background: var(--k-text-faint); content: ""; }
+.k-playback-queue__entries { display: grid; max-height: 236px; margin: 0; padding: 0; overflow-y: auto; border-top: 1px solid var(--k-border-subtle); list-style: none; }
+.k-playback-queue__entry { display: grid; grid-template-columns: minmax(84px, auto) minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 9px 14px; border-bottom: 1px solid var(--k-border-subtle); }
+.k-playback-queue__entry:last-child { border-bottom: 0; }
+.k-playback-queue__state { color: var(--k-text-faint); font-size: 0.7rem; }
+.k-playback-queue__details { display: grid; min-width: 0; gap: 2px; }
+.k-playback-queue__title, .k-playback-queue__context { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-playback-queue__title { color: var(--k-text); font-size: 0.82rem; }
+.k-playback-queue__context { color: var(--k-text-faint); font-size: 0.72rem; }
+
 .k-player:fullscreen {
     display: block;
     width: 100%;
@@ -707,6 +735,9 @@ kanvas-poster {
     .k-player__transport-controls, .k-player__audio-controls { gap: 2px; }
     .k-player__volume { width: min(18vw, 84px); }
     .k-player__control { min-width: 28px; padding: 4px 5px; }
+    .k-playback-queue__summary { grid-template-columns: 1fr; gap: 1px; padding: 7px 10px; }
+    .k-playback-queue__next { max-width: 100%; }
+    .k-playback-queue__entry { grid-template-columns: 1fr; gap: 3px; }
 }
 
 .k-collection-page-heading,

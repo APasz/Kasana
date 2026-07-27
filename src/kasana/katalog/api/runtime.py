@@ -21,7 +21,7 @@ from kasana.katalog.api.contracts import (
     HierarchyRepairManualReview,
     HierarchyRepairPreview,
 )
-from kasana.katalog.api.jobs import JobContext, JobOutcome, JobRegistry
+from kasana.katalog.api.jobs import JobCancelledError, JobContext, JobOutcome, JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.api.transfer import FileTransferPolicy, RangeStreamingFileTransferPolicy
 from kasana.katalog.backup import JsonBackupScheduler
@@ -36,7 +36,7 @@ from kasana.katalog.repair import (
     duplicate_resolution_backup_path,
     repair_backup_path,
 )
-from kasana.katalog.scanning import IncrementalScanner, ScanResult
+from kasana.katalog.scanning import IncrementalScanner, ScanCancelledError, ScanResult
 from kasana.katalog.settings import KatalogSettings
 from kasana.katalog.user_configuration import UserConfigurationStore
 from kasana.kourier.settings import TMDBSettings
@@ -125,14 +125,8 @@ class KatalogApiRuntime:
     ) -> BackgroundJob:
         async def scan(context: JobContext) -> JobOutcome:
             await context.report(phase="scanning", unit="files", message="Scanning library roots.")
-            scanner = IncrementalScanner(
-                self.database,
-                video_extensions=self.settings.video_extensions,
-                probe_concurrency=self.settings.probe_concurrency,
-                ffprobe_executable=self.settings.ffprobe_executable,
-            )
-            result = await run_blocking(
-                scanner.scan,
+            result = await self._run_incremental_scan(
+                context,
                 root_id=root_id,
                 include_unavailable=include_unavailable,
                 dry_run=dry_run,
@@ -272,14 +266,8 @@ class KatalogApiRuntime:
                 unit="files",
                 message="Reconciling catalogue records with media files.",
             )
-            scanner = IncrementalScanner(
-                self.database,
-                video_extensions=self.settings.video_extensions,
-                probe_concurrency=self.settings.probe_concurrency,
-                ffprobe_executable=self.settings.ffprobe_executable,
-            )
-            scan = await run_blocking(
-                scanner.scan,
+            scan = await self._run_incremental_scan(
+                context,
                 root_id=root_id,
                 include_unavailable=include_unavailable,
                 dry_run=dry_run,
@@ -332,6 +320,33 @@ class KatalogApiRuntime:
             )
 
         return await self.jobs.submit("library-consistency", consistency, library_root_id=root_id)
+
+    async def _run_incremental_scan(
+        self,
+        context: JobContext,
+        *,
+        root_id: int | None,
+        include_unavailable: bool,
+        dry_run: bool,
+    ) -> ScanResult:
+        """Run one cancellable scanner invocation outside the event loop."""
+
+        scanner = IncrementalScanner(
+            self.database,
+            video_extensions=self.settings.video_extensions,
+            probe_concurrency=self.settings.probe_concurrency,
+            ffprobe_executable=self.settings.ffprobe_executable,
+            cancellation_requested=context.cancellation_requested,
+        )
+        try:
+            return await run_blocking(
+                scanner.scan,
+                root_id=root_id,
+                include_unavailable=include_unavailable,
+                dry_run=dry_run,
+            )
+        except ScanCancelledError as error:
+            raise JobCancelledError(str(error)) from error
 
     async def submit_duplicate_resolution(
         self, *, source_item_id: int, target_item_id: int

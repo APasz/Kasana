@@ -12,7 +12,7 @@ import json
 import mimetypes
 import re
 import secrets
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine.result import Result
@@ -154,6 +154,7 @@ from kasana.katalog.models import (
 from kasana.katalog.models import (
     UserRole as ModelUserRole,
 )
+from kasana.katalog.numerals import natural_sort_key
 from kasana.katalog.services import (
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
@@ -533,21 +534,39 @@ class KatalogQueryService:
         def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
             statement: Select[tuple[Zaisan]] = select(Zaisan).join(Kura)
             statement = _apply_item_filters(statement, filters)
+            sort_key = func.natural_sort_key(Zaisan.sort_title)
             if cursor_value is not None:
+                natural_key = _cursor_string(
+                    cursor_value, "sort_key", default=natural_sort_key(_cursor_string(cursor_value, "sort_title"))
+                )
                 sort_title: str = _cursor_string(cursor_value, "sort_title")
                 item_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
-                        Zaisan.sort_title > sort_title,
-                        and_(Zaisan.sort_title == sort_title, Zaisan.id > item_id),
+                        sort_key > natural_key,
+                        and_(
+                            sort_key == natural_key,
+                            or_(
+                                Zaisan.sort_title > sort_title,
+                                and_(Zaisan.sort_title == sort_title, Zaisan.id > item_id),
+                            ),
+                        ),
                     )
                 )
             rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
                 session.scalars(
-                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1)
+                    statement.order_by(sort_key, Zaisan.sort_title, Zaisan.id).limit(
+                        normalised_limit + 1
+                    )
                 )
             )
-            return _item_page(session, rows, normalised_limit)
+            return _item_page(
+                session,
+                rows,
+                normalised_limit,
+                cursor_scope="library-items",
+                cursor_values=_library_item_cursor_values,
+            )
 
         return self._database.run_transaction(load)
 
@@ -756,26 +775,83 @@ class KatalogQueryService:
         self, item_id: int, *, cursor: str | None, limit: int
     ) -> PaginatedResponse[LibraryItemSummary]:
         normalised_limit: int = _page_limit(limit)
-        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "library-items")
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "library-children")
 
         def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
             _require(session, Zaisan, item_id, "Library item")
             statement: Select[tuple[Zaisan]] = select(Zaisan).where(Zaisan.parent_id == item_id)
+            season_missing = case((Zaisan.season_number.is_(None), 1), else_=0)
+            episode_missing = case((Zaisan.episode_number.is_(None), 1), else_=0)
+            season_number = func.coalesce(Zaisan.season_number, 0)
+            episode_number = func.coalesce(Zaisan.episode_number, 0)
+            sort_key = func.natural_sort_key(Zaisan.sort_title)
             if cursor_value is not None:
+                previous_season_missing = _cursor_int(cursor_value, "season_missing")
+                previous_season = _cursor_int(cursor_value, "season_number")
+                previous_episode_missing = _cursor_int(cursor_value, "episode_missing")
+                previous_episode = _cursor_int(cursor_value, "episode_number")
+                previous_sort_key = _cursor_string(cursor_value, "sort_key")
                 sort_title: str = _cursor_string(cursor_value, "sort_title")
                 child_id: int = _cursor_int(cursor_value, "id")
                 statement = statement.where(
                     or_(
-                        Zaisan.sort_title > sort_title,
-                        and_(Zaisan.sort_title == sort_title, Zaisan.id > child_id),
+                        season_missing > previous_season_missing,
+                        and_(
+                            season_missing == previous_season_missing,
+                            or_(
+                                season_number > previous_season,
+                                and_(
+                                    season_number == previous_season,
+                                    or_(
+                                        episode_missing > previous_episode_missing,
+                                        and_(
+                                            episode_missing == previous_episode_missing,
+                                            or_(
+                                                episode_number > previous_episode,
+                                                and_(
+                                                    episode_number == previous_episode,
+                                                    or_(
+                                                        sort_key > previous_sort_key,
+                                                        and_(
+                                                            sort_key == previous_sort_key,
+                                                            or_(
+                                                                Zaisan.sort_title > sort_title,
+                                                                and_(
+                                                                    Zaisan.sort_title == sort_title,
+                                                                    Zaisan.id > child_id,
+                                                                ),
+                                                            ),
+                                                        ),
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
                     )
                 )
             rows: tuple[Zaisan, ...] = tuple(
                 session.scalars(
-                    statement.order_by(Zaisan.sort_title, Zaisan.id).limit(normalised_limit + 1)
+                    statement.order_by(
+                        season_missing,
+                        season_number,
+                        episode_missing,
+                        episode_number,
+                        sort_key,
+                        Zaisan.sort_title,
+                        Zaisan.id,
+                    ).limit(normalised_limit + 1)
                 )
             )
-            return _item_page(session, rows, normalised_limit)
+            return _item_page(
+                session,
+                rows,
+                normalised_limit,
+                cursor_scope="library-children",
+                cursor_values=_child_cursor_values,
+            )
 
         return self._database.run_transaction(load)
 
@@ -1952,6 +2028,13 @@ class KatalogQueryService:
             )
             _require_active_session(playback_session, now)
             entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
+            if update.expected_entry_position is not None:
+                if update.expected_entry_position < entry.position:
+                    return PlaybackProgressResult(
+                        session=self._playback_session_response(session, playback_session, now)
+                    )
+                if update.expected_entry_position > entry.position:
+                    raise CatalogueValidationError("Playback session entry does not match the queue.")
             media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
             existing_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, entry.library_item_id
@@ -2001,27 +2084,8 @@ class KatalogQueryService:
                 session, ModelPlaybackSession, session_id, "Playback session"
             )
             _require_active_session(playback_session, now)
-            current_entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
-            next_entry: PlaybackSessionEntry | None = session.scalar(
-                select(PlaybackSessionEntry).where(
-                    PlaybackSessionEntry.playback_session_id == playback_session.id,
-                    PlaybackSessionEntry.position == current_entry.position + 1,
-                )
-            )
-            if next_entry is None:
+            if self._advance_current_session_entry(session, playback_session, now) is None:
                 raise CatalogueValidationError("Playback session has no subsequent queue entry.")
-            playback_session.current_entry_position = next_entry.position
-            saved_state: PlaybackState | None = _playback_state(
-                session, playback_session.user_id, next_entry.library_item_id
-            )
-            _record_session_event(
-                session,
-                playback_session,
-                entry_position=next_entry.position,
-                event_kind=ModelPlaybackSessionEventKind.ADVANCED,
-                position_seconds=saved_state.position_seconds if saved_state is not None else 0.0,
-                occurred_at=now,
-            )
             return self._playback_session_response(session, playback_session, now)
 
         return self._database.run_transaction(advance)
@@ -2033,39 +2097,112 @@ class KatalogQueryService:
                 session, ModelPlaybackSession, session_id, "Playback session"
             )
             _require_active_session(playback_session, now)
-            entry: PlaybackSessionEntry = _current_session_entry(session, playback_session)
-            media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
-            existing_state: PlaybackState | None = _playback_state(
-                session, playback_session.user_id, entry.library_item_id
-            )
-            duration: float = _completion_duration(media_file, existing_state)
-            try:
-                record_playback_progress(
-                    session,
-                    user_id=playback_session.user_id,
-                    library_item_id=entry.library_item_id,
-                    position_seconds=duration,
-                    duration_seconds=duration,
-                    completed=True,
-                    increment_play_count=existing_state is None or not existing_state.completed,
-                    played_at=now,
-                )
-            except ValueError as error:
-                raise CatalogueValidationError(str(error)) from error
-            event: ModelPlaybackSessionEvent = _record_session_event(
-                session,
-                playback_session,
-                entry_position=entry.position,
-                event_kind=ModelPlaybackSessionEventKind.COMPLETED,
-                position_seconds=duration,
-                occurred_at=now,
-            )
+            event = self._complete_current_session_entry(session, playback_session, now)
             return PlaybackCompletionResult(
                 session=self._playback_session_response(session, playback_session, now),
                 event=_playback_session_event(event),
             )
 
         return self._database.run_transaction(complete)
+
+    def complete_and_advance_playback_session(
+        self, session_id: str, expected_entry_position: int
+    ) -> PlaybackSessionResponse:
+        """Complete one expected queue entry and advance it in one transaction.
+
+        A stale browser completion is harmless: it receives the already-current entry
+        instead of completing whichever entry happened to begin playing next.
+        """
+
+        def transition(session: Session) -> PlaybackSessionResponse:
+            now: datetime = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            current_entry = _current_session_entry(session, playback_session)
+            if expected_entry_position < current_entry.position:
+                return self._playback_session_response(session, playback_session, now)
+            if expected_entry_position > current_entry.position:
+                raise CatalogueValidationError("Playback session entry does not match the queue.")
+            self._complete_current_session_entry(session, playback_session, now)
+            self._advance_current_session_entry(session, playback_session, now)
+            return self._playback_session_response(session, playback_session, now)
+
+        return self._database.run_transaction(transition)
+
+    def _complete_current_session_entry(
+        self, session: Session, playback_session: PlaybackSession, now: datetime
+    ) -> ModelPlaybackSessionEvent:
+        """Persist the current entry's terminal state once and return its completion event."""
+
+        entry = _current_session_entry(session, playback_session)
+        completed_event: ModelPlaybackSessionEvent | None = session.scalar(
+            select(ModelPlaybackSessionEvent)
+            .where(
+                ModelPlaybackSessionEvent.playback_session_id == playback_session.id,
+                ModelPlaybackSessionEvent.entry_position == entry.position,
+                ModelPlaybackSessionEvent.event_kind == ModelPlaybackSessionEventKind.COMPLETED,
+            )
+            .order_by(ModelPlaybackSessionEvent.id.desc())
+            .limit(1)
+        )
+        if completed_event is not None:
+            return completed_event
+        media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
+        existing_state: PlaybackState | None = _playback_state(
+            session, playback_session.user_id, entry.library_item_id
+        )
+        duration = _completion_duration(media_file, existing_state)
+        try:
+            record_playback_progress(
+                session,
+                user_id=playback_session.user_id,
+                library_item_id=entry.library_item_id,
+                position_seconds=duration,
+                duration_seconds=duration,
+                completed=True,
+                increment_play_count=existing_state is None or not existing_state.completed,
+                played_at=now,
+            )
+        except ValueError as error:
+            raise CatalogueValidationError(str(error)) from error
+        return _record_session_event(
+            session,
+            playback_session,
+            entry_position=entry.position,
+            event_kind=ModelPlaybackSessionEventKind.COMPLETED,
+            position_seconds=duration,
+            occurred_at=now,
+        )
+
+    def _advance_current_session_entry(
+        self, session: Session, playback_session: PlaybackSession, now: datetime
+    ) -> PlaybackSessionEntry | None:
+        """Move a session to its next persisted queue entry when one exists."""
+
+        current_entry = _current_session_entry(session, playback_session)
+        next_entry: PlaybackSessionEntry | None = session.scalar(
+            select(PlaybackSessionEntry).where(
+                PlaybackSessionEntry.playback_session_id == playback_session.id,
+                PlaybackSessionEntry.position == current_entry.position + 1,
+            )
+        )
+        if next_entry is None:
+            return None
+        playback_session.current_entry_position = next_entry.position
+        saved_state: PlaybackState | None = _playback_state(
+            session, playback_session.user_id, next_entry.library_item_id
+        )
+        _record_session_event(
+            session,
+            playback_session,
+            entry_position=next_entry.position,
+            event_kind=ModelPlaybackSessionEventKind.ADVANCED,
+            position_seconds=saved_state.position_seconds if saved_state is not None else 0.0,
+            occurred_at=now,
+        )
+        return next_entry
 
     def close_playback_session(self, session_id: str) -> None:
         def close(session: Session) -> None:
@@ -2865,19 +3002,48 @@ def _recent_catalogue_identity(item: Zaisan, items_by_id: dict[int, Zaisan]) -> 
 
 
 def _item_page(
-    session: Session, rows: tuple[Zaisan, ...], limit: int
+    session: Session,
+    rows: tuple[Zaisan, ...],
+    limit: int,
+    *,
+    cursor_scope: str,
+    cursor_values: Callable[[Zaisan], dict[str, str | int | float]],
 ) -> PaginatedResponse[LibraryItemSummary]:
     page, has_next = _split_page(rows, limit)
     summaries = _summaries_for(session, page)
     return PaginatedResponse(
         items=tuple(summaries[item.id] for item in page),
         next_cursor=(
-            _encode_cursor("library-items", {"sort_title": page[-1].sort_title, "id": page[-1].id})
+            _encode_cursor(cursor_scope, cursor_values(page[-1]))
             if has_next
             else None
         ),
         limit=limit,
     )
+
+
+def _library_item_cursor_values(item: Zaisan) -> dict[str, str | int | float]:
+    """Serialise the stable natural-order position of a library item."""
+
+    return {
+        "sort_key": natural_sort_key(item.sort_title),
+        "sort_title": item.sort_title,
+        "id": item.id,
+    }
+
+
+def _child_cursor_values(item: Zaisan) -> dict[str, str | int | float]:
+    """Serialise numeric child ordering before the natural title tie-breaker."""
+
+    return {
+        "season_missing": int(item.season_number is None),
+        "season_number": item.season_number or 0,
+        "episode_missing": int(item.episode_number is None),
+        "episode_number": item.episode_number or 0,
+        "sort_key": natural_sort_key(item.sort_title),
+        "sort_title": item.sort_title,
+        "id": item.id,
+    }
 
 
 def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, LibraryItemSummary]:
@@ -3696,8 +3862,10 @@ def _decode_cursor(cursor: str | None, expected_scope: str) -> dict[str, object]
     return cast(dict[str, object], values)
 
 
-def _cursor_string(cursor: dict[str, object], field: str) -> str:
+def _cursor_string(cursor: dict[str, object], field: str, *, default: str | None = None) -> str:
     value = cursor.get(field)
+    if value is None and default is not None:
+        return default
     if not isinstance(value, str):
         raise CatalogueValidationError("The cursor is invalid.")
     return value

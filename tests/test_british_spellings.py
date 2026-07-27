@@ -19,6 +19,9 @@ _SCAN_ROOTS = (
 _IGNORED_PATHS = frozenset({Path("tests/test_british_spellings.py")})
 _TEXT_SUFFIXES = frozenset({".css", ".ini", ".js", ".md", ".mako", ".py", ".toml"})
 _REQUIRED_STANDARD_TERMS = frozenset({"authorization", "behavior", "center", "color", "license"})
+_UNAVOIDABLE_API_SPELLINGS = {
+    Path("src/kasana/katalog/numerals.py"): frozenset({"normalize"}),
+}
 _AMERICAN_SPELLING_PATTERN = re.compile(
     r"(?<![A-Za-z])"
     r"("
@@ -103,6 +106,9 @@ def _source_files() -> Iterator[Path]:
 
 
 def _is_allowed_standard_term(path: Path, term: str) -> bool:
+    unavoidable_terms = _UNAVOIDABLE_API_SPELLINGS.get(path)
+    if unavoidable_terms is not None and term in unavoidable_terms:
+        return True
     if term not in _REQUIRED_STANDARD_TERMS:
         return False
     if path == Path("pyproject.toml") and term == "license":

@@ -259,13 +259,16 @@ async def test_standalone_launch_is_one_use_and_media_has_ranges(
     full = await playback_fixture.client.get(entry["stream_url"])
     assert full.status_code == 200
     assert full.headers["accept-ranges"] == "bytes"
+    assert full.headers["content-length"] == str(len(full.content))
     assert full.content[:6] == b"Kasana"
     partial = await playback_fixture.client.get(entry["stream_url"], headers={"Range": "bytes=1-3"})
     assert partial.status_code == 206
+    assert partial.headers["content-length"] == str(len(partial.content))
     assert partial.headers["content-range"].startswith("bytes 1-3/")
     assert partial.content == b"asa"
     head = await playback_fixture.client.head(entry["stream_url"], headers={"Range": "bytes=-2"})
     assert head.status_code == 206
+    assert head.headers["content-length"] == "2"
     assert head.content == b""
     malformed = await playback_fixture.client.get(
         entry["stream_url"], headers={"Range": "bytes=nope"}
@@ -336,6 +339,57 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
         playback_fixture.ids["episode_three"],
         playback_fixture.ids["movie"],
     ]
+
+
+async def test_queue_completion_transitions_collection_playback_atomically(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    launch = await _create_plan(
+        playback_fixture,
+        {
+            "kind": "watch_order",
+            "watch_order_id": playback_fixture.ids["watch_order"],
+        },
+    )
+    session = (
+        await playback_fixture.client.get(f"/api/v1/playback/plans/{launch}")
+    ).json()
+    transition_path = f"/api/v1/playback/sessions/{session['id']}/complete-and-advance"
+
+    advanced = await playback_fixture.client.post(
+        transition_path, json={"expected_entry_position": 0}
+    )
+
+    assert advanced.status_code == 200
+    assert advanced.json()["current_entry_position"] == 1
+    assert advanced.json()["current_item"]["item_id"] == playback_fixture.ids["episode_one"]
+
+    stale_retry = await playback_fixture.client.post(
+        transition_path, json={"expected_entry_position": 0}
+    )
+
+    assert stale_retry.status_code == 200
+    assert stale_retry.json()["current_entry_position"] == 1
+    assert stale_retry.json()["current_item"]["item_id"] == playback_fixture.ids["episode_one"]
+
+    impossible_position = await playback_fixture.client.post(
+        transition_path, json={"expected_entry_position": 2}
+    )
+
+    assert impossible_position.status_code == 422
+
+    stale_progress = await playback_fixture.client.put(
+        f"/api/v1/playback/sessions/{session['id']}/progress",
+        json={"position_seconds": 120, "expected_entry_position": 0},
+    )
+
+    assert stale_progress.status_code == 200
+    assert stale_progress.json()["event"] is None
+    current_session = (
+        await playback_fixture.client.get(f"/api/v1/playback/sessions/{session['id']}")
+    ).json()
+    assert current_session["current_item"]["item_id"] == playback_fixture.ids["episode_one"]
+    assert current_session["current_item"]["saved_resume_position_seconds"] == 0
 
 
 async def test_progress_seek_completion_expiry_and_unavailable_items(

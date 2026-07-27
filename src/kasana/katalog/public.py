@@ -75,6 +75,7 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionEvent,
     PlaybackSessionEventKind,
     PlaybackSessionResponse,
+    PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
     ProgressUpdate,
     ScanRequest,
@@ -114,8 +115,10 @@ from kasana.katalog.client import (
     KatalogClientErrorKind,
     MediaTransfer,
 )
+from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
 __all__ = [
+    "NUMERAL_TOKEN_PATTERN",
     "APIError",
     "ArtworkContent",
     "ArtworkFetchRequest",
@@ -192,6 +195,7 @@ __all__ = [
     "PlaybackSessionEvent",
     "PlaybackSessionEventKind",
     "PlaybackSessionResponse",
+    "PlaybackSessionTransitionRequest",
     "PlaybackStateResponse",
     "ProgressUpdate",
     "ScanRequest",
@@ -222,4 +226,5 @@ __all__ = [
     "WatchOrderSummary",
     "WatchOrderUpdate",
     "WatchedFilter",
+    "parse_numeral",
 ]

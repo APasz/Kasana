@@ -20,6 +20,7 @@ def test_component_settings_use_distinct_environment_prefixes(monkeypatch: Monke
 
     assert SharedSettings().log_level is LogLevel.DEBUG
     assert SharedSettings().log_directory == Path("logs")
+    assert SharedSettings().graceful_shutdown_timeout_seconds == 5
     assert KatalogSettings().api_port == 9123
     assert KestrelSettings().player_backend is PlayerBackend.VLC
     assert Kanvas_Settings().host == "0.0.0.0"

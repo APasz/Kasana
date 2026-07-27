@@ -236,7 +236,7 @@
     const poster = value;
     if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id) || poster.id <= 0) return null;
     if (typeof poster.title !== 'string' || !poster.title) return null;
-    if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
+    if (typeof poster.href !== 'string' || !/^\/(?:item\/\d+|play\/watch-orders\/\d+\?resume=true)$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
@@ -244,6 +244,7 @@
     if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
+    if (poster.watched != null && typeof poster.watched !== 'boolean') return null;
     return {
       id: poster.id,
       title: poster.title,
@@ -254,6 +255,7 @@
       subtitle: poster.subtitle ?? null,
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
+      watched: poster.watched === true,
       available: poster.available
     };
   };
@@ -270,7 +272,7 @@
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
       : `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
-    const watched = poster.state === 'watched' ? '<span class="k-poster__watched">Watched</span>' : '';
+    const watched = poster.watched ? '<span class="k-poster__watched" role="img" aria-label="Watched"></span>' : '';
     const header = poster.header ? `<span class="k-poster__header">${escapeHtml(poster.header)}</span>` : '';
     const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
@@ -2002,13 +2004,29 @@
       const sessionId = this.getAttribute('session-id');
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
+      let catalogueDuration = Number(this.getAttribute('duration-seconds') || '0');
       if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition)) return;
+      video.loop = false;
+      video.removeAttribute('loop');
       let lastReportedPosition = -1;
       let resumeApplied = false;
       let seeking = false;
       let completing = false;
       let reporting = false;
       let fullscreenHideTimer = null;
+      let deliveryMode = 'direct';
+      let streamStartSeconds = 0;
+      let generatedStreamSeekPending = false;
+      const preserveVideoHeight = () => {
+        const height = video.getBoundingClientRect().height;
+        if (height <= 0) return;
+        this.style.setProperty('--k-player-video-height', `${height}px`);
+        this.classList.add('k-player--preparing');
+      };
+      const releaseVideoHeight = () => {
+        this.classList.remove('k-player--preparing');
+        this.style.removeProperty('--k-player-video-height');
+      };
       const capabilityTypes = [
         'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
         'video/mp4; codecs="hvc1.1.6.L93.B0, mp4a.40.2"',
@@ -2028,7 +2046,7 @@
           can_play_type: video.canPlayType(contentType)
         };
       }));
-      const selectDelivery = async (autoplay) => {
+      const selectDelivery = async (autoplay, startSeconds = 0) => {
         status.textContent = 'Preparing playback…';
         const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/compatibility`, {
           method: 'POST',
@@ -2039,6 +2057,7 @@
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || typeof payload.mode !== 'string') throw new Error('Playback compatibility failed');
         if (payload.mode === 'unsupported' || typeof payload.mediaUrl !== 'string') {
+          releaseVideoHeight();
           video.removeAttribute('src');
           video.load();
           status.textContent = 'This browser cannot play this video.';
@@ -2050,22 +2069,29 @@
           return false;
         }
         if (kestrelLink instanceof HTMLAnchorElement) kestrelLink.hidden = true;
-        video.src = payload.mediaUrl;
+        deliveryMode = payload.mode;
+        streamStartSeconds = deliveryMode === 'direct' ? 0 : startSeconds;
+        const mediaUrl = new URL(payload.mediaUrl, window.location.origin);
+        if (streamStartSeconds > 0) mediaUrl.searchParams.set('startSeconds', String(streamStartSeconds));
+        preserveVideoHeight();
+        video.src = mediaUrl.href;
         video.load();
         if (autoplay) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
         return true;
       };
-      const loadEntry = async (nextPosition, nextResumePosition, autoplay) => {
-        if (!Number.isSafeInteger(nextPosition) || nextPosition < 0 || !Number.isFinite(nextResumePosition)) {
+      const loadEntry = async (nextPosition, nextResumePosition, nextDuration, autoplay) => {
+        if (!Number.isSafeInteger(nextPosition) || nextPosition < 0 || !Number.isFinite(nextResumePosition) || (nextDuration !== null && (!Number.isFinite(nextDuration) || nextDuration < 0))) {
           throw new Error('Playback queue entry is invalid');
         }
         entryPosition = nextPosition;
         resumePosition = nextResumePosition;
+        catalogueDuration = nextDuration === null ? 0 : nextDuration;
         resumeApplied = false;
         lastReportedPosition = -1;
         this.setAttribute('entry-position', String(entryPosition));
         this.setAttribute('resume-position', String(resumePosition));
-        return selectDelivery(autoplay);
+        this.setAttribute('duration-seconds', String(catalogueDuration));
+        return selectDelivery(autoplay, nextResumePosition);
       };
       const formatTime = (seconds) => {
         if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -2077,9 +2103,19 @@
         return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
       };
       const actionButton = (action) => controls.querySelector(`[data-player-action="${action}"]`);
+      const playbackDuration = () => {
+        const mediaDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+        return deliveryMode !== 'direct' && catalogueDuration > 0 ? catalogueDuration : mediaDuration;
+      };
+      const playbackPosition = () => {
+        const duration = playbackDuration();
+        const mediaPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+        const offset = deliveryMode === 'direct' ? 0 : streamStartSeconds;
+        return Math.min(Math.max(offset + mediaPosition, 0), duration);
+      };
       const updateControls = () => {
-        const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-        const position = Math.min(Math.max(video.currentTime || 0, 0), duration);
+        const duration = playbackDuration();
+        const position = playbackPosition();
         timeline.max = String(duration);
         timeline.value = String(position);
         timeline.disabled = duration === 0;
@@ -2159,20 +2195,21 @@
         }
       };
       const reportProgress = async (force, seek) => {
-        if (!Number.isFinite(video.currentTime) || video.currentTime < 0) return;
+        const position = playbackPosition();
+        if (!Number.isFinite(position)) return;
         if (resumePosition > 0 && !resumeApplied) return;
         if (reporting) return;
-        if (!force && video.currentTime - lastReportedPosition < 10) return;
+        if (!force && position - lastReportedPosition < 10) return;
         reporting = true;
         try {
           const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
             credentials: 'same-origin',
-            body: JSON.stringify({positionSeconds: video.currentTime, seek}),
+            body: JSON.stringify({positionSeconds: position, seek, entryPosition}),
           });
           if (!response.ok) throw new Error('Progress failed');
-          lastReportedPosition = video.currentTime;
+          lastReportedPosition = position;
         } catch (_) {
           status.textContent = 'Playback progress could not be saved.';
         } finally {
@@ -2180,14 +2217,25 @@
         }
       };
       const flushProgressOnPageHide = () => {
-        if (!Number.isFinite(video.currentTime) || video.currentTime < 0) return;
+        const position = playbackPosition();
+        if (!Number.isFinite(position)) return;
         void fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
           credentials: 'same-origin',
           keepalive: true,
-          body: JSON.stringify({positionSeconds: video.currentTime, seek: false})
+          body: JSON.stringify({positionSeconds: position, seek: false, entryPosition})
         });
+      };
+      const restartGeneratedStream = async (position) => {
+        generatedStreamSeekPending = true;
+        const autoplay = !video.paused;
+        try {
+          await selectDelivery(autoplay, position);
+        } catch (_) {
+          generatedStreamSeekPending = false;
+          status.textContent = 'Could not seek this video.';
+        }
       };
       controls.addEventListener('click', (event) => {
         showFullscreenControls();
@@ -2200,6 +2248,10 @@
           else video.pause();
         } else if (action === 'rewind' || action === 'forward') {
           const offset = action === 'rewind' ? -10 : 10;
+          if (deliveryMode !== 'direct') {
+            void restartGeneratedStream(Math.min(Math.max(playbackPosition() + offset, 0), playbackDuration()));
+            return;
+          }
           if (Number.isFinite(video.duration)) video.currentTime = Math.min(Math.max(video.currentTime + offset, 0), video.duration);
         } else if (action === 'menu') {
           const bounds = target.getBoundingClientRect();
@@ -2224,8 +2276,15 @@
       timeline.addEventListener('input', () => {
         showFullscreenControls();
         const position = Number(timeline.value);
-        if (Number.isFinite(position)) video.currentTime = position;
+        if (!Number.isFinite(position)) return;
+        if (deliveryMode !== 'direct') return;
+        video.currentTime = position;
         updateControls();
+      });
+      timeline.addEventListener('change', () => {
+        if (deliveryMode === 'direct') return;
+        const position = Number(timeline.value);
+        if (Number.isFinite(position)) void restartGeneratedStream(position);
       });
       volume.addEventListener('input', () => {
         showFullscreenControls();
@@ -2259,12 +2318,21 @@
         window.removeEventListener('pagehide', flushProgressOnPageHide);
       };
       video.addEventListener('loadedmetadata', () => {
-        if (!resumeApplied && resumePosition > 0 && Number.isFinite(video.duration)) {
-          resumeApplied = true;
-          video.currentTime = Math.min(resumePosition, video.duration);
+        if (!resumeApplied && resumePosition > 0) {
+          if (deliveryMode === 'direct' && Number.isFinite(video.duration)) {
+            resumeApplied = true;
+            video.currentTime = Math.min(resumePosition, video.duration);
+          } else if (deliveryMode !== 'direct') {
+            resumeApplied = true;
+          }
         }
+        releaseVideoHeight();
         status.textContent = '';
         updateControls();
+        if (generatedStreamSeekPending) {
+          generatedStreamSeekPending = false;
+          void reportProgress(true, true);
+        }
       });
       video.addEventListener('play', () => {
         updateControls();
@@ -2298,6 +2366,7 @@
       });
       video.addEventListener('pause', () => { void reportProgress(true, false); });
       video.addEventListener('error', () => {
+        releaseVideoHeight();
         status.textContent = 'This video format is not supported by this browser.';
       });
       video.addEventListener('ended', async () => {
@@ -2306,13 +2375,15 @@
         status.textContent = 'Completing playback…';
         try {
           const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/complete`, {
-            method: 'POST', headers: {'Accept': 'application/json'}, credentials: 'same-origin'
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            credentials: 'same-origin',
+            body: JSON.stringify({entryPosition}),
           });
           const payload = await response.json();
           if (!response.ok) throw new Error('Completion failed');
-          if (payload.nextEntry && Number.isSafeInteger(payload.nextEntry.position) && Number.isFinite(payload.nextEntry.resumePosition)) {
-            completing = false;
-            await loadEntry(payload.nextEntry.position, payload.nextEntry.resumePosition, true);
+          if (typeof payload.nextUrl === 'string' && /^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(payload.nextUrl)) {
+            window.location.assign(payload.nextUrl);
           } else status.textContent = 'Playback complete.';
         } catch (_) {
           completing = false;
@@ -2321,7 +2392,7 @@
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();
-      void loadEntry(entryPosition, resumePosition, true).catch(() => {
+      void loadEntry(entryPosition, resumePosition, catalogueDuration, true).catch(() => {
         status.textContent = 'Playback compatibility could not be checked.';
       });
     }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +28,7 @@ from kasana.katalog.scanning.audit import structural_findings
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile, plan_files
 from kasana.katalog.scanning.discovery import (
     AuditFinding,
+    ScanCancelledError,
     ScanResult,
     ScanTotals,
     add_totals,
@@ -49,11 +50,13 @@ class IncrementalScanner:
         video_extensions: frozenset[str],
         probe_concurrency: int,
         ffprobe_executable: str,
+        cancellation_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.database = database
         self.video_extensions = frozenset(extension.casefold() for extension in video_extensions)
         self.probe_concurrency = probe_concurrency
         self.prober = FFProbeClient(ffprobe_executable)
+        self._cancellation_requested = cancellation_requested
 
     def scan(
         self,
@@ -81,6 +84,7 @@ class IncrementalScanner:
         totals = ScanTotals()
         findings: list[AuditFinding] = []
         for root in self._library_roots(root_id=root_id, include_unavailable=include_unavailable):
+            self._raise_if_cancelled()
             root_result = self._scan_root(root, audit_only=audit_only)
             add_totals(totals, root_result.totals)
             findings.extend(root_result.findings)
@@ -88,6 +92,7 @@ class IncrementalScanner:
 
     def _scan_root(self, root: Kura, *, audit_only: bool) -> ScanResult:
         root_path = Path(root.path)
+        self._raise_if_cancelled()
         existing_files = self._existing_files(root.id)
         if not root_path.is_dir():
             totals = ScanTotals()
@@ -120,7 +125,12 @@ class IncrementalScanner:
                 )
             return ScanResult(totals=totals, findings=(finding,))
 
-        filesystem = discover(root_path, self.video_extensions)
+        filesystem = discover(
+            root_path,
+            self.video_extensions,
+            cancellation_requested=self._cancellation_requested,
+        )
+        self._raise_if_cancelled()
         totals = ScanTotals(discovered=len(filesystem.files))
         findings = list(filesystem.findings)
         plan = plan_files(
@@ -150,6 +160,7 @@ class IncrementalScanner:
 
         probe_plans = [file for file in plan.files if file.action is not PlanAction.MOVE]
         probe_results, probe_failures = self._probe(probe_plans)
+        self._raise_if_cancelled()
         totals.failed = len(probe_failures)
         findings.extend(
             AuditFinding(AuditCategory.UNREADABLE_FILE, failure.path, failure.message)
@@ -162,6 +173,7 @@ class IncrementalScanner:
             if file.action is PlanAction.MOVE or file.snapshot.path in probe_results
         ]
         if not audit_only:
+            self._raise_if_cancelled()
             self.database.run_transaction(
                 lambda session: apply_scan(
                     session,
@@ -183,11 +195,16 @@ class IncrementalScanner:
     ) -> tuple[dict[Path, ProbeResult], tuple[ProbeFailure, ...]]:
         if not plans:
             return {}, ()
+        self._raise_if_cancelled()
         return asyncio.run(
             self.prober.probe_many(
                 [plan.snapshot.path for plan in plans], concurrency=self.probe_concurrency
             )
         )
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancellation_requested is not None and self._cancellation_requested():
+            raise ScanCancelledError("Scan cancellation was requested.")
 
     def _library_roots(
         self, *, root_id: int | None = None, include_unavailable: bool = False

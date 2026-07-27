@@ -11,7 +11,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
@@ -58,7 +60,7 @@ from kasana.katalog.repair import (
     RepairActionKind,
     RepairImpact,
 )
-from kasana.katalog.scanning import ScanResult, ScanTotals
+from kasana.katalog.scanning import ScanCancelledError, ScanResult, ScanTotals
 from kasana.katalog.services import (
     add_collection_membership,
     append_watch_order_entry,
@@ -71,6 +73,7 @@ from kasana.katalog.services import (
     record_playback_progress,
 )
 from kasana.katalog.settings import KatalogSettings
+from kasana.shared.concurrency import run_blocking
 from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
 
@@ -398,6 +401,75 @@ async def test_library_summaries_include_safe_context_labels(api_fixture: ApiFix
     assert special_item["context_label"] == "S00 E02"
     assert extra_item["context_label"] == "S01 X02"
     assert str(api_fixture.settings.database_path.parent) not in json.dumps(response.json())
+
+
+async def test_library_and_children_use_natural_numeric_ordering(api_fixture: ApiFixture) -> None:
+    with api_fixture.database.transaction() as session:
+        series = create_library_item(
+            session,
+            library_root_id=1,
+            item_kind=ZaisanKind.SERIES,
+            title="Natural order show",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=1,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        for episode_number, title in ((10, "Episode Ten"), (9, "Episode Nine"), (1, "Pilot")):
+            create_library_item(
+                session,
+                library_root_id=1,
+                parent_id=season.id,
+                item_kind=ZaisanKind.EPISODE,
+                title=title,
+                season_number=1,
+                episode_number=episode_number,
+            )
+        for title in ("Feature 10", "Feature 9"):
+            create_library_item(
+                session,
+                library_root_id=1,
+                item_kind=ZaisanKind.MOVIE,
+                title=title,
+            )
+        for title in ("Special 1", "Special 2", "Special 3"):
+            create_library_item(
+                session,
+                library_root_id=1,
+                parent_id=series.id,
+                item_kind=ZaisanKind.SPECIAL,
+                title=title,
+            )
+
+    children = await api_fixture.client.get(
+        f"/api/v1/library/items/{season.id}/children", params={"limit": 2}
+    )
+    assert [item["title"] for item in children.json()["items"]] == ["Pilot", "Episode Nine"]
+    next_children = await api_fixture.client.get(
+        f"/api/v1/library/items/{season.id}/children",
+        params={"limit": 2, "cursor": children.json()["next_cursor"]},
+    )
+    assert [item["title"] for item in next_children.json()["items"]] == ["Episode Ten"]
+
+    first_series_children = await api_fixture.client.get(
+        f"/api/v1/library/items/{series.id}/children", params={"limit": 2}
+    )
+    second_series_children = await api_fixture.client.get(
+        f"/api/v1/library/items/{series.id}/children",
+        params={"limit": 2, "cursor": first_series_children.json()["next_cursor"]},
+    )
+    assert [item["title"] for item in second_series_children.json()["items"]] == [
+        "Special 2",
+        "Special 3",
+    ]
+
+    library = await api_fixture.client.get("/api/v1/library/items", params={"limit": 100})
+    titles = [item["title"] for item in library.json()["items"]]
+    assert titles.index("Feature 9") < titles.index("Feature 10")
 
 
 async def test_library_item_edit_is_audited_and_never_changes_media_files(
@@ -779,6 +851,41 @@ async def test_completed_scan_auto_matches_safe_candidates(
         "review_required": 0,
     }
     assert completed.message == "Scanned 3 files. Automatically matched 1 items; 0 require review."
+
+
+async def test_runtime_close_requests_cooperative_cancellation_for_active_scans(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scan_started = Event()
+
+    class BlockingScanner:
+        def __init__(self, _database: KatalogDatabase, **options: object) -> None:
+            self._cancellation_requested = cast(
+                Callable[[], bool], options["cancellation_requested"]
+            )
+
+        def scan(
+            self,
+            *,
+            root_id: int | None,
+            include_unavailable: bool,
+            dry_run: bool,
+        ) -> ScanResult:
+            assert (root_id, include_unavailable, dry_run) == (1, False, True)
+            scan_started.set()
+            while not self._cancellation_requested():
+                time.sleep(0.001)
+            raise ScanCancelledError("Scan cancellation was requested.")
+
+    monkeypatch.setattr("kasana.katalog.api.runtime.IncrementalScanner", BlockingScanner)
+
+    job = await api_fixture.runtime.submit_scan(root_id=1, include_unavailable=False, dry_run=True)
+    assert await run_blocking(scan_started.wait, 1)
+
+    await asyncio.wait_for(api_fixture.runtime.close(), timeout=1)
+
+    cancelled = await api_fixture.runtime.jobs.get(job.id)
+    assert cancelled.status is JobStatus.CANCELLED
 
 
 async def test_seeded_library_deployment_smoke_path(

@@ -170,6 +170,7 @@ from kasana.katalog.public import (
     LibraryRootSummary,
     LibraryRootUpdate,
     MetadataReviewCandidate,
+    OnDeckEntry,
     PaginatedResponse,
     PlaybackStateResponse,
     ScanRequest,
@@ -352,6 +353,8 @@ def _library_summary(
     parent_id: int | None = None,
     season_number: int | None = None,
     episode_number: int | None = None,
+    episode_end_season_number: int | None = None,
+    episode_end_number: int | None = None,
     series_title: str | None = None,
     context_label: str | None = None,
 ) -> LibraryItemSummary:
@@ -363,6 +366,8 @@ def _library_summary(
         parent_id=parent_id,
         season_number=season_number,
         episode_number=episode_number,
+        episode_end_season_number=episode_end_season_number,
+        episode_end_number=episode_end_number,
         series_title=series_title,
         context_label=context_label,
         availability=Availability.AVAILABLE,
@@ -374,6 +379,7 @@ def _item_detail_client(
     child_responses: Mapping[int, tuple[LibraryItemSummary, ...]],
     child_requests: list[int],
     playback: PlaybackStateResponse | None = None,
+    child_playback: Mapping[int, PlaybackStateResponse | None] | None = None,
 ) -> type[object]:
     class FakeClient:
         def __init__(self, *_arguments: object, **_keywords: object) -> None:
@@ -409,8 +415,11 @@ def _item_detail_client(
             self, user_id: int, requested_item_id: int
         ) -> PlaybackStateResponse | None:
             assert user_id == 1
-            assert requested_item_id == item.id
-            return playback
+            return (
+                playback
+                if requested_item_id == item.id
+                else child_playback.get(requested_item_id) if child_playback is not None else None
+            )
 
     return FakeClient
 
@@ -545,6 +554,23 @@ def test_poster_state_precedence_covers_missing_and_unavailable_artwork() -> Non
     )
 
 
+def test_combined_episode_poster_hides_a_redundant_second_episode_marker() -> None:
+    poster = poster_from_summary(
+        _library_summary(
+            item_id=9,
+            title="E02 - Children of the Gods",
+            kind=LibraryItemKind.EPISODE,
+            season_number=1,
+            episode_number=1,
+            episode_end_season_number=1,
+            episode_end_number=2,
+        )
+    )
+
+    assert poster.title == "Children of the Gods"
+    assert poster.placeholder.lines == ("Children of the Gods",)
+
+
 def test_filter_mapping_and_cursor_pagination_prevent_duplicate_requests() -> None:
     filters = LibraryFilters.from_query(
         {
@@ -604,6 +630,9 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     card = (Path(__file__).parents[1] / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
 
     assert "kanvas-playback-player" in script
     assert "/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress" in script
@@ -616,22 +645,88 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "this.requestFullscreen" in script
     assert "k-player--controls-hidden" in script
     assert "2600" in script
+    assert "catalogueDuration" in script
+    assert "nextUrl" in script
+    assert "restartGeneratedStream" in script
+    assert "startSeconds" in script
+    assert "preserveVideoHeight" in script
+    assert "k-player--preparing" in script
+    assert ".k-player--preparing .k-player__video" in stylesheet
     assert "controls autoplay" not in card
-    assert "entry.display_title" not in card
+    assert 'duration-seconds="{entry.duration_seconds:g}"' in card
+    assert "ui.label(entry.display_title)" not in card
     assert "kasana://play/" not in script
 
 
-def test_playback_proxy_does_not_forward_a_fixed_body_length() -> None:
+def test_watched_posters_use_an_accessible_bottom_left_corner_marker() -> None:
+    static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
+    javascript = (static_root / "kanvas.js").read_text(encoding="utf-8")
+    stylesheet = (static_root / "kanvas.css").read_text(encoding="utf-8")
+
+    assert 'class="k-poster__watched" role="img" aria-label="Watched"' in javascript
+    assert ".k-poster__watched" in stylesheet
+    assert "bottom: 0;" in stylesheet
+    assert "left: 0;" in stylesheet
+    assert "background: var(--k-watched-marker);" in stylesheet
+    assert "clip-path: polygon(0 0, 0 100%, 100% 100%);" in stylesheet
+
+
+def test_playback_proxy_preserves_the_validated_range_headers() -> None:
     headers = dashboard._stream_response_headers(  # pyright: ignore[reportPrivateUsage]
-        {"Content-Length": "1048576", "Content-Range": "bytes 0-9/1048576"}
+        {
+            "Accept-Ranges": "bytes",
+            "Content-Length": "10",
+            "Content-Range": "bytes 10-19/1048576",
+            "Content-Type": "video/mp4",
+        }
     )
 
-    assert headers == {"Content-Range": "bytes 0-9/1048576"}
+    assert headers == {
+        "Accept-Ranges": "bytes",
+        "Content-Length": "10",
+        "Content-Range": "bytes 10-19/1048576",
+        "Content-Type": "video/mp4",
+    }
 
 
-async def test_playback_stream_response_ends_quietly_when_cancelled() -> None:
+async def test_playback_stream_response_preserves_fixed_length_when_complete() -> None:
     async def content() -> AsyncIterator[bytes]:
         yield b"media"
+
+    async def receive() -> Message:
+        raise AssertionError("ASGI 2.4 responses do not wait for disconnect messages.")
+
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    response = dashboard.PlaybackStreamingResponse(content(), headers={"Content-Length": "5"})
+
+    await response(
+        {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
+    )
+
+    assert messages == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-length", b"5")],
+        },
+        {"type": "http.response.body", "body": b"media", "more_body": True},
+        {"type": "http.response.body", "body": b"", "more_body": False},
+    ]
+
+
+async def test_playback_stream_response_ends_quietly_when_client_disconnects() -> None:
+    closed = False
+
+    async def content() -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            yield b"media"
+        finally:
+            closed = True
 
     async def receive() -> Message:
         return {"type": "http.disconnect"}
@@ -640,11 +735,13 @@ async def test_playback_stream_response_ends_quietly_when_cancelled() -> None:
         if message["type"] == "http.response.body":
             raise CancelledError
 
-    response = dashboard.PlaybackStreamingResponse(content())
+    response = dashboard.PlaybackStreamingResponse(content(), headers={"Content-Length": "5"})
 
     await response(
         {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
     )
+
+    assert closed
 
 
 def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_here() -> None:
@@ -653,6 +750,19 @@ def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_her
     assert isinstance(request.context, WatchOrderPlaybackContext)
     assert request.context.watch_order_id == 17
     assert request.context.start_item_id == 9
+
+
+def test_poster_view_allows_only_the_collection_resume_destination() -> None:
+    poster = PosterView(
+        id=7,
+        title="Stargateo · Chronological",
+        href="/play/watch-orders/11?resume=true",
+        available=True,
+    )
+
+    assert poster.href == "/play/watch-orders/11?resume=true"
+    with pytest.raises(ValueError):
+        PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?resume=false", available=True)
 
 
 def test_collection_mosaic_is_stable_and_never_returns_an_absolute_artwork_path() -> None:
@@ -809,6 +919,33 @@ async def test_item_detail_flattens_a_single_series_season(monkeypatch: MonkeyPa
     assert detail.child_section_title == "Episodes"
     assert [child.title for child in detail.children] == ["Pilot", "Finale"]
     assert child_requests == [7, 8]
+
+
+async def test_item_detail_marks_watched_episode_children(monkeypatch: MonkeyPatch) -> None:
+    series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
+    season = _library_summary(
+        item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7
+    )
+    watched_episode = _library_summary(
+        item_id=9, title="Pilot", kind=LibraryItemKind.EPISODE, parent_id=8
+    )
+    unwatched_episode = _library_summary(
+        item_id=10, title="Finale", kind=LibraryItemKind.EPISODE, parent_id=8
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(
+            series,
+            {7: (season,), 8: (watched_episode, unwatched_episode)},
+            child_requests,
+            child_playback={9: _playback(completed=True)},
+        ),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert [child.watched for child in detail.children] == [True, False]
 
 
 async def test_item_detail_keeps_multiple_series_seasons(monkeypatch: MonkeyPatch) -> None:
@@ -988,6 +1125,8 @@ async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
         "artwork",
         "availability",
         "context_label",
+        "episode_end_number",
+        "episode_end_season_number",
         "episode_number",
         "id",
         "kind",
@@ -3239,6 +3378,7 @@ def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -
     assert [options["show"] for options in run_options] == [False, True]
     assert all(options["host"] == "0.0.0.0" for options in run_options)
     assert all(options["log_config"] is None for options in run_options)
+    assert all(options["timeout_graceful_shutdown"] == 5 for options in run_options)
 
 
 async def test_service_transforms_real_public_contracts_through_one_fake_client(
@@ -3267,8 +3407,19 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
 
         async def on_deck(
             self, _user_id: int, *, cursor: str | None = None, limit: int = 50
-        ) -> PaginatedResponse[object]:
-            return PaginatedResponse(items=(), next_cursor=None, limit=limit)
+        ) -> PaginatedResponse[OnDeckEntry]:
+            return PaginatedResponse(
+                items=(
+                    OnDeckEntry(
+                        item=item,
+                        source_watch_order_id=11,
+                        source_watch_order_name="Chronological",
+                        source_collection_name="Stargateo",
+                    ),
+                ),
+                next_cursor=None,
+                limit=limit,
+            )
 
         async def list_library_items(
             self, **_arguments: object
@@ -3290,6 +3441,7 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
 
     assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
+    assert rails[1].posters[0].href == "/play/watch-orders/11?resume=true"
     assert posters[0].poster_url == "/kanvas/artwork/7/8"
     assert next_cursor == "next"
 
@@ -3393,7 +3545,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%" in css
     css_tokens = set(re.findall(r"^\s*(--k-[a-z0-9-]+):", css, flags=re.MULTILINE))
     css_token_references = set(re.findall(r"var\((--k-[a-z0-9-]+)", css))
-    assert css_token_references <= css_tokens | {"--k-progress"}
+    assert css_token_references <= css_tokens | {"--k-player-video-height", "--k-progress"}
     assert "--k-accent-contrast" in css_tokens
     assert "--k-scrim-soft" in css_tokens
     assert "--k-poster-placeholder-bg" in css_tokens

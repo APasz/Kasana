@@ -25,6 +25,7 @@ def console_main() -> None:
 
     main()
     settings = Kanvas_Settings()
+    shared_settings = SharedSettings()
     build_dashboard(settings)
     ui.run(  # pyright: ignore[reportUnknownMemberType]
         host=settings.host,
@@ -36,6 +37,7 @@ def console_main() -> None:
         show=settings.auto_browser_open,
         show_welcome_message=False,
         log_config=None,
+        timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
     )
 if __name__ == "__main__":  # pragma: no cover
     console_main()

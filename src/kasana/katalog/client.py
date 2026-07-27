@@ -59,6 +59,7 @@ from kasana.katalog.api.contracts import (
     PlaybackPlanRequest,
     PlaybackProgressResult,
     PlaybackSessionResponse,
+    PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
     ProgressUpdate,
     ScanRequest,
@@ -738,6 +739,17 @@ class KatalogClient:
             f"/api/v1/playback/sessions/{session_id}/complete",
             None,
             PlaybackCompletionResult,
+        )
+
+    async def complete_and_advance_playback_session(
+        self, session_id: str, request: PlaybackSessionTransitionRequest
+    ) -> PlaybackSessionResponse:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._send_model(
+            "POST",
+            f"/api/v1/playback/sessions/{session_id}/complete-and-advance",
+            request,
+            PlaybackSessionResponse,
         )
 
     async def close_playback_session(self, session_id: str) -> None:

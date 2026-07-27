@@ -1,8 +1,10 @@
+from _pytest.monkeypatch import MonkeyPatch
 from fastapi import FastAPI
 
 from kasana.__main__ import main as kasana_main
 from kasana.kanvas.__main__ import main as kanvas_main
 from kasana.kanvas.dashboard import build_dashboard
+from kasana.katalog.api import server as katalog_server
 from kasana.katalog.backend import create_backend
 from kasana.katalog.cli.app import main as katalog_main
 from kasana.katalog.settings import KatalogSettings
@@ -20,6 +22,21 @@ def test_component_entry_points_configure_without_starting_services() -> None:
     kanvas_main()
     kestrel_main()
     kourier_main()
+
+
+def test_katalog_api_server_uses_the_shared_graceful_shutdown_timeout(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    captured_timeout: list[int | None] = []
+
+    def fake_run(server: katalog_server.uvicorn.Server) -> None:
+        captured_timeout.append(server.config.timeout_graceful_shutdown)
+
+    monkeypatch.setattr(katalog_server.uvicorn.Server, "run", fake_run)
+
+    katalog_server.main()
+
+    assert captured_timeout == [5]
 
 
 def test_dashboard_can_be_composed() -> None:

@@ -179,11 +179,13 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
         "http://katalog.test/api/v1/media/token",
         audio_stream_index=2,
         transcode_audio=True,
+        start_seconds=42.5,
     )
 
     assert isinstance(result, FragmentedMp4Stream)
     assert ["-c:v", "copy"] == launched[launched.index("-c:v") : launched.index("-c:v") + 2]
     assert ["-c:a", "aac"] == launched[launched.index("-c:a") : launched.index("-c:a") + 2]
+    assert ["-ss", "42.500", "-i"] == launched[launched.index("-ss") : launched.index("-i") + 1]
     assert "pipe:1" in launched
 
 
@@ -205,6 +207,19 @@ def test_playback_delivery_query_validation_keeps_direct_ranges_and_copy_boundar
     assert not dashboard._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
         entry, PlaybackMode.DIRECT, audio_index
     )
+
+    seek_request = Request(
+        {"type": "http", "query_string": b"startSeconds=30.5", "headers": []}
+    )
+    assert dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
+        seek_request, entry.duration_seconds
+    ) == 30.5
+
+    with pytest.raises(HTTPException):
+        dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request({"type": "http", "query_string": b"startSeconds=nan", "headers": []}),
+            entry.duration_seconds,
+        )
 
 
 @pytest.mark.asyncio
@@ -250,15 +265,55 @@ async def test_compatibility_endpoint_returns_remux_or_visible_kestrel_fallback(
     }
 
 
-def test_next_episode_replaces_the_media_source_and_pagehide_flushes_progress() -> None:
+def test_next_episode_navigates_to_its_item_page_and_pagehide_flushes_progress() -> None:
     script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
         encoding="utf-8"
     )
 
-    assert "nextEntry" in script
-    assert "await loadEntry(payload.nextEntry.position" in script
+    assert "nextUrl" in script
+    assert "window.location.assign(payload.nextUrl)" in script
+    assert "video.loop = false;" in script
+    assert "body: JSON.stringify({entryPosition})" in script
+    assert "entryPosition})," in script
     assert "keepalive: true" in script
-    assert "window.location.assign(payload.nextUrl)" not in script
+
+
+@pytest.mark.asyncio
+async def test_browser_completion_returns_the_next_item_playback_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    next_entry = _entry(container="isobmff").model_copy(update={"position": 1})
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+    calls: list[tuple[str, int]] = []
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def complete_playback_entry(
+            self, session_id: str, expected_entry_position: int
+        ) -> object:
+            calls.append((session_id, expected_entry_position))
+            return SimpleNamespace(current_entry_position=1, current_item=next_entry)
+
+    class JsonRequest:
+        async def json(self) -> dict[str, int]:
+            return {"entryPosition": 0}
+
+    async def require_profile(_request: Request) -> object:
+        return profile
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
+
+    response = await dashboard.complete_playback(
+        "s" * 32, cast(Request, JsonRequest())
+    )
+
+    assert calls == [("s" * 32, 0)]
+    assert json.loads(bytes(response.body)) == {
+        "nextUrl": f"/item/{next_entry.item_id}?playbackSession={'s' * 32}",
+    }
 
 
 def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_skips() -> None:
@@ -296,15 +351,80 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     with Client(page("")) as client:
         render_browser_playback_card(session)
         video_elements = [element for element in client.elements.values() if element.tag == "video"]
+        player_elements = [
+            element
+            for element in client.elements.values()
+            if element.tag == "kanvas-playback-player"
+        ]
         fallback_links = [
             element
             for element in client.elements.values()
             if element.tag == "a" and "data-player-kestrel" in element._props  # pyright: ignore[reportPrivateUsage]
         ]
+        queues = [
+            element
+            for element in client.elements.values()
+            if "k-playback-queue" in element._classes  # pyright: ignore[reportPrivateUsage]
+        ]
 
     assert len(video_elements) == 1
     assert "src" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
+    assert len(player_elements) == 1
+    assert player_elements[0]._props["duration-seconds"] == "120"  # pyright: ignore[reportPrivateUsage]
     assert len(fallback_links) == 1
+    assert queues == []
+
+
+def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
+    now = datetime.now(UTC)
+    entries = tuple(
+        PlaybackPlanEntry.model_validate(
+            {
+                **_entry(container="isobmff").model_dump(mode="json"),
+                "position": position,
+                "item_id": position + 1,
+                "display_title": title,
+                "series_title": "Example series",
+                "season_number": 2,
+                "episode_number": position + 1,
+            }
+        )
+        for position, title in enumerate(("Earlier episode", "Current episode", "Next episode"))
+    )
+    session = PlaybackSessionResponse(
+        id="s" * 32,
+        user_id=1,
+        context=PlaybackContext(kind=PlaybackContextKind.STANDALONE, item_id=2),
+        current_entry_position=1,
+        current_item=entries[1],
+        entries=entries,
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+        closed_at=None,
+    )
+
+    with Client(page("")) as client:
+        render_browser_playback_card(session)
+        queue = next(
+            element
+            for element in client.elements.values()
+            if "k-playback-queue" in element._classes  # pyright: ignore[reportPrivateUsage]
+        )
+        queue_entries = [
+            element
+            for element in client.elements.values()
+            if "k-playback-queue__entry" in element._classes  # pyright: ignore[reportPrivateUsage]
+        ]
+        queue_titles: list[str] = [
+            cast(str, element._text)  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+            for element in client.elements.values()
+            if "k-playback-queue__title" in element._classes  # pyright: ignore[reportPrivateUsage]
+        ]
+
+    assert queue.tag == "details"
+    assert "open" not in queue._props  # pyright: ignore[reportPrivateUsage]
+    assert len(queue_entries) == 1
+    assert queue_titles == ["Next episode", "Next episode"]
 
 
 def test_browser_playback_card_rejects_a_session_without_a_current_entry() -> None:

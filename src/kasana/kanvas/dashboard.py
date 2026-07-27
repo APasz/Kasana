@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from asyncio import CancelledError, gather
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from math import isfinite
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -109,13 +110,27 @@ _JAVASCRIPT_DARK_TRUE = cast(bool, "true")
 
 
 class PlaybackStreamingResponse(StreamingResponse):
-    """End a media response quietly when its browser or server is shutting down."""
+    """Release media streams when a browser or server cancels a response."""
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         except CancelledError:
+            await _close_async_iterator(self.body_iterator)
             return
+
+
+class _AsyncClosable(Protocol):
+    """An async iterator that can release an interrupted media transfer."""
+
+    async def aclose(self) -> None: ...
+
+
+async def _close_async_iterator(iterator: AsyncIterable[object]) -> None:
+    """Close an async generator when an ASGI response ends before its final byte."""
+
+    if hasattr(iterator, "aclose"):
+        await cast(_AsyncClosable, iterator).aclose()
 
 
 async def _data_profile(request: Request) -> SessionProfile | None:
@@ -1027,6 +1042,9 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
     mode, audio_stream_index = _requested_playback_delivery(request)
     if not _valid_playback_delivery(entry, mode, audio_stream_index):
         raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    start_seconds = _requested_stream_start_seconds(request, entry.duration_seconds)
+    if mode is PlaybackMode.DIRECT and start_seconds > 0:
+        raise HTTPException(status_code=422, detail="Direct playback does not use a stream start.")
     if mode is not PlaybackMode.DIRECT:
         if request.method == "HEAD":
             return Response(headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"})
@@ -1036,6 +1054,7 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
                 urljoin(str(_settings.katalog_url), entry.stream_url),
                 audio_stream_index=audio_stream_index,
                 transcode_audio=mode is PlaybackMode.AUDIO_TRANSCODE,
+                start_seconds=start_seconds,
             )
         except FFmpegError as error:
             _LOGGER.warning("Browser FFmpeg stream could not start: %s", error)
@@ -1080,6 +1099,7 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
                 yield chunk
         except KatalogClientError as error:
             _LOGGER.warning("Browser media stream ended early: %s", error)
+            raise
         finally:
             await transfer_context.__aexit__(None, None, None)
             await catalogue.close()
@@ -1151,6 +1171,11 @@ async def playback_progress(session_id: str, request: Request) -> Response:
             {
                 "position_seconds": payload.get("positionSeconds"),
                 "seek": payload.get("seek", False),
+                "expected_entry_position": (
+                    _nonnegative_integer(payload, "entryPosition")
+                    if "entryPosition" in payload
+                    else None
+                ),
             }
         )
         await KanvasPlaybackService(_settings, profile.user.id).report_playback_progress(
@@ -1167,27 +1192,30 @@ async def playback_progress(session_id: str, request: Request) -> Response:
 
 @app.post("/kanvas/playback/sessions/{session_id}/complete", include_in_schema=False)
 async def complete_playback(session_id: str, request: Request) -> JSONResponse:
-    """Complete the current browser entry and return the next queue page when available."""
+    """Complete the current browser entry and return its next item page when available."""
 
     profile = await _require_profile(request)
     try:
+        payload = await _json_object(request)
+        entry_position = _nonnegative_integer(payload, "entryPosition")
         next_session = await KanvasPlaybackService(
             _settings, profile.user.id
-        ).complete_playback_entry(session_id)
+        ).complete_playback_entry(session_id, entry_position)
     except ValueError:
         return _invalid_action("Playback session is invalid.")
     except KatalogClientError as error:
         return _katalog_data_error(error, "Playback completion could not be saved.")
-    next_item = next_session.current_item if next_session is not None else None
-    next_entry = (
-        {
-            "position": next_item.position,
-            "resumePosition": next_item.saved_resume_position_seconds,
-        }
+    next_item = (
+        next_session.current_item
+        if next_session.current_entry_position > entry_position
+        else None
+    )
+    next_url = (
+        f"/item/{next_item.item_id}?playbackSession={session_id}"
         if next_item is not None
         else None
     )
-    return JSONResponse({"nextEntry": next_entry})
+    return JSONResponse({"nextUrl": next_url})
 
 
 @app.post("/kanvas/actions/collections", include_in_schema=False)
@@ -1411,9 +1439,9 @@ def _query_text(request: Request, name: str, *, maximum_length: int) -> str | No
 
 
 def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Drop fixed entity lengths so cancelled browser streams remain valid ASGI responses."""
+    """Preserve the validated media headers required for browser range playback."""
 
-    return {name: value for name, value in headers.items() if name.casefold() != "content-length"}
+    return dict(headers)
 
 
 def _requested_playback_delivery(request: Request) -> tuple[PlaybackMode, int]:
@@ -1431,6 +1459,23 @@ def _requested_playback_delivery(request: Request) -> tuple[PlaybackMode, int]:
     if audio_stream_index > 63:
         raise HTTPException(status_code=422, detail="Playback audio stream is invalid.")
     return mode, audio_stream_index
+
+
+def _requested_stream_start_seconds(request: Request, duration_seconds: float | None) -> float:
+    """Parse one bounded generated-stream start position from a browser request."""
+
+    value = request.query_params.get("startSeconds")
+    if value is None:
+        return 0.0
+    try:
+        start_seconds = float(value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Playback stream start is invalid.") from error
+    if not isfinite(start_seconds) or start_seconds < 0:
+        raise HTTPException(status_code=422, detail="Playback stream start is invalid.")
+    if duration_seconds is not None and start_seconds > duration_seconds:
+        raise HTTPException(status_code=422, detail="Playback stream start exceeds media duration.")
+    return start_seconds
 
 
 def _valid_playback_delivery(
@@ -1507,6 +1552,15 @@ def _integer(payload: dict[str, object], field: str) -> int:
     value = payload.get(field)
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive integer.")
+    return value
+
+
+def _nonnegative_integer(payload: dict[str, object], field: str) -> int:
+    """Read a zero-based queue position without accepting bool or numeric strings."""
+
+    value = payload.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer.")
     return value
 
 

@@ -23,6 +23,7 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
+from kasana.katalog.numerals import natural_sort_key
 from kasana.katalog.parsing import (
     LibraryLayout,
     ParsedMediaKind,
@@ -34,8 +35,8 @@ from kasana.katalog.parsing import (
     parse_season_number,
 )
 from kasana.katalog.probe import FFProbeClient, ProbeFailure, ProbeResult
-from kasana.katalog.scanning import IncrementalScanner
-from kasana.katalog.scanning.discovery import probe_audit_findings, sidecar_matches_video
+from kasana.katalog.scanning import IncrementalScanner, ScanCancelledError
+from kasana.katalog.scanning.discovery import discover, probe_audit_findings, sidecar_matches_video
 from kasana.katalog.services import attach_media_file, create_library_item, create_library_root
 from kasana.katalog.settings import KatalogSettings
 
@@ -135,6 +136,15 @@ def _run_scan(database: KatalogDatabase, fake_client: _FakeFfprobeClient) -> Inc
     )
     scanner.prober = fake_client
     return scanner
+
+
+def test_discovery_stops_at_a_cooperative_cancellation_checkpoint(tmp_path: Path) -> None:
+    root = tmp_path / "Movies"
+    root.mkdir()
+    (root / "Stargate.mkv").write_bytes(b"media")
+
+    with pytest.raises(ScanCancelledError, match="cancellation was requested"):
+        discover(root, frozenset({".mkv"}), cancellation_requested=lambda: True)
 
 
 def test_incremental_scan_detects_add_change_move_and_missing(
@@ -501,6 +511,15 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert parse_episode_numbers("Show [2x03]", season_from_directory=2) == (2, 3)
     assert parse_episode_numbers("Show (2X03)", season_from_directory=2) == (2, 3)
     assert parse_episode_numbers("Show E02", season_from_directory=None) is None
+    assert parse_season_number("Season IV", allow_volume=False) == 4
+    assert parse_season_number("第十季", allow_volume=False) == 10
+    assert parse_season_number("시즌 십", allow_volume=False) == 10
+    assert parse_episode_numbers("Show SⅣE十", season_from_directory=4) == (4, 10)
+    assert parse_episode_numbers("Show S一E십", season_from_directory=1) == (1, 10)
+    assert parse_episode_numbers("Show 第十二話", season_from_directory=1) == (1, 12)
+    assert parse_episode_numbers("Show 제십화", season_from_directory=1) == (1, 10)
+    assert natural_sort_key("Episode IX") < natural_sort_key("Episode X")
+    assert natural_sort_key("Episode 九") < natural_sort_key("Episode 十")
     compact_range = parse_episode_range("Show S01E01E02", season_from_directory=1)
     hyphenated_range = parse_episode_range("Show S01E01-E02", season_from_directory=1)
     assert compact_range == hyphenated_range
@@ -545,6 +564,14 @@ def test_episode_parsing_uses_season_directory_context() -> None:
         combined.episode_end_number,
         combined.title,
     ) == (1, 1, 1, 2, "S01E01-E02")
+
+    combined_with_title = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/Show/Season 1/S01E01 - E02 - Children of the Gods.mkv"),
+    )
+    assert not isinstance(combined_with_title, ParseFailure)
+    assert combined_with_title.title == "S01E01-E02 - Children of the Gods"
 
     cross_season_combined = parse_media_path(
         Path("/library/TVShows"),

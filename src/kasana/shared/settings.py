@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from kasana.configuration import ApplicationConfigurationSettingsSource
@@ -58,3 +59,4 @@ class SharedSettings(KSettings):
 
     configuration_section = "shared"
     log_level: LogLevel = LogLevel.INFO
+    graceful_shutdown_timeout_seconds: int = Field(default=5, ge=1, le=60)

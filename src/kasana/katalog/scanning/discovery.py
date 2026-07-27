@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,7 +80,12 @@ class MediaSidecars:
     subtitles: tuple[Path, ...]
 
 
-def discover(root_path: Path, video_extensions: frozenset[str]) -> Discovery:
+def discover(
+    root_path: Path,
+    video_extensions: frozenset[str],
+    *,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> Discovery:
     """Walk one root without following links and retain unreadable paths as findings."""
 
     files: list[FileSnapshot] = []
@@ -93,8 +98,10 @@ def discover(root_path: Path, video_extensions: frozenset[str]) -> Discovery:
         findings.append(AuditFinding(AuditCategory.UNREADABLE_FILE, path, str(error)))
 
     for directory, _, filenames in os.walk(root_path, onerror=on_walk_error, followlinks=False):
+        _raise_if_cancelled(cancellation_requested)
         directory_path = Path(directory)
         for filename in sorted(filenames):
+            _raise_if_cancelled(cancellation_requested)
             path = directory_path / filename
             suffix = path.suffix.casefold()
             if suffix in video_extensions:
@@ -117,6 +124,15 @@ def discover(root_path: Path, video_extensions: frozenset[str]) -> Discovery:
             elif suffix in _POSTER_EXTENSIONS and path.stem.casefold() in _POSTER_STEMS:
                 posters.append(path)
     return Discovery(tuple(files), tuple(subtitles), tuple(posters), tuple(findings))
+
+
+def _raise_if_cancelled(cancellation_requested: Callable[[], bool] | None) -> None:
+    if cancellation_requested is not None and cancellation_requested():
+        raise ScanCancelledError("Scan cancellation was requested.")
+
+
+class ScanCancelledError(RuntimeError):
+    """A synchronous scan reached a cooperative cancellation checkpoint."""
 
 
 def sidecar_findings(discovery: Discovery) -> tuple[AuditFinding, ...]:

@@ -17,6 +17,7 @@ from kasana.kanvas.services.presentation import (
     collection_member,
     collection_tile,
     collection_update_request,
+    display_title,
     generated_row,
     group_collection_members,
     is_series_like,
@@ -462,12 +463,14 @@ class KanvasKatalogService:
                 if include_collection_choices
                 else ()
             )
-            child_view = await _item_children_view(client, item.kind, children_page)
+            child_view = await _item_children_view(
+                client, self._required_user_id(), item.kind, children_page
+            )
             playback = await _playback_for_item(client, self._required_user_id(), item_id)
 
         return ItemDetailView(
             id=item.id,
-            title=item.title,
+            title=display_title(item),
             kind=item.kind.value,
             year=item.year,
             overview=item.overview,
@@ -1096,6 +1099,7 @@ def _available_collection_choices(
 
 async def _item_children_view(
     client: KatalogClient,
+    user_id: int,
     item_kind: LibraryItemKind,
     children_page: PaginatedResponse[LibraryItemSummary],
 ) -> ItemChildrenView:
@@ -1113,7 +1117,7 @@ async def _item_children_view(
         )
         return ItemChildrenView(
             title="Episodes",
-            children=tuple(poster_from_summary(child) for child in season_page.items),
+            children=await _child_posters(client, user_id, season_page.items),
         )
     title: Literal["Episodes", "Seasons"] = (
         "Seasons"
@@ -1123,7 +1127,26 @@ async def _item_children_view(
     )
     return ItemChildrenView(
         title=title,
-        children=tuple(poster_from_summary(child) for child in children),
+        children=await _child_posters(client, user_id, children),
+    )
+
+
+async def _child_posters(
+    client: KatalogClient, user_id: int, children: tuple[LibraryItemSummary, ...]
+) -> tuple[PosterView, ...]:
+    """Render children with each viewer's watched state when they are playable."""
+
+    playable_children = tuple(child for child in children if child.kind in PLAYABLE_KINDS)
+    playback_states = await gather(
+        *(_playback_for_item(client, user_id, child.id) for child in playable_children)
+    )
+    playback_by_item_id = {
+        child.id: playback
+        for child, playback in zip(playable_children, playback_states, strict=True)
+    }
+    return tuple(
+        poster_from_summary(child, playback=playback_by_item_id.get(child.id))
+        for child in children
     )
 
 
