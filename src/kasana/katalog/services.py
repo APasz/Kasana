@@ -138,6 +138,7 @@ def attach_media_file(
     attached_pictures: Sequence[JSONObject] = (),
     audio_streams: Sequence[JSONObject] = (),
     subtitle_streams: Sequence[JSONObject] = (),
+    font_attachments: Sequence[JSONObject] = (),
     availability: AvailabilityState = AvailabilityState.AVAILABLE,
 ) -> MediaFile:
     item: Zaisan = _require_item(session, library_item_id)
@@ -160,6 +161,7 @@ def attach_media_file(
         attached_pictures=list[JSONObject](attached_pictures),
         audio_streams=list[JSONObject](audio_streams),
         subtitle_streams=list[JSONObject](subtitle_streams),
+        font_attachments=list[JSONObject](font_attachments),
         availability=availability,
     )
     session.add(file)

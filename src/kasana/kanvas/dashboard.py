@@ -33,7 +33,12 @@ from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import add_kanvas_head, kanvas_asset_versions, page_shell
 from kasana.kanvas.components.typography import page_title, section_title
-from kasana.kanvas.ffmpeg import FFmpegError, start_fragmented_mp4
+from kasana.kanvas.ffmpeg import (
+    FFmpegError,
+    start_font_attachment_extract,
+    start_fragmented_mp4,
+    start_subtitle_extract,
+)
 from kasana.kanvas.playback_compatibility import (
     BrowserPlaybackCapabilities,
     PlaybackMode,
@@ -56,6 +61,7 @@ from kasana.kanvas.routes.profiles import render_profile_selection
 from kasana.kanvas.services.katalog import KanvasKatalogService, LibraryPosterTransformationError
 from kasana.kanvas.services.playback import KanvasPlaybackService
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.kanvas.subtitles import SubtitleConversionError, as_webvtt
 from kasana.kanvas.viewmodels.collections import (
     CollectionTileView,
     GenerationPreviewView,
@@ -86,6 +92,11 @@ from kasana.katalog.public import (
     LibraryRootKind,
     LibraryRootUpdate,
     PlaybackPlanEntry,
+    PlaybackSessionTrackSelection,
+    PlaybackSubtitleFontAttachment,
+    PlaybackSubtitleFontFormat,
+    PlaybackSubtitleFormat,
+    PlaybackSubtitleSource,
     ScanRequest,
     SessionProgressUpdate,
     UserCreate,
@@ -102,6 +113,13 @@ _assets_registered = False
 _head_registered = False
 _pages_registered = False
 _LOGGER = logging.getLogger(__name__)
+_MAX_BROWSER_SUBTITLE_BYTES = 8 * 1024 * 1024
+_MAX_BROWSER_SUBTITLE_FONT_BYTES = 16 * 1024 * 1024
+_SUBTITLE_FONT_CONTENT_TYPES: Mapping[PlaybackSubtitleFontFormat, str] = {
+    PlaybackSubtitleFontFormat.TRUETYPE: "font/ttf",
+    PlaybackSubtitleFontFormat.OPENTYPE: "font/otf",
+    PlaybackSubtitleFontFormat.COLLECTION: "font/collection",
+}
 
 # NiceGUI 3.14 stringifies a Python bool straight into its bootstrap JavaScript,
 # producing `const dark = True;`. This lower-case JavaScript literal keeps the
@@ -226,9 +244,7 @@ async def update_current_profile(request: Request) -> JSONResponse:
         pin = _optional_string(payload["pin"], maximum_length=16)
         values["pin"] = pin
     if "accent_colour" in payload:
-        values["accent_colour"] = _optional_string(
-            payload["accent_colour"], maximum_length=7
-        )
+        values["accent_colour"] = _optional_string(payload["accent_colour"], maximum_length=7)
     if "preferred_audio_language" in payload:
         values["preferred_audio_language"] = _optional_string(
             payload["preferred_audio_language"], maximum_length=32
@@ -237,15 +253,40 @@ async def update_current_profile(request: Request) -> JSONResponse:
         values["preferred_subtitle_language"] = _optional_string(
             payload["preferred_subtitle_language"], maximum_length=32
         )
+    if "defaultSubtitleFontScalePercent" in payload:
+        values["default_subtitle_font_scale_percent"] = _integer(
+            payload, "defaultSubtitleFontScalePercent"
+        )
+    if "defaultSubtitleBackground" in payload:
+        values["default_subtitle_background"] = _boolean(payload, "defaultSubtitleBackground")
+    if "defaultSubtitleShadow" in payload:
+        values["default_subtitle_shadow"] = _boolean(payload, "defaultSubtitleShadow")
     try:
         update = UserUpdate.model_validate(values)
         async with KatalogClient(
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(profile.user.id, update)
-    except (KatalogClientError, ValueError):
+    except KatalogClientError, ValueError:
         return _invalid_action("Profile settings could not be saved.")
     return JSONResponse(user.model_dump(mode="json"))
+
+
+@app.get("/profiles/current/playback-languages", include_in_schema=False)
+async def current_profile_playback_languages(request: Request) -> JSONResponse:
+    """Return catalogue-derived language choices for the selected browser profile."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    try:
+        async with KatalogClient(
+            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+        ) as client:
+            languages = await client.list_playback_languages()
+    except KatalogClientError:
+        return JSONResponse({"error": "Language choices are unavailable."}, status_code=503)
+    return JSONResponse(languages.model_dump(mode="json"))
 
 
 @app.patch("/kanvas/preferences", include_in_schema=False)
@@ -260,7 +301,7 @@ async def update_kanvas_preferences(request: Request) -> JSONResponse:
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(profile.user.id, update)
-    except (ValidationError, KatalogClientError, ValueError):
+    except ValidationError, KatalogClientError, ValueError:
         return _invalid_action("Profile settings could not be saved.")
     return JSONResponse({"accentColour": user.accent_colour})
 
@@ -287,7 +328,7 @@ async def create_profile_user(request: Request) -> JSONResponse:
                     pin=_optional_string(payload.get("pin"), maximum_length=16),
                 )
             )
-    except (KatalogClientError, ValueError):
+    except KatalogClientError, ValueError:
         return _invalid_action("Profile could not be created.")
     return JSONResponse(user.model_dump(mode="json"), status_code=201)
 
@@ -305,7 +346,7 @@ async def update_profile_user(user_id: int, request: Request) -> JSONResponse:
             str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
         ) as client:
             user = await client.update_user(user_id, update)
-    except (KatalogClientError, ValueError):
+    except KatalogClientError, ValueError:
         return _invalid_action("Profile could not be updated.")
     return JSONResponse(user.model_dump(mode="json"))
 
@@ -796,6 +837,12 @@ async def administration_action(request: Request) -> JSONResponse:
             path = _optional_string(payload.get("path"), maximum_length=10_000)
             kind = _optional_root_kind(payload.get("kind"))
             tags = _tag_values(payload.get("tags"))
+            preferred_audio_language = _optional_string(
+                payload.get("preferredAudioLanguage"), maximum_length=32
+            )
+            preferred_subtitle_language = _optional_string(
+                payload.get("preferredSubtitleLanguage"), maximum_length=32
+            )
             enabled_value = payload.get("enabled")
             enabled: bool | None = enabled_value if isinstance(enabled_value, bool) else None
             if operation == "root-create":
@@ -807,22 +854,30 @@ async def administration_action(request: Request) -> JSONResponse:
                         path=path,
                         expected_kind=kind,
                         default_tags=tags,
+                        preferred_audio_language=preferred_audio_language,
+                        preferred_subtitle_language=preferred_subtitle_language,
                         enabled=enabled is not False,
                     )
                 )
             else:
                 if root_id is None:
                     return _invalid_action("rootId is required.")
-                root = await service.update_library_root(
-                    root_id,
-                    LibraryRootUpdate(
-                        display_name=name,
-                        path=path,
-                        expected_kind=kind,
-                        default_tags=tags,
-                        enabled=enabled,
-                    ),
+                update_request = LibraryRootUpdate(
+                    display_name=name,
+                    path=path,
+                    expected_kind=kind,
+                    default_tags=tags,
+                    enabled=enabled,
                 )
+                if "preferredAudioLanguage" in payload:
+                    update_request = update_request.model_copy(
+                        update={"preferred_audio_language": preferred_audio_language}
+                    )
+                if "preferredSubtitleLanguage" in payload:
+                    update_request = update_request.model_copy(
+                        update={"preferred_subtitle_language": preferred_subtitle_language}
+                    )
+                root = await service.update_library_root(root_id, update_request)
             return JSONResponse({"rootId": root.id})
         if operation == "root-delete":
             root_id = _integer(payload, "rootId")
@@ -902,9 +957,9 @@ async def watch_order_workspace_data(watch_order_id: int, request: Request) -> J
     if forbidden := _administration_forbidden(profile):
         return forbidden
     try:
-        workspace = await KanvasKatalogService(
-            _settings, profile.user.id
-        ).watch_order_workspace(watch_order_id)
+        workspace = await KanvasKatalogService(_settings, profile.user.id).watch_order_workspace(
+            watch_order_id
+        )
     except KatalogClientError as error:
         return _katalog_data_error(error, "Katalog could not load this watch-order workspace.")
     return JSONResponse(workspace.model_dump(by_alias=True, mode="json"))
@@ -1139,14 +1194,14 @@ async def playback_compatibility(
     decision = classify_playback(
         entry,
         capabilities,
-        preferred_audio_language=profile.user.preferred_audio_language,
+        selected_audio_stream_index=entry.selected_audio_stream_index,
     )
     if decision.mode is PlaybackMode.UNSUPPORTED:
         try:
             fallback_uri = await KanvasPlaybackService(
                 _settings, profile.user.id
             ).create_kestrel_fallback_uri(session)
-        except (KatalogClientError, ValueError):
+        except KatalogClientError, ValueError:
             fallback_uri = None
         return JSONResponse(
             {"mode": decision.mode.value, "mediaUrl": None, "fallbackUri": fallback_uri}
@@ -1158,6 +1213,162 @@ async def playback_compatibility(
         f"?mode={decision.mode.value}&audioStream={decision.audio_stream_index}"
     )
     return JSONResponse({"mode": decision.mode.value, "mediaUrl": media_url, "fallbackUri": None})
+
+
+@app.put("/kanvas/playback/sessions/{session_id}/tracks", include_in_schema=False)
+async def playback_tracks(session_id: str, request: Request) -> JSONResponse:
+    """Persist one browser-only track choice on the current owned queue entry."""
+
+    profile = await _require_profile(request)
+    payload = await _json_object(request)
+    try:
+        selection = PlaybackSessionTrackSelection.model_validate(
+            {
+                "expected_entry_position": _nonnegative_integer(payload, "entryPosition"),
+                "audio_stream_index": _nonnegative_integer(payload, "audioStream"),
+                "subtitle_track_id": _optional_track_id(payload.get("subtitleTrack")),
+                "subtitle_timing_offset_milliseconds": _signed_integer(
+                    payload, "subtitleOffsetMilliseconds"
+                ),
+                "subtitle_font_scale_percent": _integer(payload, "subtitleFontScalePercent"),
+                "subtitle_background": _boolean(payload, "subtitleBackground"),
+                "subtitle_shadow": _boolean(payload, "subtitleShadow"),
+                "subtitle_vertical_position": payload.get("subtitleVerticalPosition"),
+            }
+        )
+        session = await KanvasPlaybackService(_settings, profile.user.id).select_playback_tracks(
+            session_id, selection
+        )
+    except ValidationError:
+        return _invalid_action("Playback track selection is invalid.")
+    except ValueError:
+        return _invalid_action("Playback session is invalid.")
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback track selection could not be saved.")
+    entry = session.current_item
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Playback media is unavailable.")
+    return JSONResponse(
+        {
+            "audioStream": entry.selected_audio_stream_index,
+            "subtitleTrack": entry.selected_subtitle_track_id,
+            "subtitleOffsetMilliseconds": entry.subtitle_timing_offset_milliseconds,
+            "subtitleFontScalePercent": entry.subtitle_font_scale_percent,
+            "subtitleBackground": entry.subtitle_background,
+            "subtitleShadow": entry.subtitle_shadow,
+            "subtitleVerticalPosition": entry.subtitle_vertical_position.value,
+        }
+    )
+
+
+@app.get(
+    "/kanvas/playback/sessions/{session_id}/entries/{entry_position}/subtitles/{track_id}",
+    include_in_schema=False,
+)
+async def playback_subtitle(
+    session_id: str, entry_position: int, track_id: str, request: Request
+) -> Response:
+    """Serve browser VTT or local-libass subtitle input from an owned playback session."""
+
+    profile = await _require_profile(request)
+    try:
+        session = await KanvasPlaybackService(_settings, profile.user.id).playback_session(
+            session_id
+        )
+    except (KatalogClientError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.") from error
+    entry = session.current_item
+    if entry is None or entry.position != entry_position:
+        raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
+    track = next(
+        (candidate for candidate in entry.subtitle_tracks if candidate.id == track_id), None
+    )
+    if track is None or track.format is PlaybackSubtitleFormat.UNSUPPORTED:
+        raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
+    offset_seconds = _requested_subtitle_offset_seconds(request, entry.duration_seconds)
+    timing_offset_seconds = entry.subtitle_timing_offset_milliseconds / 1_000
+    if track.source is PlaybackSubtitleSource.SIDECAR:
+        if track.content_url is None:
+            raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
+        if (
+            track.format is PlaybackSubtitleFormat.WEBVTT
+            and _is_webvtt_track(track.codec)
+            and offset_seconds == 0
+            and timing_offset_seconds == 0
+        ):
+            return await _direct_webvtt_sidecar(track.content_url)
+        content = await _sidecar_subtitle_content(track.content_url)
+    else:
+        content = await _embedded_subtitle_content(entry, track.id, track.format)
+    if track.format is PlaybackSubtitleFormat.ASS:
+        return Response(
+            content=content,
+            media_type="text/x-ssa",
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        return Response(
+            content=as_webvtt(
+                content,
+                source_is_webvtt=_is_webvtt_track(track.codec),
+                offset_seconds=offset_seconds,
+                timing_offset_seconds=timing_offset_seconds,
+            ),
+            media_type="text/vtt",
+            headers={"Cache-Control": "no-store"},
+        )
+    except SubtitleConversionError as error:
+        raise HTTPException(
+            status_code=422, detail="Playback subtitle cannot be converted."
+        ) from error
+
+
+@app.get(
+    "/kanvas/playback/sessions/{session_id}/entries/{entry_position}/fonts/{font_id}",
+    include_in_schema=False,
+)
+async def playback_subtitle_font(
+    session_id: str, entry_position: int, font_id: str, request: Request
+) -> Response:
+    """Serve one bounded embedded ASS font through its owning playback session."""
+
+    profile = await _require_profile(request)
+    try:
+        session = await KanvasPlaybackService(_settings, profile.user.id).playback_session(
+            session_id
+        )
+    except (KatalogClientError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Playback font is unavailable.") from error
+    entry = session.current_item
+    if entry is None or entry.position != entry_position:
+        raise HTTPException(status_code=404, detail="Playback font is unavailable.")
+    font = next(
+        (candidate for candidate in entry.subtitle_font_attachments if candidate.id == font_id),
+        None,
+    )
+    if font is None:
+        raise HTTPException(status_code=404, detail="Playback font is unavailable.")
+    content = await _embedded_subtitle_font_content(entry, font)
+    return Response(
+        content=content,
+        media_type=_SUBTITLE_FONT_CONTENT_TYPES[font.format],
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/kanvas/playback/sessions/{session_id}/kestrel", include_in_schema=False)
+async def playback_kestrel_fallback(session_id: str, request: Request) -> JSONResponse:
+    """Expose Kestrel only after an owned browser session needs a richer renderer."""
+
+    profile = await _require_profile(request)
+    try:
+        service = KanvasPlaybackService(_settings, profile.user.id)
+        fallback_uri = await service.create_kestrel_fallback_uri(
+            await service.playback_session(session_id)
+        )
+    except (KatalogClientError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Kestrel fallback is unavailable.") from error
+    return JSONResponse({"fallbackUri": fallback_uri})
 
 
 @app.put("/kanvas/playback/sessions/{session_id}/progress", include_in_schema=False)
@@ -1206,14 +1417,10 @@ async def complete_playback(session_id: str, request: Request) -> JSONResponse:
     except KatalogClientError as error:
         return _katalog_data_error(error, "Playback completion could not be saved.")
     next_item = (
-        next_session.current_item
-        if next_session.current_entry_position > entry_position
-        else None
+        next_session.current_item if next_session.current_entry_position > entry_position else None
     )
     next_url = (
-        f"/item/{next_item.item_id}?playbackSession={session_id}"
-        if next_item is not None
-        else None
+        f"/item/{next_item.item_id}?playbackSession={session_id}" if next_item is not None else None
     )
     return JSONResponse({"nextUrl": next_url})
 
@@ -1478,6 +1685,153 @@ def _requested_stream_start_seconds(request: Request, duration_seconds: float | 
     return start_seconds
 
 
+def _requested_subtitle_offset_seconds(request: Request, duration_seconds: float | None) -> float:
+    """Parse the generated media's absolute offset used to realign browser subtitles."""
+
+    value = request.query_params.get("offsetSeconds")
+    if value is None:
+        return 0.0
+    try:
+        offset_seconds = float(value)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422, detail="Playback subtitle offset is invalid."
+        ) from error
+    if not isfinite(offset_seconds) or offset_seconds < 0:
+        raise HTTPException(status_code=422, detail="Playback subtitle offset is invalid.")
+    if duration_seconds is not None and offset_seconds > duration_seconds:
+        raise HTTPException(
+            status_code=422, detail="Playback subtitle offset exceeds media duration."
+        )
+    return offset_seconds
+
+
+def _optional_track_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError("Playback subtitle track is invalid.")
+    if (
+        not (value.startswith("embedded-") or value.startswith("sidecar-"))
+        or not value.partition("-")[2].isdecimal()
+    ):
+        raise ValueError("Playback subtitle track is invalid.")
+    return value
+
+
+def _is_webvtt_track(codec: str | None) -> bool:
+    return (codec or "").casefold() in {"vtt", "webvtt"}
+
+
+async def _direct_webvtt_sidecar(subtitle_url: str) -> PlaybackStreamingResponse:
+    """Proxy a VTT sidecar byte-for-byte when no generated-stream offset is needed."""
+
+    catalogue = KatalogClient(
+        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+    )
+    transfer_context = catalogue.open_stream_subtitle(subtitle_url)
+    try:
+        transfer = await transfer_context.__aenter__()
+    except KatalogClientError:
+        await catalogue.close()
+        raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.") from None
+
+    async def stream() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in transfer.chunks:
+                yield chunk
+        finally:
+            await transfer_context.__aexit__(None, None, None)
+            await catalogue.close()
+
+    headers = _stream_response_headers(transfer.headers)
+    headers["Content-Type"] = "text/vtt"
+    headers["Cache-Control"] = "no-store"
+    return PlaybackStreamingResponse(stream(), status_code=transfer.status_code, headers=headers)
+
+
+async def _sidecar_subtitle_content(subtitle_url: str) -> bytes:
+    """Read one bounded sidecar through Katalog's opaque capability."""
+
+    catalogue = KatalogClient(
+        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
+    )
+    try:
+        async with catalogue.open_stream_subtitle(subtitle_url) as transfer:
+            return await _bounded_subtitle_bytes(transfer.chunks)
+    finally:
+        await catalogue.close()
+
+
+async def _embedded_subtitle_content(
+    entry: PlaybackPlanEntry, track_id: str, subtitle_format: PlaybackSubtitleFormat
+) -> bytes:
+    """Extract embedded text/ASS tracks only; video is never decoded or burned in."""
+
+    raw_index = track_id.removeprefix("embedded-")
+    if not raw_index.isdecimal():
+        raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
+    try:
+        extracted = await start_subtitle_extract(
+            _settings.ffmpeg_executable,
+            urljoin(str(_settings.katalog_url), entry.stream_url),
+            subtitle_stream_index=int(raw_index),
+            ass=subtitle_format is PlaybackSubtitleFormat.ASS,
+        )
+        return await _bounded_subtitle_bytes(extracted.chunks())
+    except FFmpegError as error:
+        _LOGGER.warning("Browser subtitle extraction failed: %s", error)
+        raise HTTPException(
+            status_code=503, detail="Playback subtitle conversion is unavailable."
+        ) from error
+
+
+async def _embedded_subtitle_font_content(
+    entry: PlaybackPlanEntry, font: PlaybackSubtitleFontAttachment
+) -> bytes:
+    """Extract a previously scanned font attachment, bounded before browser delivery."""
+
+    try:
+        extracted = await start_font_attachment_extract(
+            _settings.ffmpeg_executable,
+            urljoin(str(_settings.katalog_url), entry.stream_url),
+            stream_index=font.stream_index,
+        )
+        return await _bounded_bytes(
+            extracted.chunks(),
+            maximum_bytes=_MAX_BROWSER_SUBTITLE_FONT_BYTES,
+            too_large_detail="Playback subtitle font is too large.",
+        )
+    except FFmpegError as error:
+        _LOGGER.warning("Browser subtitle font extraction failed: %s", error)
+        raise HTTPException(
+            status_code=503, detail="Playback font extraction is unavailable."
+        ) from error
+
+
+async def _bounded_subtitle_bytes(chunks: AsyncIterator[bytes]) -> bytes:
+    """Keep subtitle conversion memory bounded even for malformed sidecar files."""
+
+    return await _bounded_bytes(
+        chunks,
+        maximum_bytes=_MAX_BROWSER_SUBTITLE_BYTES,
+        too_large_detail="Playback subtitle is too large.",
+    )
+
+
+async def _bounded_bytes(
+    chunks: AsyncIterator[bytes], *, maximum_bytes: int, too_large_detail: str
+) -> bytes:
+    """Materialise a small FFmpeg result without allowing unbounded allocation."""
+
+    content = bytearray()
+    async for chunk in chunks:
+        content.extend(chunk)
+        if len(content) > maximum_bytes:
+            raise HTTPException(status_code=422, detail=too_large_detail)
+    return bytes(content)
+
+
 def _valid_playback_delivery(
     entry: PlaybackPlanEntry, mode: PlaybackMode, audio_stream_index: int
 ) -> bool:
@@ -1555,6 +1909,24 @@ def _integer(payload: dict[str, object], field: str) -> int:
     return value
 
 
+def _signed_integer(payload: dict[str, object], field: str) -> int:
+    """Read a signed JSON integer without accepting bool or numeric strings."""
+
+    value = payload.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer.")
+    return value
+
+
+def _boolean(payload: dict[str, object], field: str) -> bool:
+    """Read a JSON boolean without accepting truthy values of another type."""
+
+    value = payload.get(field)
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean.")
+    return value
+
+
 def _nonnegative_integer(payload: dict[str, object], field: str) -> int:
     """Read a zero-based queue position without accepting bool or numeric strings."""
 
@@ -1580,9 +1952,7 @@ def _integer_tuple(
             f"{field} must be a non-empty list of at most {maximum_length} identifiers."
         )
     identifiers = tuple(
-        item
-        for item in values
-        if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        item for item in values if isinstance(item, int) and not isinstance(item, bool) and item > 0
     )
     if len(identifiers) != len(values) or len(set(identifiers)) != len(identifiers):
         raise ValueError(f"{field} must contain unique positive integers.")
@@ -1651,6 +2021,13 @@ def _library_item_update_payload(payload: dict[str, object], *, actor: str) -> d
         "episodeNumber": "episode_number",
         "kind": "kind",
         "parentId": "parent_id",
+        "defaultAudioStreamIndex": "default_audio_stream_index",
+        "forceDefaultAudioStream": "force_default_audio_stream",
+        "defaultSubtitleTrackId": "default_subtitle_track_id",
+        "forceDefaultSubtitleTrack": "force_default_subtitle_track",
+        "defaultSubtitleTimingOffsetMilliseconds": "default_subtitle_timing_offset_milliseconds",
+        "defaultSubtitleFontScalePercent": "default_subtitle_font_scale_percent",
+        "forceDefaultSubtitleFontScale": "force_default_subtitle_font_scale",
     }
     for browser_name, contract_name in field_names.items():
         if browser_name not in payload:
@@ -1836,9 +2213,7 @@ def _katalog_data_error(error: KatalogClientError, message: str) -> JSONResponse
     return JSONResponse(payload, status_code=_katalog_status(error))
 
 
-def _administration_operation_failure_message(
-    operation: object, error: KatalogClientError
-) -> str:
+def _administration_operation_failure_message(operation: object, error: KatalogClientError) -> str:
     """Return a specific but safe failure message for a known admin operation."""
 
     if operation == "match" and error.kind is KatalogClientErrorKind.CONFLICT:
@@ -2041,7 +2416,7 @@ async def item_page(item_id: int, request: Request) -> Response | None:
             playback_session = await KanvasPlaybackService(
                 _settings, profile.user.id
             ).playback_session(session_id)
-        except (KatalogClientError, ValueError):
+        except KatalogClientError, ValueError:
             with page_shell(_settings, "/library", "Playback", profile):
                 feedback_state(
                     "Playback unavailable", "This playback session is no longer available."
@@ -2115,9 +2490,7 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
             skip_unavailable=skip_unavailable,
         )
         with page_shell(_settings, "/collections", "Playback", profile):
-            feedback_state(
-                "Playback could not start", _watch_order_playback_error_detail(error)
-            )
+            feedback_state("Playback could not start", _watch_order_playback_error_detail(error))
         return
     current_item = session.current_item
     if current_item is None:

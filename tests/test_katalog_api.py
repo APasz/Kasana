@@ -1080,7 +1080,10 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     )
     configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
     assert set(configuration) == {
-        "accent_colour",
+            "accent_colour",
+            "default_subtitle_background",
+            "default_subtitle_font_scale_percent",
+            "default_subtitle_shadow",
         "level",
         "name",
         "pin",
@@ -1140,6 +1143,9 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
             "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
             "preferred_audio_language": None,
             "preferred_subtitle_language": None,
+            "default_subtitle_font_scale_percent": 100,
+            "default_subtitle_background": False,
+            "default_subtitle_shadow": False,
         }
 
     rejected_pin = await api_fixture.client.post(

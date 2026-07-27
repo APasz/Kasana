@@ -47,6 +47,9 @@ class UserConfiguration(BaseModel):
     )
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
     preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
+    default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
+    default_subtitle_background: bool = False
+    default_subtitle_shadow: bool = False
 
     @field_validator("username", "name")
     @classmethod

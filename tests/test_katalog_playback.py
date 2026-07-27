@@ -28,6 +28,7 @@ from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
 from kasana.katalog.models import (
     AvailabilityState,
     KeiroKind,
+    MediaFile,
     PlaybackLaunchToken,
     PlaybackSession,
     PlaybackState,
@@ -40,6 +41,7 @@ from kasana.katalog.public import (
     PlaybackPlanEntry,
     PlaybackPlanRequest,
     PlaybackSessionResponse,
+    PlaybackStatesRequest,
     SessionProgressUpdate,
     StandalonePlaybackContext,
 )
@@ -89,6 +91,34 @@ def test_playback_session_response_accepts_the_configurable_queue_maximum() -> N
     )
 
     assert len(session.entries) == MAX_PLAYBACK_QUEUE_SIZE
+
+
+async def test_playback_language_options_are_derived_from_available_tracks(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    with playback_fixture.database.transaction() as session:
+        media_file = session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == playback_fixture.ids["movie"])
+        )
+        unavailable_file = session.scalar(
+            select(MediaFile).where(
+                MediaFile.library_item_id == playback_fixture.ids["episode_one"]
+            )
+        )
+        assert media_file is not None and unavailable_file is not None
+        media_file.audio_streams = [
+            {"codec": "aac", "language": "eng"},
+            {"codec": "aac", "language": "jpn"},
+        ]
+        media_file.subtitle_streams = [{"codec": "subrip", "language": "zho"}]
+        media_file.subtitle_sidecar_paths = ["/media/movie.yue.srt"]
+        unavailable_file.audio_streams = [{"codec": "aac", "language": "kor"}]
+        unavailable_file.availability = AvailabilityState.UNAVAILABLE
+
+    response = await playback_fixture.client.get("/api/v1/library/playback-languages")
+
+    assert response.status_code == 200
+    assert response.json() == {"audio": ["en", "ja"], "subtitles": ["en", "yue", "zh"]}
 
 
 @pytest.fixture
@@ -341,6 +371,205 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
     ]
 
 
+async def test_playback_tracks_use_root_languages_and_expose_sidecars(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    movie_path = playback_fixture.settings.database_path.parent / "library" / "movie.mkv"
+    srt_path = movie_path.with_suffix(".en.srt")
+    ass_path = movie_path.with_suffix(".en.ass")
+    srt_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+    ass_path.write_text("[Script Info]\nTitle: Example\n", encoding="utf-8")
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, playback_fixture.ids["movie"])
+        assert movie is not None
+        root = movie.library_root
+        root.preferred_audio_language = "en-AU"
+        root.preferred_subtitle_language = "en"
+        media_file = session.scalar(select(MediaFile).where(MediaFile.library_item_id == movie.id))
+        assert media_file is not None
+        media_file.audio_streams = [
+            {"codec": "aac", "language": "jpn", "default": True},
+            {"codec": "aac", "language": "eng", "default": False},
+        ]
+        media_file.subtitle_streams = [
+            {"codec": "subrip", "language": "jpn", "default": True},
+            {"codec": "hdmv_pgs_subtitle", "language": "eng", "forced": True},
+            {"codec": "ass", "language": "eng", "default": False},
+        ]
+        media_file.subtitle_sidecar_paths = [str(srt_path), str(ass_path)]
+        media_file.font_attachments = [
+            {"stream_index": 6, "filename": "Dialogue.otf", "format": "opentype"}
+        ]
+
+    launch = await _create_plan(
+        playback_fixture,
+        {"kind": "standalone", "item_id": playback_fixture.ids["movie"]},
+    )
+    response = await playback_fixture.client.get(f"/api/v1/playback/plans/{launch}")
+
+    assert response.status_code == 200
+    entry = response.json()["current_item"]
+    assert entry["selected_audio_stream_index"] == 1
+    assert entry["selected_subtitle_track_id"] == "embedded-1"
+    tracks = {track["id"]: track for track in entry["subtitle_tracks"]}
+    assert tracks["embedded-1"]["format"] == "unsupported"
+    assert tracks["embedded-1"]["forced"] is True
+    assert tracks["embedded-2"]["format"] == "ass"
+    assert tracks["sidecar-0"]["source"] == "sidecar"
+    assert tracks["sidecar-0"]["format"] == "webvtt"
+    assert tracks["sidecar-1"]["format"] == "ass"
+    assert entry["subtitle_font_attachments"] == [
+        {
+            "id": "embedded-font-6",
+            "stream_index": 6,
+            "filename": "Dialogue.otf",
+            "format": "opentype",
+        }
+    ]
+    assert str(srt_path) not in response.text
+
+    sidecar = await playback_fixture.client.get(tracks["sidecar-0"]["content_url"])
+    assert sidecar.status_code == 200
+    assert sidecar.text.startswith("1\n00:00:01,000")
+
+
+async def test_batch_playback_state_and_session_track_choice_are_bounded(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    response = await client.post(
+        f"/api/v1/users/{ids['user']}/playback-states",
+        json={"item_ids": [ids["episode_one"], ids["episode_two"]]},
+    )
+    assert response.status_code == 200
+    assert [state["item_id"] for state in response.json()["states"]] == [ids["episode_two"]]
+    assert PlaybackStatesRequest(item_ids=tuple(range(1, 501))).item_ids[-1] == 500
+    duplicate = await client.post(
+        f"/api/v1/users/{ids['user']}/playback-states",
+        json={"item_ids": [ids["episode_one"], ids["episode_one"]]},
+    )
+    assert duplicate.status_code == 422
+
+    launch = await _create_plan(playback_fixture, {"kind": "standalone", "item_id": ids["movie"]})
+    session = (await client.get(f"/api/v1/playback/plans/{launch}")).json()
+    selected = await client.patch(
+        f"/api/v1/playback/sessions/{session['id']}/tracks",
+        json={
+            "expected_entry_position": 0,
+            "audio_stream_index": 0,
+            "subtitle_track_id": "embedded-0",
+            "subtitle_timing_offset_milliseconds": -500,
+            "subtitle_font_scale_percent": 125,
+            "subtitle_background": True,
+            "subtitle_shadow": True,
+            "subtitle_vertical_position": "middle",
+        },
+    )
+    assert selected.status_code == 200
+    assert selected.json()["current_item"]["selected_subtitle_track_id"] == "embedded-0"
+    assert selected.json()["current_item"]["subtitle_timing_offset_milliseconds"] == -500
+    assert selected.json()["current_item"]["subtitle_font_scale_percent"] == 125
+    assert selected.json()["current_item"]["subtitle_background"] is True
+    assert selected.json()["current_item"]["subtitle_shadow"] is True
+    assert selected.json()["current_item"]["subtitle_vertical_position"] == "middle"
+
+
+async def test_profile_defaults_override_item_defaults_unless_individually_forced(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    updated_profile = await client.patch(
+        f"/api/v1/users/{ids['user']}",
+        json={
+            "preferred_audio_language": "ja",
+            "preferred_subtitle_language": "ja",
+            "default_subtitle_font_scale_percent": 125,
+            "default_subtitle_background": True,
+            "default_subtitle_shadow": True,
+        },
+    )
+    assert updated_profile.status_code == 200
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, ids["movie"])
+        episode = session.get(Zaisan, ids["episode_one"])
+        assert movie is not None and episode is not None
+        movie.default_audio_stream_index = 1
+        movie.default_subtitle_track_id = "embedded-0"
+        movie.default_subtitle_timing_offset_milliseconds = -750
+        movie.default_subtitle_font_scale_percent = 150
+        for item in (movie, episode):
+            media_file = session.scalar(
+                select(MediaFile).where(MediaFile.library_item_id == item.id)
+            )
+            assert media_file is not None
+            media_file.audio_streams = [
+                {"codec": "aac", "language": "jpn", "default": True},
+                {"codec": "aac", "language": "eng"},
+            ]
+            media_file.subtitle_streams = [
+                {"codec": "subrip", "language": "eng"},
+                {"codec": "subrip", "language": "jpn", "default": True},
+            ]
+
+    item_launch = await _create_plan(
+        playback_fixture, {"kind": "standalone", "item_id": ids["movie"]}
+    )
+    item_entry = (await client.get(f"/api/v1/playback/plans/{item_launch}")).json()["current_item"]
+    assert item_entry["selected_audio_stream_index"] == 0
+    assert item_entry["selected_subtitle_track_id"] == "embedded-1"
+    assert item_entry["subtitle_timing_offset_milliseconds"] == -750
+    assert item_entry["subtitle_font_scale_percent"] == 125
+    assert item_entry["subtitle_background"] is True
+    assert item_entry["subtitle_shadow"] is True
+
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, ids["movie"])
+        assert movie is not None
+        movie.force_default_audio_stream = True
+
+    audio_forced_launch = await _create_plan(
+        playback_fixture, {"kind": "standalone", "item_id": ids["movie"]}
+    )
+    audio_forced_entry = (await client.get(f"/api/v1/playback/plans/{audio_forced_launch}")).json()[
+        "current_item"
+    ]
+    assert audio_forced_entry["selected_audio_stream_index"] == 1
+    assert audio_forced_entry["selected_subtitle_track_id"] == "embedded-1"
+    assert audio_forced_entry["subtitle_font_scale_percent"] == 125
+
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, ids["movie"])
+        assert movie is not None
+        movie.force_default_subtitle_track = True
+        movie.force_default_subtitle_font_scale = True
+
+    forced_item_launch = await _create_plan(
+        playback_fixture, {"kind": "standalone", "item_id": ids["movie"]}
+    )
+    forced_item_entry = (await client.get(f"/api/v1/playback/plans/{forced_item_launch}")).json()[
+        "current_item"
+    ]
+    assert forced_item_entry["selected_audio_stream_index"] == 1
+    assert forced_item_entry["selected_subtitle_track_id"] == "embedded-0"
+    assert forced_item_entry["subtitle_timing_offset_milliseconds"] == -750
+    assert forced_item_entry["subtitle_font_scale_percent"] == 150
+
+    profile_launch = await _create_plan(
+        playback_fixture, {"kind": "standalone", "item_id": ids["episode_one"]}
+    )
+    profile_entry = (await client.get(f"/api/v1/playback/plans/{profile_launch}")).json()[
+        "current_item"
+    ]
+    assert profile_entry["selected_audio_stream_index"] == 0
+    assert profile_entry["selected_subtitle_track_id"] == "embedded-1"
+    assert profile_entry["subtitle_timing_offset_milliseconds"] == 0
+    assert profile_entry["subtitle_font_scale_percent"] == 125
+    assert profile_entry["subtitle_background"] is True
+    assert profile_entry["subtitle_shadow"] is True
+
+
 async def test_queue_completion_transitions_collection_playback_atomically(
     playback_fixture: PlaybackFixture,
 ) -> None:
@@ -351,9 +580,7 @@ async def test_queue_completion_transitions_collection_playback_atomically(
             "watch_order_id": playback_fixture.ids["watch_order"],
         },
     )
-    session = (
-        await playback_fixture.client.get(f"/api/v1/playback/plans/{launch}")
-    ).json()
+    session = (await playback_fixture.client.get(f"/api/v1/playback/plans/{launch}")).json()
     transition_path = f"/api/v1/playback/sessions/{session['id']}/complete-and-advance"
 
     advanced = await playback_fixture.client.post(
@@ -563,9 +790,7 @@ async def test_collection_order_workflow_preserves_default_resume_and_explicit_s
     on_deck = await client.get(f"/api/v1/users/{ids['user']}/on-deck")
     assert on_deck.status_code == 200
     active_order = next(
-        entry
-        for entry in on_deck.json()["items"]
-        if entry["source_watch_order_id"] == order_id
+        entry for entry in on_deck.json()["items"] if entry["source_watch_order_id"] == order_id
     )
     assert active_order["item"]["id"] == ids["episode_one"]
     assert active_order["source_collection_name"] == "Stargate"

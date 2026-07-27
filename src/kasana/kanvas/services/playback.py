@@ -14,6 +14,7 @@ from kasana.katalog.public import (
     ManualQueuePlaybackContext,
     PlaybackPlanRequest,
     PlaybackSessionResponse,
+    PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     SeriesPlaybackContext,
     SessionProgressUpdate,
@@ -129,6 +130,19 @@ class KanvasPlaybackService:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             await client.update_playback_session_progress(session_id, update)
+
+    async def select_playback_tracks(
+        self, session_id: str, selection: PlaybackSessionTrackSelection
+    ) -> PlaybackSessionResponse:
+        """Store a current-entry browser track choice after checking profile ownership."""
+
+        async with KatalogClient(
+            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        ) as client:
+            session = await client.get_playback_session(session_id)
+            self._owned_session(session)
+            selected = await client.update_playback_session_tracks(session_id, selection)
+        return self._owned_session(selected)
 
     async def complete_playback_entry(
         self, session_id: str, expected_entry_position: int

@@ -16,7 +16,14 @@ _SCAN_ROOTS = (
     _PROJECT_ROOT / "alembic",
     _PROJECT_ROOT / "pyproject.toml",
 )
-_IGNORED_PATHS = frozenset({Path("tests/test_british_spellings.py")})
+_IGNORED_PATHS = frozenset(
+    {
+        Path("tests/test_british_spellings.py"),
+        Path("src/kasana/kanvas/static/libass/subtitles-octopus.js"),
+        Path("src/kasana/kanvas/static/libass/subtitles-octopus-worker.js"),
+        Path("src/kasana/kanvas/static/libass/subtitles-octopus-worker-legacy.js"),
+    }
+)
 _TEXT_SUFFIXES = frozenset({".css", ".ini", ".js", ".md", ".mako", ".py", ".toml"})
 _REQUIRED_STANDARD_TERMS = frozenset({"authorization", "behavior", "center", "color", "license"})
 _UNAVOIDABLE_API_SPELLINGS = {

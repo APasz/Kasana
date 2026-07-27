@@ -55,12 +55,16 @@ from kasana.katalog.api.contracts import (
     OnDeckEntry,
     PaginatedResponse,
     PlaybackCompletionResult,
+    PlaybackLanguageOptions,
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackProgressResult,
     PlaybackSessionResponse,
+    PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
+    PlaybackStatesRequest,
+    PlaybackStatesResponse,
     ProgressUpdate,
     ScanRequest,
     SessionProgressUpdate,
@@ -307,6 +311,9 @@ class KatalogClient:
             raise _response_error(
                 "Katalog returned invalid library tags.", response.request_id
             ) from error
+
+    async def list_playback_languages(self) -> PlaybackLanguageOptions:
+        return await self._get_model("/api/v1/library/playback-languages", PlaybackLanguageOptions)
 
     async def iter_library_items(
         self, **filters: Unpack[_LibraryItemFilters]
@@ -756,6 +763,17 @@ class KatalogClient:
         _validate_opaque_token(session_id, "session_id")
         await self._request("DELETE", f"/api/v1/playback/sessions/{session_id}")
 
+    async def update_playback_session_tracks(
+        self, session_id: str, selection: PlaybackSessionTrackSelection
+    ) -> PlaybackSessionResponse:
+        _validate_opaque_token(session_id, "session_id")
+        return await self._send_model(
+            "PATCH",
+            f"/api/v1/playback/sessions/{session_id}/tracks",
+            selection,
+            PlaybackSessionResponse,
+        )
+
     async def stream_media(
         self, stream_url: str, *, range_header: str | None = None
     ) -> AsyncIterator[bytes]:
@@ -770,6 +788,11 @@ class KatalogClient:
             async for chunk in transfer.chunks:
                 yield chunk
 
+    async def stream_subtitle(self, subtitle_url: str) -> AsyncIterator[bytes]:
+        async with self.open_stream_subtitle(subtitle_url) as transfer:
+            async for chunk in transfer.chunks:
+                yield chunk
+
     @asynccontextmanager
     async def open_stream_media(
         self, stream_url: str, *, range_header: str | None = None
@@ -777,7 +800,7 @@ class KatalogClient:
         """Open a streaming response while preserving its range semantics and metadata."""
 
         async with self._open_media_transfer(
-            stream_url, range_header=range_header, download=False
+            stream_url, range_header=range_header, resource="stream"
         ) as transfer:
             yield transfer
 
@@ -788,7 +811,16 @@ class KatalogClient:
         """Open a download response while preserving its range semantics and metadata."""
 
         async with self._open_media_transfer(
-            download_url, range_header=range_header, download=True
+            download_url, range_header=range_header, resource="download"
+        ) as transfer:
+            yield transfer
+
+    @asynccontextmanager
+    async def open_stream_subtitle(self, subtitle_url: str) -> AsyncGenerator[MediaTransfer]:
+        """Open one token-authorised sidecar subtitle without filesystem access."""
+
+        async with self._open_media_transfer(
+            subtitle_url, range_header=None, resource="subtitle"
         ) as transfer:
             yield transfer
 
@@ -810,6 +842,13 @@ class KatalogClient:
             raise _response_error(
                 "Katalog returned an invalid playback state.", response.request_id
             ) from error
+
+    async def playback_states(
+        self, user_id: int, request: PlaybackStatesRequest
+    ) -> PlaybackStatesResponse:
+        return await self._send_model(
+            "POST", f"/api/v1/users/{user_id}/playback-states", request, PlaybackStatesResponse
+        )
 
     async def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         return await self._send_model(
@@ -854,12 +893,8 @@ class KatalogClient:
                 "Katalog returned invalid duplicate episode issues.", response.request_id
             ) from error
 
-    async def submit_library_consistency(
-        self, request: LibraryConsistencyRequest
-    ) -> JobSubmission:
-        return await self._send_model(
-            "POST", "/api/v1/library/consistency", request, JobSubmission
-        )
+    async def submit_library_consistency(self, request: LibraryConsistencyRequest) -> JobSubmission:
+        return await self._send_model("POST", "/api/v1/library/consistency", request, JobSubmission)
 
     async def submit_artwork_fetch(self, request: ArtworkFetchRequest) -> JobSubmission:
         return await self._send_model("POST", "/api/v1/artwork/fetch", request, JobSubmission)
@@ -888,9 +923,7 @@ class KatalogClient:
     async def submit_duplicate_resolution(
         self, request: DuplicateResolutionRequest
     ) -> JobSubmission:
-        return await self._send_model(
-            "POST", "/api/v1/repairs/duplicates", request, JobSubmission
-        )
+        return await self._send_model("POST", "/api/v1/repairs/duplicates", request, JobSubmission)
 
     async def submit_duplicate_resolution_batch(
         self, request: DuplicateResolutionBatchRequest
@@ -984,9 +1017,15 @@ class KatalogClient:
 
     @asynccontextmanager
     async def _open_media_transfer(
-        self, path: str, *, range_header: str | None, download: bool
+        self, path: str, *, range_header: str | None, resource: str
     ) -> AsyncGenerator[MediaTransfer]:
-        expected_prefix = "/api/v1/downloads/" if download else "/api/v1/media/"
+        expected_prefix = {
+            "stream": "/api/v1/media/",
+            "download": "/api/v1/downloads/",
+            "subtitle": "/api/v1/subtitles/",
+        }.get(resource)
+        if expected_prefix is None:
+            raise ValueError("Unknown media transfer resource.")
         if not path.startswith(expected_prefix):
             msg = f"Media URLs must begin with {expected_prefix!r}."
             raise ValueError(msg)

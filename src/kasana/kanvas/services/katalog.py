@@ -97,6 +97,7 @@ from kasana.katalog.public import (
     OnDeckEntry,
     PaginatedResponse,
     PlaybackStateResponse,
+    PlaybackStatesRequest,
     ScanRequest,
     WatchOrderCreate,
     WatchOrderEntriesCreate,
@@ -1137,13 +1138,19 @@ async def _child_posters(
     """Render children with each viewer's watched state when they are playable."""
 
     playable_children = tuple(child for child in children if child.kind in PLAYABLE_KINDS)
-    playback_states = await gather(
-        *(_playback_for_item(client, user_id, child.id) for child in playable_children)
+    playback_by_item_id = (
+        {
+            state.item_id: state
+            for state in (
+                await client.playback_states(
+                    user_id,
+                    PlaybackStatesRequest(item_ids=tuple(child.id for child in playable_children)),
+                )
+            ).states
+        }
+        if playable_children
+        else {}
     )
-    playback_by_item_id = {
-        child.id: playback
-        for child, playback in zip(playable_children, playback_states, strict=True)
-    }
     return tuple(
         poster_from_summary(child, playback=playback_by_item_id.get(child.id))
         for child in children

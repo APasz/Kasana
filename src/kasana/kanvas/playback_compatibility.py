@@ -53,7 +53,8 @@ def classify_playback(
     entry: PlaybackPlanEntry,
     capabilities: BrowserPlaybackCapabilities,
     *,
-    preferred_audio_language: str | None,
+    preferred_audio_language: str | None = None,
+    selected_audio_stream_index: int | None = None,
 ) -> PlaybackCompatibilityDecision:
     """Classify a probed original without offering full video transcoding.
 
@@ -73,8 +74,12 @@ def classify_playback(
     else:
         return PlaybackCompatibilityDecision(mode=PlaybackMode.UNSUPPORTED)
 
-    audio_stream_index = _preferred_audio_stream_index(entry, preferred_audio_language)
-    if audio_stream_index is None:
+    audio_stream_index = (
+        selected_audio_stream_index
+        if selected_audio_stream_index is not None
+        else _preferred_audio_stream_index(entry, preferred_audio_language)
+    )
+    if audio_stream_index is None or audio_stream_index >= len(entry.audio_streams):
         return PlaybackCompatibilityDecision(mode=PlaybackMode.UNSUPPORTED)
     audio_codec = _codec(entry.audio_streams[audio_stream_index].codec)
     mode = (

@@ -61,6 +61,7 @@ class ProbeResult:
     audio_streams: tuple[JSONObject, ...]
     subtitle_streams: tuple[JSONObject, ...]
     attached_pictures: tuple[JSONObject, ...] = ()
+    font_attachments: tuple[JSONObject, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def _to_probe_result(document: _ProbeDocument) -> ProbeResult:
     attached_pictures: list[JSONObject] = []
     audio_streams: list[JSONObject] = []
     subtitle_streams: list[JSONObject] = []
+    font_attachments: list[JSONObject] = []
     for stream in document.streams:
         match stream.codec_type:
             case "video":
@@ -147,6 +149,10 @@ def _to_probe_result(document: _ProbeDocument) -> ProbeResult:
                 audio_streams.append(_audio_summary(stream))
             case "subtitle":
                 subtitle_streams.append(_subtitle_summary(stream))
+            case "attachment":
+                font = _font_attachment_summary(stream)
+                if font is not None:
+                    font_attachments.append(font)
             case _:
                 pass
     return ProbeResult(
@@ -156,6 +162,7 @@ def _to_probe_result(document: _ProbeDocument) -> ProbeResult:
         audio_streams=tuple[JSONObject, ...](audio_streams),
         subtitle_streams=tuple[JSONObject, ...](subtitle_streams),
         attached_pictures=tuple[JSONObject, ...](attached_pictures),
+        font_attachments=tuple[JSONObject, ...](font_attachments),
     )
 
 
@@ -191,6 +198,7 @@ def _audio_summary(stream: _ProbeStream) -> JSONObject:
             "channels": stream.channels,
             "channel_layout": stream.channel_layout,
             "title": stream.tags.get("title"),
+            "default": bool(stream.disposition.default),
         }
     )
 
@@ -205,6 +213,27 @@ def _subtitle_summary(stream: _ProbeStream) -> JSONObject:
             "title": stream.tags.get("title"),
         }
     )
+
+
+def _font_attachment_summary(stream: _ProbeStream) -> JSONObject | None:
+    """Return one safe, extractable embedded ASS font attachment."""
+
+    filename = stream.tags.get("filename")
+    if (
+        stream.index is None
+        or stream.index < 0
+        or not isinstance(filename, str)
+        or not filename
+        or Path(filename).name != filename
+    ):
+        return None
+    suffix = Path(filename).suffix.casefold()
+    font_format = {".ttf": "truetype", ".otf": "opentype", ".ttc": "collection"}.get(
+        suffix
+    )
+    if font_format is None:
+        return None
+    return {"stream_index": stream.index, "filename": filename, "format": font_format}
 
 
 def _without_none(values: dict[str, JSONValue]) -> JSONObject:

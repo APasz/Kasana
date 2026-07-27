@@ -173,6 +173,7 @@ from kasana.katalog.public import (
     OnDeckEntry,
     PaginatedResponse,
     PlaybackStateResponse,
+    PlaybackStatesRequest,
     ScanRequest,
     SelectedArtwork,
     SeriesPlaybackContext,
@@ -407,9 +408,7 @@ def _item_detail_client(
             child_requests.append(item_id)
             if item_id not in child_responses:
                 raise AssertionError(f"Unexpected child request for item {item_id}.")
-            return PaginatedResponse(
-                items=child_responses[item_id], next_cursor=None, limit=limit
-            )
+            return PaginatedResponse(items=child_responses[item_id], next_cursor=None, limit=limit)
 
         async def playback_state(
             self, user_id: int, requested_item_id: int
@@ -418,8 +417,33 @@ def _item_detail_client(
             return (
                 playback
                 if requested_item_id == item.id
-                else child_playback.get(requested_item_id) if child_playback is not None else None
+                else child_playback.get(requested_item_id)
+                if child_playback is not None
+                else None
             )
+
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert user_id == 1
+            item_ids = request.item_ids
+            states = tuple(
+                state.model_copy(update={"item_id": requested_item_id})
+                for requested_item_id in item_ids
+                if (
+                    state := (
+                        playback
+                        if requested_item_id == item.id
+                        else (
+                            child_playback.get(requested_item_id)
+                            if child_playback is not None
+                            else None
+                        )
+                    )
+                )
+                is not None
+            )
+            return SimpleNamespace(states=states)
 
     return FakeClient
 
@@ -703,9 +727,7 @@ async def test_playback_stream_response_preserves_fixed_length_when_complete() -
 
     response = dashboard.PlaybackStreamingResponse(content(), headers={"Content-Length": "5"})
 
-    await response(
-        {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
-    )
+    await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
 
     assert messages == [
         {
@@ -737,9 +759,7 @@ async def test_playback_stream_response_ends_quietly_when_client_disconnects() -
 
     response = dashboard.PlaybackStreamingResponse(content(), headers={"Content-Length": "5"})
 
-    await response(
-        {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
-    )
+    await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
 
     assert closed
 
@@ -901,9 +921,7 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
 
 async def test_item_detail_flattens_a_single_series_season(monkeypatch: MonkeyPatch) -> None:
     series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
-    season = _library_summary(
-        item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7
-    )
+    season = _library_summary(item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7)
     episodes = (
         _library_summary(item_id=9, title="Pilot", kind=LibraryItemKind.EPISODE, parent_id=8),
         _library_summary(item_id=10, title="Finale", kind=LibraryItemKind.EPISODE, parent_id=8),
@@ -923,9 +941,7 @@ async def test_item_detail_flattens_a_single_series_season(monkeypatch: MonkeyPa
 
 async def test_item_detail_marks_watched_episode_children(monkeypatch: MonkeyPatch) -> None:
     series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
-    season = _library_summary(
-        item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7
-    )
+    season = _library_summary(item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7)
     watched_episode = _library_summary(
         item_id=9, title="Pilot", kind=LibraryItemKind.EPISODE, parent_id=8
     )
@@ -1682,8 +1698,7 @@ async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode
     )
 
     source_details = [
-        (source.id, source.entry_count, source.available, item_ids)
-        for source, item_ids in sources
+        (source.id, source.entry_count, source.available, item_ids) for source, item_ids in sources
     ]
     assert source_details == [
         (
@@ -1905,12 +1920,18 @@ async def test_watch_order_service_mutation_wrappers_preserve_request_state(
 
     rows, next_cursor, revision = await service.watch_order_page(9, cursor="after-2")
     assert ([row.item_id for row in rows], next_cursor, revision) == ([episode.id], "after-3", 7)
-    assert await service.create_watch_order(
-        4, collection_revision=5, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
-    ) == 10
-    assert await service.update_watch_order(
-        9, revision=7, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
-    ) == 8
+    assert (
+        await service.create_watch_order(
+            4, collection_revision=5, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
+        )
+        == 10
+    )
+    assert (
+        await service.update_watch_order(
+            9, revision=7, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
+        )
+        == 8
+    )
     assert await service.delete_watch_order(9, revision=8) == 6
     assert await service.add_watch_order_entry(9, revision=8, item_id=43, before_entry_id=3) == 9
     assert await service.move_watch_order_entry(9, revision=9, entry_id=3, after_entry_id=4) == 10
@@ -2049,9 +2070,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
             calls.append("scan")
             return _admin_job()
 
-        async def submit_library_consistency(
-            self, request: LibraryConsistencyRequest
-        ) -> JobView:
+        async def submit_library_consistency(self, request: LibraryConsistencyRequest) -> JobView:
             calls.append("consistency")
             assert request.library_root_id == 1
             assert request.include_unavailable is True
@@ -2473,6 +2492,13 @@ async def test_item_edit_endpoints_report_data_and_validation(
             assert request.selected_artwork == (
                 SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),
             )
+            assert request.default_audio_stream_index == 1
+            assert request.force_default_audio_stream is True
+            assert request.default_subtitle_track_id == "embedded-0"
+            assert request.force_default_subtitle_track is True
+            assert request.default_subtitle_timing_offset_milliseconds == -500
+            assert request.default_subtitle_font_scale_percent == 125
+            assert request.force_default_subtitle_font_scale is True
             return LibraryItemMutationResult(item=item, audit=audit)
 
     class JsonRequest:
@@ -2504,6 +2530,13 @@ async def test_item_edit_endpoints_report_data_and_validation(
                     "selectedArtwork": [{"kind": "poster", "artworkId": 8}],
                     "kind": "movie",
                     "parentId": None,
+                    "defaultAudioStreamIndex": 1,
+                    "forceDefaultAudioStream": True,
+                    "defaultSubtitleTrackId": "embedded-0",
+                    "forceDefaultSubtitleTrack": True,
+                    "defaultSubtitleTimingOffsetMilliseconds": -500,
+                    "defaultSubtitleFontScalePercent": 125,
+                    "forceDefaultSubtitleFontScale": True,
                 }
             ),
         ),
@@ -3309,12 +3342,11 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
 
     assert owner_shortcuts == []
     assert len(owner_profile_menus) == 2
+    assert {_element_props(profile_menu)["data-name"] for profile_menu in owner_profile_menus} == {
+        "tester"
+    }
     assert {
-        _element_props(profile_menu)["data-name"] for profile_menu in owner_profile_menus
-    } == {"tester"}
-    assert {
-        _element_props(profile_menu)["data-accent-colour"]
-        for profile_menu in owner_profile_menus
+        _element_props(profile_menu)["data-accent-colour"] for profile_menu in owner_profile_menus
     } == {"#123456"}
     assert member_shortcuts == []
 
@@ -3323,9 +3355,12 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     css_path = tmp_path / "kanvas.css"
     javascript_path = tmp_path / "kanvas.js"
     administration_javascript_path = tmp_path / "kanvas-administration.js"
+    libass_path = tmp_path / "libass" / "subtitles-octopus.js"
     css_path.write_text(".k-app { color: white; }", encoding="utf-8")
     javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
     administration_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
+    libass_path.parent.mkdir()
+    libass_path.write_text("window.SubtitlesOctopus = () => {};", encoding="utf-8")
 
     initial_versions = kanvas_asset_versions(tmp_path)
     head = kanvas_head_html(initial_versions)
@@ -3333,9 +3368,9 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     assert f"/_kanvas/kanvas.css?v={initial_versions.css}" in head
     assert "/_kanvas/theme.css" in head
     assert f"/_kanvas/kanvas.js?v={initial_versions.javascript}" in head
+    assert f"/_kanvas/libass/subtitles-octopus.js?v={initial_versions.libass_javascript}" in head
     assert (
-        f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}"
-        in head
+        f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}" in head
     )
 
     css_path.write_text(".k-app { color: black; }", encoding="utf-8")
@@ -3534,6 +3569,9 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert ".k-input-reveal" not in css
     assert ".k-input:focus-visible { outline: none; }" in css
     assert ".k-select:focus-visible { outline: none; }" in css
+    assert ".k-select-wrap > .k-select" in css
+    assert ".k-profile-form [data-profile-panel][hidden] { display: none; }" in css
+    assert ".k-item-editor__playback-option" in css
     assert ".k-check input:focus-visible { outline: none; }" in css
     assert ".k-check-menu__summary" in css
     assert ".k-check-menu__option" in css
@@ -3559,6 +3597,11 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-collection-grid" in javascript
     assert "kanvas-item-picker" in javascript
     assert "kanvas-watch-order-list" in javascript
+    assert "k-item-editor__playback-option" in javascript
+    assert 'data-profile-language="audio"' in javascript
+    assert 'data-profile-language="subtitles"' in javascript
+    assert "/profiles/current/playback-languages" in javascript
+    assert "new Intl.DisplayNames" in javascript
     assert "k-watch-order-poster" in javascript
     assert "data-insert-before" in javascript
     assert "isNoopMove" in javascript

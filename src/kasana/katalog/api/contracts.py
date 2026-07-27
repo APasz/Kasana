@@ -8,7 +8,11 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
+from kasana.katalog.limits import (
+    MAX_PLAYBACK_QUEUE_SIZE,
+    MAX_PLAYBACK_STATE_BATCH_SIZE,
+    MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+)
 from kasana.shared.profile_rules import (
     PROFILE_ACCENT_COLOUR_DEFAULT,
     PROFILE_ACCENT_COLOUR_PATTERN,
@@ -95,6 +99,38 @@ class PlaybackSessionEventKind(StrEnum):
     ADVANCED = "advanced"
 
 
+class PlaybackSubtitleSource(StrEnum):
+    """The durable source category for one selectable subtitle track."""
+
+    EMBEDDED = "embedded"
+    SIDECAR = "sidecar"
+
+
+class PlaybackSubtitleFormat(StrEnum):
+    """How Kanvas can present a subtitle track without video burn-in."""
+
+    WEBVTT = "webvtt"
+    ASS = "ass"
+    UNSUPPORTED = "unsupported"
+
+
+class PlaybackSubtitleFontFormat(StrEnum):
+    """A browser-loadable font attachment used by an ASS subtitle track."""
+
+    TRUETYPE = "truetype"
+    OPENTYPE = "opentype"
+    COLLECTION = "collection"
+
+
+class PlaybackSubtitleVerticalPosition(StrEnum):
+    """Viewer override for native WebVTT cue placement."""
+
+    AUTHOR = "author"
+    TOP = "top"
+    MIDDLE = "middle"
+    BOTTOM = "bottom"
+
+
 class UserRole(StrEnum):
     OWNER = "owner"
     ADMIN = "admin"
@@ -112,6 +148,27 @@ class JobStatus(StrEnum):
 
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class PlaybackSubtitleTrack(APIModel):
+    """A browser-visible subtitle option with no filesystem location."""
+
+    id: str = Field(pattern=r"^(?:embedded|sidecar)-\d+$")
+    source: PlaybackSubtitleSource
+    format: PlaybackSubtitleFormat
+    codec: str | None = Field(default=None, max_length=100)
+    language: str | None = Field(default=None, max_length=32)
+    title: str | None = Field(default=None, max_length=1_000)
+    default: bool = False
+    forced: bool = False
+    content_url: str | None = Field(default=None, pattern=r"^/api/v1/subtitles/[A-Za-z0-9_-]+$")
+
+
+class PlaybackLanguageOptions(APIModel):
+    """Canonical language tags discovered from currently available media."""
+
+    audio: tuple[str, ...] = Field(default=(), max_length=256)
+    subtitles: tuple[str, ...] = Field(default=(), max_length=256)
 
 
 def _normalise_profile_text(value: str | None) -> str | None:
@@ -140,6 +197,9 @@ class UserSummary(APIModel):
     )
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
     preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
+    default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
+    default_subtitle_background: bool = False
+    default_subtitle_shadow: bool = False
 
 
 class UserCreate(APIModel):
@@ -154,6 +214,9 @@ class UserCreate(APIModel):
     )
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
     preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
+    default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
+    default_subtitle_background: bool = False
+    default_subtitle_shadow: bool = False
 
     @field_validator("username", "display_name")
     @classmethod
@@ -171,11 +234,27 @@ class UserUpdate(APIModel):
     accent_colour: str | None = Field(default=None, pattern=PROFILE_ACCENT_COLOUR_PATTERN)
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
     preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
+    default_subtitle_font_scale_percent: int | None = Field(
+        default=None, ge=75, le=200, multiple_of=25
+    )
+    default_subtitle_background: bool | None = None
+    default_subtitle_shadow: bool | None = None
 
     @field_validator("username", "display_name")
     @classmethod
     def normalise_profile_text(cls, value: str | None) -> str | None:
         return _normalise_profile_text(value)
+
+    @model_validator(mode="after")
+    def require_concrete_subtitle_defaults(self) -> Self:
+        for field in (
+            "default_subtitle_font_scale_percent",
+            "default_subtitle_background",
+            "default_subtitle_shadow",
+        ):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null.")
+        return self
 
 
 class UserAuthentication(APIModel):
@@ -246,6 +325,22 @@ class ItemCollectionReference(APIModel):
     relationship: CollectionRelationship | None = None
 
 
+class LibraryItemPlaybackDefaults(APIModel):
+    """Optional shared playback choices for one library item."""
+
+    audio_stream_index: int | None = Field(default=None, ge=0)
+    force_audio_stream: bool = False
+    subtitle_track_id: str | None = Field(default=None, pattern=r"^(?:embedded|sidecar)-\d+$")
+    force_subtitle_track: bool = False
+    subtitle_timing_offset_milliseconds: int | None = Field(
+        default=None,
+        ge=-MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+        le=MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    )
+    subtitle_font_scale_percent: int | None = Field(default=None, ge=75, le=200, multiple_of=25)
+    force_subtitle_font_scale: bool = False
+
+
 class LibraryItemDetailBase(LibraryItemSummary):
     sort_title: str = Field(min_length=1, max_length=1_000)
     overview: str | None = Field(default=None, max_length=20_000)
@@ -259,6 +354,11 @@ class LibraryItemDetailBase(LibraryItemSummary):
     selected_artwork: tuple[SelectedArtwork, ...] = ()
     playback_url: str = Field(pattern=r"^/api/v1/playback/items/\d+$")
     collections: tuple[ItemCollectionReference, ...] = Field(default=(), max_length=100)
+    playback_defaults: LibraryItemPlaybackDefaults = Field(
+        default_factory=LibraryItemPlaybackDefaults
+    )
+    playback_audio_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=64)
+    playback_subtitle_tracks: tuple[PlaybackSubtitleTrack, ...] = Field(default=(), max_length=256)
 
 
 class LibraryItemUpdate(APIModel):
@@ -277,6 +377,21 @@ class LibraryItemUpdate(APIModel):
     selected_artwork: tuple[SelectedArtwork, ...] | None = Field(default=None)
     kind: LibraryItemKind | None = None
     parent_id: int | None = Field(default=None, gt=0)
+    default_audio_stream_index: int | None = Field(default=None, ge=0)
+    force_default_audio_stream: bool | None = None
+    default_subtitle_track_id: str | None = Field(
+        default=None, pattern=r"^(?:embedded|sidecar)-\d+$"
+    )
+    force_default_subtitle_track: bool | None = None
+    default_subtitle_timing_offset_milliseconds: int | None = Field(
+        default=None,
+        ge=-MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+        le=MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    )
+    default_subtitle_font_scale_percent: int | None = Field(
+        default=None, ge=75, le=200, multiple_of=25
+    )
+    force_default_subtitle_font_scale: bool | None = None
 
     @field_validator("actor", "title", "sort_title")
     @classmethod
@@ -389,6 +504,9 @@ class MediaStreamSummary(APIModel):
     width: int | None = Field(default=None, ge=0)
     height: int | None = Field(default=None, ge=0)
     channels: int | None = Field(default=None, ge=0)
+    title: str | None = Field(default=None, max_length=1_000)
+    default: bool = False
+    forced: bool = False
 
 
 class MediaTechnicalSummary(APIModel):
@@ -635,6 +753,28 @@ class PlaybackStateResponse(APIModel):
     last_played_at: datetime | None
 
 
+class PlaybackStatesRequest(APIModel):
+    """One bounded set of known item IDs whose state is needed by a grid."""
+
+    item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1, max_length=MAX_PLAYBACK_STATE_BATCH_SIZE
+    )
+
+    @model_validator(mode="after")
+    def require_unique_item_ids(self) -> Self:
+        if len(set(self.item_ids)) != len(self.item_ids):
+            raise ValueError("A playback-state batch cannot contain duplicate item IDs.")
+        return self
+
+
+class PlaybackStatesResponse(APIModel):
+    """Existing saved states from one bounded playback-state request."""
+
+    states: tuple[PlaybackStateResponse, ...] = Field(
+        default=(), max_length=MAX_PLAYBACK_STATE_BATCH_SIZE
+    )
+
+
 class ContinueWatchingEntry(APIModel):
     item: LibraryItemSummary
     playback: PlaybackStateResponse
@@ -683,6 +823,8 @@ class LibraryRootCreate(APIModel):
     path: str = Field(min_length=1, max_length=10_000)
     expected_kind: LibraryRootKind
     default_tags: tuple[str, ...] = Field(default=(), max_length=50)
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
     enabled: bool = True
 
 
@@ -691,6 +833,8 @@ class LibraryRootUpdate(APIModel):
     path: str | None = Field(default=None, min_length=1, max_length=10_000)
     expected_kind: LibraryRootKind | None = None
     default_tags: tuple[str, ...] | None = Field(default=None, max_length=50)
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
     enabled: bool | None = None
 
 
@@ -700,6 +844,8 @@ class LibraryRootSummary(APIModel):
     path: str = Field(min_length=1, max_length=10_000)
     expected_kind: LibraryRootKind
     default_tags: tuple[str, ...] = ()
+    preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
+    preferred_subtitle_language: str | None = Field(default=None, min_length=2, max_length=32)
     enabled: bool
     available: bool
     item_count: int = Field(ge=0)
@@ -846,6 +992,15 @@ class PlaybackNextEntry(APIModel):
     display_title: str = Field(min_length=1, max_length=1_000)
 
 
+class PlaybackSubtitleFontAttachment(APIModel):
+    """An opaque, session-owned embedded font available to local libass."""
+
+    id: str = Field(pattern=r"^embedded-font-\d+$")
+    stream_index: int = Field(ge=0)
+    filename: str = Field(min_length=1, max_length=255)
+    format: PlaybackSubtitleFontFormat
+
+
 class PlaybackPlanEntry(APIModel):
     position: int = Field(ge=0)
     item_id: int = Field(gt=0)
@@ -863,6 +1018,25 @@ class PlaybackPlanEntry(APIModel):
     video_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=32)
     audio_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=64)
     subtitle_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=128)
+    subtitle_tracks: tuple[PlaybackSubtitleTrack, ...] = Field(default=(), max_length=256)
+    subtitle_font_attachments: tuple[PlaybackSubtitleFontAttachment, ...] = Field(
+        default=(), max_length=64
+    )
+    selected_audio_stream_index: int = Field(default=0, ge=0)
+    selected_subtitle_track_id: str | None = Field(
+        default=None, pattern=r"^(?:embedded|sidecar)-\d+$"
+    )
+    subtitle_timing_offset_milliseconds: int = Field(
+        default=0,
+        ge=-MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+        le=MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    )
+    subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
+    subtitle_background: bool = False
+    subtitle_shadow: bool = False
+    subtitle_vertical_position: PlaybackSubtitleVerticalPosition = (
+        PlaybackSubtitleVerticalPosition.AUTHOR
+    )
     next_entry: PlaybackNextEntry | None = None
 
 
@@ -880,9 +1054,7 @@ class PlaybackSessionResponse(APIModel):
     context: PlaybackContext
     current_entry_position: int = Field(ge=0)
     current_item: PlaybackPlanEntry | None = None
-    entries: tuple[PlaybackPlanEntry, ...] = Field(
-        min_length=1, max_length=MAX_PLAYBACK_QUEUE_SIZE
-    )
+    entries: tuple[PlaybackPlanEntry, ...] = Field(min_length=1, max_length=MAX_PLAYBACK_QUEUE_SIZE)
     created_at: datetime
     expires_at: datetime
     closed_at: datetime | None
@@ -905,6 +1077,25 @@ class PlaybackSessionTransitionRequest(APIModel):
     """Identify the queue entry a player has finished before requesting a transition."""
 
     expected_entry_position: int = Field(ge=0)
+
+
+class PlaybackSessionTrackSelection(APIModel):
+    """Persist one current-entry audio/subtitle selection inside a session only."""
+
+    expected_entry_position: int = Field(ge=0)
+    audio_stream_index: int = Field(ge=0)
+    subtitle_track_id: str | None = Field(default=None, pattern=r"^(?:embedded|sidecar)-\d+$")
+    subtitle_timing_offset_milliseconds: int = Field(
+        default=0,
+        ge=-MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+        le=MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    )
+    subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
+    subtitle_background: bool = False
+    subtitle_shadow: bool = False
+    subtitle_vertical_position: PlaybackSubtitleVerticalPosition = (
+        PlaybackSubtitleVerticalPosition.AUTHOR
+    )
 
 
 class PlaybackProgressResult(APIModel):

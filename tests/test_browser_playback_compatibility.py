@@ -16,7 +16,13 @@ from nicegui.page import page
 from starlette.requests import Request
 
 from kasana.kanvas import dashboard
-from kasana.kanvas.ffmpeg import FFmpegError, FragmentedMp4Stream, start_fragmented_mp4
+from kasana.kanvas.ffmpeg import (
+    FFmpegError,
+    FragmentedMp4Stream,
+    start_font_attachment_extract,
+    start_fragmented_mp4,
+    start_subtitle_extract,
+)
 from kasana.kanvas.playback_compatibility import (
     BrowserMediaCapability,
     BrowserPlaybackCapabilities,
@@ -24,6 +30,7 @@ from kasana.kanvas.playback_compatibility import (
     classify_playback,
 )
 from kasana.kanvas.routes.browser_playback import render_browser_playback_card
+from kasana.kanvas.subtitles import SubtitleConversionError, as_webvtt
 from kasana.katalog.api.service import _stream_summary  # pyright: ignore[reportPrivateUsage]
 from kasana.katalog.public import (
     PlaybackContext,
@@ -68,6 +75,45 @@ def test_scanner_codec_metadata_is_exposed_to_browser_playback() -> None:
 
     assert stream.codec == "h264"
     assert stream.language == "eng"
+
+
+def test_srt_is_converted_to_webvtt_and_generated_stream_offsets_shift_cues() -> None:
+    converted = as_webvtt(
+        b"1\n00:00:05,000 --> 00:00:07,000\nHello\n\n2\n00:00:10,000 --> 00:00:12,000\nWorld\n",
+        source_is_webvtt=False,
+        offset_seconds=6.0,
+    ).decode()
+
+    assert converted.startswith("WEBVTT\n")
+    assert "00:00:00.000 --> 00:00:01.000\nHello" in converted
+    assert "00:00:04.000 --> 00:00:06.000\nWorld" in converted
+
+
+def test_webvtt_timing_adjustment_preserves_cue_placement() -> None:
+    converted = as_webvtt(
+        b"WEBVTT\n\n00:00:05.000 --> 00:00:07.000 line:10% position:25%\nHello\n",
+        source_is_webvtt=True,
+        offset_seconds=6.0,
+        timing_offset_seconds=0.5,
+    ).decode()
+
+    assert "00:00:00.000 --> 00:00:01.500 line:10% position:25%\nHello" in converted
+
+
+def test_webvtt_conversion_rejects_malformed_or_non_utf8_text() -> None:
+    assert as_webvtt(
+        b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n",
+        source_is_webvtt=True,
+        offset_seconds=0,
+    ).startswith(b"WEBVTT\n")
+    with pytest.raises(SubtitleConversionError):
+        as_webvtt(b"not VTT", source_is_webvtt=True, offset_seconds=0)
+    with pytest.raises(SubtitleConversionError):
+        as_webvtt(b"\xff", source_is_webvtt=False, offset_seconds=0)
+    with pytest.raises(SubtitleConversionError):
+        as_webvtt(b"1\nNo timing\n", source_is_webvtt=False, offset_seconds=0)
+    with pytest.raises(SubtitleConversionError):
+        as_webvtt(b"WEBVTT\n", source_is_webvtt=True, offset_seconds=-1)
 
 
 def test_incompatible_audio_uses_aac_conversion_without_video_transcoding() -> None:
@@ -188,6 +234,41 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
     assert ["-ss", "42.500", "-i"] == launched[launched.index("-ss") : launched.index("-i") + 1]
     assert "pipe:1" in launched
 
+    subtitle_command_start = len(launched)
+    subtitle = await start_subtitle_extract(
+        "ffmpeg",
+        "http://katalog.test/api/v1/media/token",
+        subtitle_stream_index=1,
+        ass=True,
+    )
+    assert isinstance(subtitle, FragmentedMp4Stream)
+    subtitle_command = launched[subtitle_command_start:]
+    assert ["-map", "0:s:1"] == subtitle_command[
+        subtitle_command.index("-map") : subtitle_command.index("-map") + 2
+    ]
+    assert ["-c:s", "ass", "-f", "ass"] == subtitle_command[
+        subtitle_command.index("-c:s") : subtitle_command.index("-c:s") + 4
+    ]
+    with pytest.raises(ValueError, match="cannot be negative"):
+        await start_subtitle_extract(
+            "ffmpeg", "http://katalog.test/media", subtitle_stream_index=-1, ass=False
+        )
+
+    font_command_start = len(launched)
+    font = await start_font_attachment_extract(
+        "ffmpeg", "http://katalog.test/api/v1/media/token", stream_index=4
+    )
+    assert isinstance(font, FragmentedMp4Stream)
+    font_command = launched[font_command_start:]
+    assert ["-dump_attachment:4", "pipe:1"] == font_command[
+        font_command.index("-dump_attachment:4") : font_command.index("-dump_attachment:4") + 2
+    ]
+    assert ["-frames:v", "0"] == font_command[
+        font_command.index("-frames:v") : font_command.index("-frames:v") + 2
+    ]
+    with pytest.raises(ValueError, match="cannot be negative"):
+        await start_font_attachment_extract("ffmpeg", "http://katalog.test/media", stream_index=-1)
+
 
 def test_playback_delivery_query_validation_keeps_direct_ranges_and_copy_boundary() -> None:
     request = Request(
@@ -265,6 +346,24 @@ async def test_compatibility_endpoint_returns_remux_or_visible_kestrel_fallback(
     }
 
 
+def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None:
+    entry = _entry(container="isobmff")
+    assert dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        Request({"type": "http", "query_string": b"offsetSeconds=42.5", "headers": []}),
+        entry.duration_seconds,
+    ) == 42.5
+    assert dashboard._optional_track_id("embedded-3") == "embedded-3"  # pyright: ignore[reportPrivateUsage]
+    assert dashboard._optional_track_id(None) is None  # pyright: ignore[reportPrivateUsage]
+    assert dashboard._is_webvtt_track("webvtt")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(HTTPException):
+        dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request({"type": "http", "query_string": b"offsetSeconds=nan", "headers": []}),
+            entry.duration_seconds,
+        )
+    with pytest.raises(ValueError):
+        dashboard._optional_track_id("not-a-track")  # pyright: ignore[reportPrivateUsage]
+
+
 def test_next_episode_navigates_to_its_item_page_and_pagehide_flushes_progress() -> None:
     script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
         encoding="utf-8"
@@ -276,6 +375,53 @@ def test_next_episode_navigates_to_its_item_page_and_pagehide_flushes_progress()
     assert "body: JSON.stringify({entryPosition})" in script
     assert "entryPosition})," in script
     assert "keepalive: true" in script
+
+
+def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time() -> None:
+    repository_root = Path(__file__).parents[1]
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
+        encoding="utf-8"
+    )
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    head = (repository_root / "src/kasana/kanvas/components/shell.py").read_text(encoding="utf-8")
+    libass = repository_root / "src/kasana/kanvas/static/libass/subtitles-octopus.js"
+
+    assert '"audio", "Audio tracks"' in player
+    assert '"subtitles", "Subtitle tracks"' in player
+    assert "data-player-subtitle-unsupported" in player
+    assert "data-player-subtitle-timing-step" in player
+    assert "data-player-subtitle-font-scale-step" in player
+    assert "data-player-subtitle-position" in player
+    assert "data-player-subtitle-appearance" in player
+    assert "data-player-ass-font" in player
+    assert "SubtitlesOctopus" in script
+    assert "fonts: assFontUrls()" in script
+    assert "timeOffset: streamStartSeconds - subtitleTimingOffsetMilliseconds / 1000" in script
+    assert "subtitleOffsetMilliseconds" in script
+    assert "subtitleFontScalePercent" in script
+    assert "subtitleVerticalPosition" in script
+    assert "CSS.supports('selector(video::cue)')" in script
+    assert "subtitleAppearance.hidden = !appearanceAvailable" in script
+    assert "pendingDirectSeek" in script
+    assert "persistTrackSelection" in script
+    assert "await selectDelivery(autoplay, position)" in script
+    assert "Open in Kestrel for this subtitle" in script
+    assert "libass_script" in head
+    assert libass.is_file()
+    assert "cdn" not in head.casefold()
+
+
+def test_webvtt_appearance_explicitly_overrides_native_caption_defaults() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "background-color: transparent !important" in stylesheet
+    assert "text-shadow: none !important" in stylesheet
+    assert 'data-subtitle-font-scale="75"' in stylesheet
+    assert 'data-subtitle-font-scale="200"' in stylesheet
 
 
 @pytest.mark.asyncio

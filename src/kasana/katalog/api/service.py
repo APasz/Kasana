@@ -50,6 +50,7 @@ from kasana.katalog.api.contracts import (
     LibraryItemEditAudit,
     LibraryItemKind,
     LibraryItemMutationResult,
+    LibraryItemPlaybackDefaults,
     LibraryItemSummary,
     LibraryItemUpdate,
     LibraryRootCreate,
@@ -66,6 +67,7 @@ from kasana.katalog.api.contracts import (
     PlaybackCompletionResult,
     PlaybackContext,
     PlaybackContextKind,
+    PlaybackLanguageOptions,
     PlaybackNextEntry,
     PlaybackPlanContext,
     PlaybackPlanEntry,
@@ -75,7 +77,16 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionEvent,
     PlaybackSessionEventKind,
     PlaybackSessionResponse,
+    PlaybackSessionTrackSelection,
     PlaybackStateResponse,
+    PlaybackStatesRequest,
+    PlaybackStatesResponse,
+    PlaybackSubtitleFontAttachment,
+    PlaybackSubtitleFontFormat,
+    PlaybackSubtitleFormat,
+    PlaybackSubtitleSource,
+    PlaybackSubtitleTrack,
+    PlaybackSubtitleVerticalPosition,
     SeasonItemDetail,
     SelectedArtwork,
     SeriesItemDetail,
@@ -135,6 +146,7 @@ from kasana.katalog.models import (
     PlaybackSession,
     PlaybackSessionEntry,
     PlaybackState,
+    SubtitleVerticalPosition,
     User,
     Zaisan,
     ZaisanKind,
@@ -373,6 +385,9 @@ class KatalogQueryService:
                 accent_colour=request.accent_colour,
                 preferred_audio_language=request.preferred_audio_language,
                 preferred_subtitle_language=request.preferred_subtitle_language,
+                default_subtitle_font_scale_percent=request.default_subtitle_font_scale_percent,
+                default_subtitle_background=request.default_subtitle_background,
+                default_subtitle_shadow=request.default_subtitle_shadow,
             )
             self._user_configurations.save(user.id, configuration)
             return _profile_summary(user.id, configuration)
@@ -417,6 +432,20 @@ class KatalogQueryService:
             if "preferred_subtitle_language" in values:
                 configuration = configuration.model_copy(
                     update={"preferred_subtitle_language": request.preferred_subtitle_language}
+                )
+            if "default_subtitle_font_scale_percent" in values:
+                configuration = configuration.model_copy(
+                    update={
+                        "default_subtitle_font_scale_percent": request.default_subtitle_font_scale_percent
+                    }
+                )
+            if "default_subtitle_background" in values:
+                configuration = configuration.model_copy(
+                    update={"default_subtitle_background": request.default_subtitle_background}
+                )
+            if "default_subtitle_shadow" in values:
+                configuration = configuration.model_copy(
+                    update={"default_subtitle_shadow": request.default_subtitle_shadow}
                 )
             self._user_configurations.save(user.id, configuration)
             session.flush()
@@ -471,6 +500,8 @@ class KatalogQueryService:
                 path=str(path),
                 expected_media_kind=ZaisanKind(request.expected_kind.value),
                 default_tags=list(request.default_tags),
+                preferred_audio_language=request.preferred_audio_language,
+                preferred_subtitle_language=request.preferred_subtitle_language,
                 enabled=request.enabled,
                 display_name=request.display_name.strip() if request.display_name else None,
             )
@@ -496,6 +527,10 @@ class KatalogQueryService:
                 root.expected_media_kind = ZaisanKind(request.expected_kind.value)
             if request.default_tags is not None:
                 root.default_tags = list(request.default_tags)
+            if "preferred_audio_language" in request.model_fields_set:
+                root.preferred_audio_language = request.preferred_audio_language
+            if "preferred_subtitle_language" in request.model_fields_set:
+                root.preferred_subtitle_language = request.preferred_subtitle_language
             if request.enabled is not None:
                 root.enabled = request.enabled
             if request.display_name is not None:
@@ -537,7 +572,9 @@ class KatalogQueryService:
             sort_key = func.natural_sort_key(Zaisan.sort_title)
             if cursor_value is not None:
                 natural_key = _cursor_string(
-                    cursor_value, "sort_key", default=natural_sort_key(_cursor_string(cursor_value, "sort_title"))
+                    cursor_value,
+                    "sort_key",
+                    default=natural_sort_key(_cursor_string(cursor_value, "sort_title")),
                 )
                 sort_title: str = _cursor_string(cursor_value, "sort_title")
                 item_id: int = _cursor_int(cursor_value, "id")
@@ -583,6 +620,43 @@ class KatalogQueryService:
                 if tag
             }
             return tuple(sorted(values))
+
+        return self._database.run_transaction(load)
+
+    def list_playback_languages(self) -> PlaybackLanguageOptions:
+        """Derive selectable profile languages from the currently playable catalogue."""
+
+        def load(session: Session) -> PlaybackLanguageOptions:
+            audio_languages: set[str] = set()
+            subtitle_languages: set[str] = set()
+            rows = session.execute(
+                select(
+                    MediaFile.audio_streams,
+                    MediaFile.subtitle_streams,
+                    MediaFile.subtitle_sidecar_paths,
+                ).where(MediaFile.availability == AvailabilityState.AVAILABLE)
+            )
+            for audio_streams, subtitle_streams, sidecar_paths in rows:
+                audio_languages.update(
+                    language
+                    for stream in audio_streams
+                    if (language := _language_tag(_stream_language(stream))) is not None
+                )
+                subtitle_languages.update(
+                    language
+                    for stream in subtitle_streams
+                    if (language := _language_tag(_stream_language(stream))) is not None
+                )
+                subtitle_languages.update(
+                    language
+                    for path in sidecar_paths
+                    if (language := _language_tag(_sidecar_subtitle_language(Path(path))))
+                    is not None
+                )
+            return PlaybackLanguageOptions(
+                audio=tuple(sorted(audio_languages)),
+                subtitles=tuple(sorted(subtitle_languages)),
+            )
 
         return self._database.run_transaction(load)
 
@@ -667,6 +741,60 @@ class KatalogQueryService:
                 )
             _set_item_value(changes, item, "item_kind", target_kind, fields, field_name="kind")
             _set_item_value(changes, item, "parent_id", target_parent_id, fields)
+            _set_item_value(
+                changes,
+                item,
+                "default_audio_stream_index",
+                request.default_audio_stream_index,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "force_default_audio_stream",
+                request.force_default_audio_stream,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "default_subtitle_track_id",
+                request.default_subtitle_track_id,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "force_default_subtitle_track",
+                request.force_default_subtitle_track,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "default_subtitle_timing_offset_milliseconds",
+                request.default_subtitle_timing_offset_milliseconds,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "default_subtitle_font_scale_percent",
+                request.default_subtitle_font_scale_percent,
+                fields,
+            )
+            _set_item_value(
+                changes,
+                item,
+                "force_default_subtitle_font_scale",
+                request.force_default_subtitle_font_scale,
+                fields,
+            )
+            if {
+                "default_audio_stream_index",
+                "default_subtitle_track_id",
+            } & fields:
+                _validate_item_playback_defaults(session, item)
             if not changes:
                 raise CatalogueValidationError("This edit does not change the library item.")
             session.flush()
@@ -1436,7 +1564,9 @@ class KatalogQueryService:
             )
             duplicate_ids = existing_ids.intersection(item.id for item in items)
             if duplicate_ids:
-                raise CatalogueValidationError("A batch contains an item already in this watch order.")
+                raise CatalogueValidationError(
+                    "A batch contains an item already in this watch order."
+                )
             position = _insertion_position(
                 session,
                 watch_order.id,
@@ -1863,6 +1993,31 @@ class KatalogQueryService:
 
         return self._database.run_transaction(load)
 
+    def playback_states(
+        self, user_id: int, request: PlaybackStatesRequest
+    ) -> PlaybackStatesResponse:
+        """Load a capped grid's saved states in one query instead of one call per item."""
+
+        def load(session: Session) -> PlaybackStatesResponse:
+            self._configured_user(session, user_id)
+            item_ids = request.item_ids
+            existing_ids = set(session.scalars(select(Zaisan.id).where(Zaisan.id.in_(item_ids))))
+            if existing_ids != set(item_ids):
+                raise CatalogueNotFoundError("One or more library items do not exist.")
+            states = tuple(
+                session.scalars(
+                    select(PlaybackState)
+                    .where(
+                        PlaybackState.user_id == user_id,
+                        PlaybackState.library_item_id.in_(item_ids),
+                    )
+                    .order_by(PlaybackState.library_item_id)
+                )
+            )
+            return PlaybackStatesResponse(states=tuple(_playback(state) for state in states))
+
+        return self._database.run_transaction(load)
+
     def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
             self._configured_user(session, user_id)
@@ -1911,9 +2066,12 @@ class KatalogQueryService:
 
         def create(session: Session) -> PlaybackPlanLaunch:
             user = self._configured_user(session, request.user_id)
-            if self._profile_configuration(user).state is UserConfigurationState.DISABLED:
+            configuration = self._profile_configuration(user)
+            if configuration.state is UserConfigurationState.DISABLED:
                 raise CatalogueValidationError("Disabled users cannot start playback sessions.")
-            planned_entries, context, skipped_unavailable_titles = self._plan_entries(session, request)
+            planned_entries, context, skipped_unavailable_titles = self._plan_entries(
+                session, request
+            )
             now: datetime = datetime.now(UTC)
             session_id: str = secrets.token_urlsafe(32)
             playback_session: PlaybackSession = ModelPlaybackSession(
@@ -1931,6 +2089,8 @@ class KatalogQueryService:
             session.add(playback_session)
             session.flush()
             for position, planned in enumerate[_PlannedPlaybackEntry](planned_entries):
+                root: Kura = _require(session, Kura, planned.item.library_root_id, "Library root")
+                subtitle_tracks = _subtitle_tracks(planned.media_file)
                 session.add(
                     PlaybackSessionEntry(
                         playback_session_id=playback_session.id,
@@ -1938,6 +2098,29 @@ class KatalogQueryService:
                         library_item_id=planned.item.id,
                         media_file_id=planned.media_file.id,
                         source_watch_order_position=planned.source_watch_order_position,
+                        selected_audio_stream_index=_selected_audio_stream_index(
+                            planned.item,
+                            planned.media_file,
+                            profile_language=configuration.preferred_audio_language,
+                            root_language=root.preferred_audio_language,
+                        ),
+                        selected_subtitle_track_id=_selected_subtitle_track_id(
+                            planned.item,
+                            subtitle_tracks,
+                            profile_language=configuration.preferred_subtitle_language,
+                            root_language=root.preferred_subtitle_language,
+                        ),
+                        subtitle_timing_offset_milliseconds=(
+                            planned.item.default_subtitle_timing_offset_milliseconds
+                            if planned.item.default_subtitle_timing_offset_milliseconds is not None
+                            else 0
+                        ),
+                        subtitle_font_scale_percent=_selected_subtitle_font_scale_percent(
+                            planned.item,
+                            configuration.default_subtitle_font_scale_percent,
+                        ),
+                        subtitle_background=configuration.default_subtitle_background,
+                        subtitle_shadow=configuration.default_subtitle_shadow,
                     )
                 )
             launch_token: str = secrets.token_urlsafe(32)
@@ -2034,7 +2217,9 @@ class KatalogQueryService:
                         session=self._playback_session_response(session, playback_session, now)
                     )
                 if update.expected_entry_position > entry.position:
-                    raise CatalogueValidationError("Playback session entry does not match the queue.")
+                    raise CatalogueValidationError(
+                        "Playback session entry does not match the queue."
+                    )
             media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
             existing_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, entry.library_item_id
@@ -2076,6 +2261,45 @@ class KatalogQueryService:
             )
 
         return self._database.run_transaction(record)
+
+    def update_session_track_selection(
+        self, session_id: str, selection: PlaybackSessionTrackSelection
+    ) -> PlaybackSessionResponse:
+        """Keep a browser-selected track on its session entry, never on the series."""
+
+        def update(session: Session) -> PlaybackSessionResponse:
+            now = datetime.now(UTC)
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, session_id, "Playback session"
+            )
+            _require_active_session(playback_session, now)
+            entry = _current_session_entry(session, playback_session)
+            if selection.expected_entry_position != entry.position:
+                raise CatalogueValidationError("Playback session entry does not match the queue.")
+            media_file: MediaFile = _require(session, MediaFile, entry.media_file_id, "Media file")
+            if selection.audio_stream_index >= len(media_file.audio_streams):
+                raise CatalogueValidationError("The selected audio stream is unavailable.")
+            subtitle_track_ids = {track.id for track in _subtitle_tracks(media_file)}
+            if (
+                selection.subtitle_track_id is not None
+                and selection.subtitle_track_id not in subtitle_track_ids
+            ):
+                raise CatalogueValidationError("The selected subtitle track is unavailable.")
+            entry.selected_audio_stream_index = selection.audio_stream_index
+            entry.selected_subtitle_track_id = selection.subtitle_track_id
+            entry.subtitle_timing_offset_milliseconds = (
+                selection.subtitle_timing_offset_milliseconds
+            )
+            entry.subtitle_font_scale_percent = selection.subtitle_font_scale_percent
+            entry.subtitle_background = selection.subtitle_background
+            entry.subtitle_shadow = selection.subtitle_shadow
+            entry.subtitle_vertical_position = SubtitleVerticalPosition(
+                selection.subtitle_vertical_position
+            )
+            session.flush()
+            return self._playback_session_response(session, playback_session, now)
+
+        return self._database.run_transaction(update)
 
     def advance_playback_session(self, session_id: str) -> PlaybackSessionResponse:
         def advance(session: Session) -> PlaybackSessionResponse:
@@ -2261,6 +2485,54 @@ class KatalogQueryService:
 
         return self._database.run_transaction(resolve)
 
+    def resolve_subtitle_access_token(self, access_token: str) -> MediaTransferFile:
+        """Resolve one sidecar capability without exposing its filesystem path."""
+
+        def resolve(session: Session) -> MediaTransferFile:
+            now = datetime.now(UTC)
+            token: MediaAccessToken | None = session.scalar(
+                select(MediaAccessToken).where(
+                    MediaAccessToken.token_hash == _token_hash(access_token)
+                )
+            )
+            if (
+                token is None
+                or token.operation is not MediaAccessOperation.SUBTITLE
+                or token.subtitle_sidecar_path is None
+                or _is_expired(token.expires_at, now)
+            ):
+                raise CatalogueNotFoundError("Subtitle access token is unavailable.")
+            playback_session: PlaybackSession = _require(
+                session, ModelPlaybackSession, token.playback_session_id, "Playback session"
+            )
+            try:
+                _require_active_session(playback_session, now)
+            except CatalogueNotFoundError as error:
+                raise CatalogueNotFoundError("Subtitle access token is unavailable.") from error
+            media_file: MediaFile = _require(session, MediaFile, token.media_file_id, "Media file")
+            _require_available_media(
+                _require(session, Zaisan, media_file.library_item_id, "Library item"), media_file
+            )
+            if token.subtitle_sidecar_path not in media_file.subtitle_sidecar_paths:
+                raise CatalogueNotFoundError("Subtitle access token is unavailable.")
+            path = Path(token.subtitle_sidecar_path)
+            try:
+                stat = path.stat()
+            except OSError as error:
+                raise CatalogueNotFoundError("Subtitle access token is unavailable.") from error
+            if not path.is_file():
+                raise CatalogueNotFoundError("Subtitle access token is unavailable.")
+            return MediaTransferFile(
+                path=path,
+                size_bytes=stat.st_size,
+                content_type=mimetypes.guess_type(path.name)[0] or "text/plain",
+                etag=_etag(f"subtitle:{media_file.id}:{stat.st_size}:{stat.st_mtime_ns}"),
+                download_name="subtitle" + path.suffix.casefold(),
+                last_modified=datetime.fromtimestamp(stat.st_mtime, UTC),
+            )
+
+        return self._database.run_transaction(resolve)
+
     def _plan_entries(
         self, session: Session, request: PlaybackPlanRequest
     ) -> tuple[tuple[_PlannedPlaybackEntry, ...], PlaybackContext, tuple[str, ...]]:
@@ -2351,15 +2623,19 @@ class KatalogQueryService:
             if start_index < 0:
                 raise CatalogueValidationError("The requested item is not in the watch order.")
         elif context.resume:
-            states = {
-                state.library_item_id: state
-                for state in session.scalars(
-                    select(PlaybackState).where(
-                        PlaybackState.user_id == user_id,
-                        PlaybackState.library_item_id.in_(tuple(item.id for _, item in rows)),
+            states = (
+                {
+                    state.library_item_id: state
+                    for state in session.scalars(
+                        select(PlaybackState).where(
+                            PlaybackState.user_id == user_id,
+                            PlaybackState.library_item_id.in_(tuple(item.id for _, item in rows)),
+                        )
                     )
-                )
-            } if rows else {}
+                }
+                if rows
+                else {}
+            )
             start_index = next(
                 (
                     index
@@ -2443,6 +2719,17 @@ class KatalogQueryService:
             download_token = self._issue_media_token(
                 session, playback_session, media_file, MediaAccessOperation.DOWNLOAD, now
             )
+            sidecar_urls: dict[str, str] = {}
+            for sidecar_index, sidecar_path in enumerate(media_file.subtitle_sidecar_paths):
+                subtitle_token = self._issue_media_token(
+                    session,
+                    playback_session,
+                    media_file,
+                    MediaAccessOperation.SUBTITLE,
+                    now,
+                    subtitle_sidecar_path=sidecar_path,
+                )
+                sidecar_urls[f"sidecar-{sidecar_index}"] = f"/api/v1/subtitles/{subtitle_token}"
             next_entry = entries[index + 1] if index + 1 < len(entries) else None
             next_item = items.get(next_entry.library_item_id) if next_entry is not None else None
             saved_state = states.get(item.id)
@@ -2454,6 +2741,16 @@ class KatalogQueryService:
                     saved_position=saved_state.position_seconds if saved_state is not None else 0.0,
                     stream_token=stream_token,
                     download_token=download_token,
+                    sidecar_urls=sidecar_urls,
+                    selected_audio_stream_index=entry.selected_audio_stream_index,
+                    selected_subtitle_track_id=entry.selected_subtitle_track_id,
+                    subtitle_timing_offset_milliseconds=entry.subtitle_timing_offset_milliseconds,
+                    subtitle_font_scale_percent=entry.subtitle_font_scale_percent,
+                    subtitle_background=entry.subtitle_background,
+                    subtitle_shadow=entry.subtitle_shadow,
+                    subtitle_vertical_position=PlaybackSubtitleVerticalPosition(
+                        entry.subtitle_vertical_position.value
+                    ),
                     next_entry=(
                         PlaybackNextEntry(
                             position=next_entry.position,
@@ -2509,6 +2806,8 @@ class KatalogQueryService:
         media_file: MediaFile,
         operation: MediaAccessOperation,
         now: datetime,
+        *,
+        subtitle_sidecar_path: str | None = None,
     ) -> str:
         token = secrets.token_urlsafe(32)
         session.add(
@@ -2517,6 +2816,7 @@ class KatalogQueryService:
                 playback_session_id=playback_session.id,
                 media_file_id=media_file.id,
                 operation=operation,
+                subtitle_sidecar_path=subtitle_sidecar_path,
                 expires_at=now + self._media_access_token_ttl,
             )
         )
@@ -2540,6 +2840,9 @@ def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSumm
         accent_colour=configuration.accent_colour,
         preferred_audio_language=configuration.preferred_audio_language,
         preferred_subtitle_language=configuration.preferred_subtitle_language,
+        default_subtitle_font_scale_percent=configuration.default_subtitle_font_scale_percent,
+        default_subtitle_background=configuration.default_subtitle_background,
+        default_subtitle_shadow=configuration.default_subtitle_shadow,
     )
 
 
@@ -2743,6 +3046,14 @@ def _playback_plan_entry(
     saved_position: float,
     stream_token: str,
     download_token: str,
+    sidecar_urls: Mapping[str, str],
+    selected_audio_stream_index: int,
+    selected_subtitle_track_id: str | None,
+    subtitle_timing_offset_milliseconds: int,
+    subtitle_font_scale_percent: int,
+    subtitle_background: bool,
+    subtitle_shadow: bool,
+    subtitle_vertical_position: PlaybackSubtitleVerticalPosition,
     next_entry: PlaybackNextEntry | None,
     series_title: str | None,
 ) -> PlaybackPlanEntry:
@@ -2763,6 +3074,15 @@ def _playback_plan_entry(
         video_streams=tuple(_stream_summary(stream) for stream in media_file.video_streams),
         audio_streams=tuple(_stream_summary(stream) for stream in media_file.audio_streams),
         subtitle_streams=tuple(_stream_summary(stream) for stream in media_file.subtitle_streams),
+        subtitle_tracks=_subtitle_tracks(media_file, sidecar_urls=sidecar_urls),
+        subtitle_font_attachments=_subtitle_font_attachments(media_file),
+        selected_audio_stream_index=selected_audio_stream_index,
+        selected_subtitle_track_id=selected_subtitle_track_id,
+        subtitle_timing_offset_milliseconds=subtitle_timing_offset_milliseconds,
+        subtitle_font_scale_percent=subtitle_font_scale_percent,
+        subtitle_background=subtitle_background,
+        subtitle_shadow=subtitle_shadow,
+        subtitle_vertical_position=subtitle_vertical_position,
         next_entry=next_entry,
     )
 
@@ -3013,11 +3333,7 @@ def _item_page(
     summaries = _summaries_for(session, page)
     return PaginatedResponse(
         items=tuple(summaries[item.id] for item in page),
-        next_cursor=(
-            _encode_cursor(cursor_scope, cursor_values(page[-1]))
-            if has_next
-            else None
-        ),
+        next_cursor=(_encode_cursor(cursor_scope, cursor_values(page[-1])) if has_next else None),
         limit=limit,
     )
 
@@ -3184,8 +3500,10 @@ def _special_extra_context_label(item: Zaisan, media_path: Path | None) -> str |
         episode = marker[1] if marker is not None else item.episode_number
         return f"S00 E{episode:02d}" if episode is not None else "S00"
 
-    season = item.season_number if item.season_number not in (None, 0) else _path_season_number(
-        media_path
+    season = (
+        item.season_number
+        if item.season_number not in (None, 0)
+        else _path_season_number(media_path)
     )
     if season is None:
         return None
@@ -3233,6 +3551,14 @@ def _root_effective_tags(root: Kura) -> frozenset[str]:
 
 def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
     summary = _summaries_for(session, (item,))[item.id]
+    media_file = session.scalar(
+        select(MediaFile)
+        .where(
+            MediaFile.library_item_id == item.id,
+            MediaFile.availability == AvailabilityState.AVAILABLE,
+        )
+        .order_by(MediaFile.id)
+    )
     collection_rows = tuple(
         session.execute(
             select(Collection, CollectionKin)
@@ -3269,6 +3595,21 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
             )
             for collection, membership in collection_rows
         ),
+        "playback_defaults": LibraryItemPlaybackDefaults(
+            audio_stream_index=item.default_audio_stream_index,
+            force_audio_stream=item.force_default_audio_stream,
+            subtitle_track_id=item.default_subtitle_track_id,
+            force_subtitle_track=item.force_default_subtitle_track,
+            subtitle_timing_offset_milliseconds=item.default_subtitle_timing_offset_milliseconds,
+            subtitle_font_scale_percent=item.default_subtitle_font_scale_percent,
+            force_subtitle_font_scale=item.force_default_subtitle_font_scale,
+        ),
+        "playback_audio_streams": (
+            tuple(_stream_summary(stream) for stream in media_file.audio_streams)
+            if media_file is not None
+            else ()
+        ),
+        "playback_subtitle_tracks": _subtitle_tracks(media_file) if media_file is not None else (),
     }
     match item.item_kind:
         case ZaisanKind.MOVIE:
@@ -3300,13 +3641,15 @@ def _media_summary(file: MediaFile) -> MediaTechnicalSummary:
 
 def _stream_summary(stream: Mapping[str, object]) -> MediaStreamSummary:
     return MediaStreamSummary(
-        codec=_optional_string(stream.get("codec"))
-        or _optional_string(stream.get("codec_name")),
+        codec=_optional_string(stream.get("codec")) or _optional_string(stream.get("codec_name")),
         language=_optional_string(stream.get("language"))
         or _optional_string(_tags(stream).get("language")),
         width=_optional_int(stream.get("width")),
         height=_optional_int(stream.get("height")),
         channels=_optional_int(stream.get("channels")),
+        title=_optional_string(stream.get("title")) or _optional_string(_tags(stream).get("title")),
+        default=_optional_bool(stream.get("default")),
+        forced=_optional_bool(stream.get("forced")),
     )
 
 
@@ -3321,6 +3664,256 @@ def _optional_string(value: object) -> str | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_bool(value: object) -> bool:
+    return value is True
+
+
+def _subtitle_tracks(
+    media_file: MediaFile, *, sidecar_urls: Mapping[str, str] | None = None
+) -> tuple[PlaybackSubtitleTrack, ...]:
+    """Build stable, non-path-bearing subtitle choices for one media file."""
+
+    urls = sidecar_urls or {}
+    embedded_tracks = tuple(
+        PlaybackSubtitleTrack(
+            id=f"embedded-{index}",
+            source=PlaybackSubtitleSource.EMBEDDED,
+            format=_subtitle_format(_optional_string(stream.get("codec"))),
+            codec=_optional_string(stream.get("codec"))
+            or _optional_string(stream.get("codec_name")),
+            language=_optional_string(stream.get("language"))
+            or _optional_string(_tags(stream).get("language")),
+            title=_optional_string(stream.get("title"))
+            or _optional_string(_tags(stream).get("title")),
+            default=_optional_bool(stream.get("default")),
+            forced=_optional_bool(stream.get("forced")),
+        )
+        for index, stream in enumerate(media_file.subtitle_streams)
+    )
+    sidecar_tracks = tuple(
+        _sidecar_subtitle_track(index, Path(path), urls.get(f"sidecar-{index}"))
+        for index, path in enumerate(media_file.subtitle_sidecar_paths)
+    )
+    return embedded_tracks + sidecar_tracks
+
+
+def _subtitle_font_attachments(media_file: MediaFile) -> tuple[PlaybackSubtitleFontAttachment, ...]:
+    """Expose validated attachment metadata without exposing the media path."""
+
+    attachments: list[PlaybackSubtitleFontAttachment] = []
+    for attachment in media_file.font_attachments:
+        stream_index = _optional_int(attachment.get("stream_index"))
+        filename = _optional_string(attachment.get("filename"))
+        raw_format = _optional_string(attachment.get("format"))
+        if stream_index is None or filename is None or Path(filename).name != filename:
+            continue
+        try:
+            font_format = PlaybackSubtitleFontFormat(raw_format or "")
+        except ValueError:
+            continue
+        attachments.append(
+            PlaybackSubtitleFontAttachment(
+                id=f"embedded-font-{stream_index}",
+                stream_index=stream_index,
+                filename=filename,
+                format=font_format,
+            )
+        )
+    return tuple(attachments)
+
+
+def _sidecar_subtitle_track(
+    index: int, path: Path, content_url: str | None
+) -> PlaybackSubtitleTrack:
+    language = _sidecar_subtitle_language(path)
+    stem_parts = tuple(part for part in path.stem.split(".") if part)
+    forced = any(part.casefold() == "forced" for part in stem_parts)
+    return PlaybackSubtitleTrack(
+        id=f"sidecar-{index}",
+        source=PlaybackSubtitleSource.SIDECAR,
+        format=_subtitle_format(path.suffix.removeprefix(".")),
+        codec=path.suffix.removeprefix(".").casefold() or None,
+        language=language,
+        title=None,
+        forced=forced,
+        content_url=content_url,
+    )
+
+
+def _sidecar_subtitle_language(path: Path) -> str | None:
+    """Extract the conventional language token from a sidecar subtitle file name."""
+
+    stem_parts = tuple(part for part in path.stem.split(".") if part)
+    return next(
+        (
+            part
+            for part in reversed(stem_parts[1:])
+            if 2 <= len(part) <= 8 and part.replace("-", "").isalpha()
+        ),
+        None,
+    )
+
+
+def _subtitle_format(codec: str | None) -> PlaybackSubtitleFormat:
+    value = (codec or "").casefold().replace("-", "_")
+    if value in {"ass", "ssa"}:
+        return PlaybackSubtitleFormat.ASS
+    if value in {
+        "webvtt",
+        "vtt",
+        "subrip",
+        "srt",
+        "text",
+        "mov_text",
+        "tx3g",
+        "ttml",
+    }:
+        return PlaybackSubtitleFormat.WEBVTT
+    return PlaybackSubtitleFormat.UNSUPPORTED
+
+
+def _preferred_audio_stream_index(media_file: MediaFile, language: str | None) -> int:
+    if not media_file.audio_streams:
+        return 0
+    preferred = _language_tag(language)
+    return min(
+        range(len(media_file.audio_streams)),
+        key=lambda index: (
+            _language_tag(_stream_language(media_file.audio_streams[index])) != preferred
+            if preferred is not None
+            else True,
+            not _optional_bool(media_file.audio_streams[index].get("default")),
+            index,
+        ),
+    )
+
+
+def _selected_audio_stream_index(
+    item: Zaisan,
+    media_file: MediaFile,
+    *,
+    profile_language: str | None,
+    root_language: str | None,
+) -> int:
+    """Prefer the profile language unless this item explicitly forces its audio track."""
+
+    index = item.default_audio_stream_index
+    item_default = index if index is not None and index < len(media_file.audio_streams) else None
+    if item.force_default_audio_stream and item_default is not None:
+        return item_default
+    if profile_language is not None:
+        return _preferred_audio_stream_index(media_file, profile_language)
+    if item_default is not None:
+        return item_default
+    return _preferred_audio_stream_index(media_file, root_language)
+
+
+def _preferred_subtitle_track_id(
+    tracks: tuple[PlaybackSubtitleTrack, ...], language: str | None
+) -> str | None:
+    if not tracks:
+        return None
+    preferred = _language_tag(language)
+    return min(
+        tracks,
+        key=lambda track: (
+            _language_tag(track.language) != preferred if preferred is not None else True,
+            not track.default,
+            not track.forced,
+            track.id,
+        ),
+    ).id
+
+
+def _selected_subtitle_track_id(
+    item: Zaisan,
+    tracks: tuple[PlaybackSubtitleTrack, ...],
+    *,
+    profile_language: str | None,
+    root_language: str | None,
+) -> str | None:
+    """Prefer the profile language unless this item explicitly forces its subtitle track."""
+
+    default_track = item.default_subtitle_track_id
+    item_default = (
+        default_track
+        if default_track is not None and any(track.id == default_track for track in tracks)
+        else None
+    )
+    if item.force_default_subtitle_track and item_default is not None:
+        return item_default
+    if profile_language is not None:
+        return _preferred_subtitle_track_id(tracks, profile_language)
+    if item_default is not None:
+        return item_default
+    return _preferred_subtitle_track_id(tracks, root_language)
+
+
+def _selected_subtitle_font_scale_percent(item: Zaisan, profile_default: int) -> int:
+    """Use the profile font size unless this item explicitly forces its own size."""
+
+    if (
+        item.force_default_subtitle_font_scale
+        and item.default_subtitle_font_scale_percent is not None
+    ):
+        return item.default_subtitle_font_scale_percent
+    return profile_default
+
+
+def _validate_item_playback_defaults(session: Session, item: Zaisan) -> None:
+    """Reject track defaults that do not exist on the item's selected media source."""
+
+    if item.default_audio_stream_index is None and item.default_subtitle_track_id is None:
+        return
+    media_file = session.scalar(
+        select(MediaFile)
+        .where(
+            MediaFile.library_item_id == item.id,
+            MediaFile.availability == AvailabilityState.AVAILABLE,
+        )
+        .order_by(MediaFile.id)
+    )
+    if media_file is None:
+        raise CatalogueValidationError("Playback tracks require an available media file.")
+    if item.default_audio_stream_index is not None and item.default_audio_stream_index >= len(
+        media_file.audio_streams
+    ):
+        raise CatalogueValidationError("The default audio track is no longer available.")
+    if item.default_subtitle_track_id is not None and not any(
+        track.id == item.default_subtitle_track_id for track in _subtitle_tracks(media_file)
+    ):
+        raise CatalogueValidationError("The default subtitle track is no longer available.")
+
+
+def _stream_language(stream: Mapping[str, object]) -> str | None:
+    return _optional_string(stream.get("language")) or _optional_string(
+        _tags(stream).get("language")
+    )
+
+
+def _language_tag(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalised = value.strip().casefold().replace("_", "-")
+    primary = normalised.split("-", maxsplit=1)[0]
+    return {
+        "deu": "de",
+        "eng": "en",
+        "fra": "fr",
+        "fre": "fr",
+        "ger": "de",
+        "ita": "it",
+        "jpn": "ja",
+        "kor": "ko",
+        "por": "pt",
+        "rus": "ru",
+        "spa": "es",
+        "zho": "zh",
+        "chi": "zh",
+        "cmn": "zh",
+    }.get(primary, primary) or None
 
 
 def _collection_detail(
@@ -3399,7 +3992,9 @@ def _watch_order_summary(
         or 0,
         revision=watch_order.revision,
         is_default=watch_order.collection.default_watch_order_id == watch_order.id,
-        progress=_watch_order_progress(session, watch_order, user_id) if user_id is not None else None,
+        progress=_watch_order_progress(session, watch_order, user_id)
+        if user_id is not None
+        else None,
     )
 
 
@@ -3435,7 +4030,9 @@ def _validated_collection_artwork_item_id(
         )
     )
     if membership is None:
-        raise CatalogueValidationError("Collection artwork must belong to a direct collection member.")
+        raise CatalogueValidationError(
+            "Collection artwork must belong to a direct collection member."
+        )
     has_poster = session.scalar(
         select(CachedArtwork.id)
         .where(
@@ -3457,7 +4054,9 @@ def _validated_default_watch_order_id(
             select(Keiro.id).where(Keiro.collection_id == collection.id).limit(1)
         )
         if has_orders is not None:
-            raise CatalogueValidationError("A collection with watch orders requires a default order.")
+            raise CatalogueValidationError(
+                "A collection with watch orders requires a default order."
+            )
         return None
     watch_order = _require(session, Keiro, watch_order_id, "Watch order")
     if watch_order.collection_id != collection.id:
@@ -3465,9 +4064,7 @@ def _validated_default_watch_order_id(
     return watch_order.id
 
 
-def _watch_order_progress(
-    session: Session, watch_order: Keiro, user_id: int
-) -> WatchOrderProgress:
+def _watch_order_progress(session: Session, watch_order: Keiro, user_id: int) -> WatchOrderProgress:
     rows = tuple(
         session.execute(
             select(KeiroEntry, Zaisan)
@@ -3477,19 +4074,21 @@ def _watch_order_progress(
         )
     )
     item_ids = tuple(item.id for _, item in rows)
-    states = {
-        state.library_item_id: state
-        for state in session.scalars(
-            select(PlaybackState).where(
-                PlaybackState.user_id == user_id,
-                PlaybackState.library_item_id.in_(item_ids),
+    states = (
+        {
+            state.library_item_id: state
+            for state in session.scalars(
+                select(PlaybackState).where(
+                    PlaybackState.user_id == user_id,
+                    PlaybackState.library_item_id.in_(item_ids),
+                )
             )
-        )
-    } if item_ids else {}
+        }
+        if item_ids
+        else {}
+    )
     incomplete = tuple(
-        item
-        for _, item in rows
-        if (state := states.get(item.id)) is None or not state.completed
+        item for _, item in rows if (state := states.get(item.id)) is None or not state.completed
     )
     completed_entry_count = len(rows) - len(incomplete)
     next_item = incomplete[0] if incomplete else None
@@ -3815,6 +4414,8 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
         path=root.path,
         expected_kind=LibraryRootKind(root.expected_media_kind.value),
         default_tags=tuple(root.default_tags),
+        preferred_audio_language=root.preferred_audio_language,
+        preferred_subtitle_language=root.preferred_subtitle_language,
         enabled=root.enabled,
         available=_library_root_available(root),
         item_count=item_count,

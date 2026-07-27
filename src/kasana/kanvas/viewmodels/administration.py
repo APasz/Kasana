@@ -79,6 +79,8 @@ class LibraryRootView(BaseModel):
     path: str | None = Field(default=None, max_length=10_000)
     kind: str = Field(min_length=1, max_length=32)
     tags: tuple[str, ...] = ()
+    preferred_audio_language: str | None = Field(default=None, alias="preferredAudioLanguage")
+    preferred_subtitle_language: str | None = Field(default=None, alias="preferredSubtitleLanguage")
     enabled: bool
     available: bool
     item_count: int = Field(ge=0, alias="itemCount")
@@ -198,6 +200,8 @@ def library_root_view(root: LibraryRootSummary) -> LibraryRootView:
         path=root.path,
         kind=root.expected_kind.value,
         tags=root.default_tags,
+        preferredAudioLanguage=root.preferred_audio_language,
+        preferredSubtitleLanguage=root.preferred_subtitle_language,
         enabled=root.enabled,
         available=root.available,
         itemCount=root.item_count,

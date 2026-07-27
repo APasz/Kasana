@@ -17,7 +17,13 @@ from kasana.kanvas import dashboard
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile
 from kasana.kanvas.routes.profiles import render_profile_selection
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.katalog.api.contracts import UserAuthentication, UserRole, UserSummary, UserUpdate
+from kasana.katalog.api.contracts import (
+    PlaybackLanguageOptions,
+    UserAuthentication,
+    UserRole,
+    UserSummary,
+    UserUpdate,
+)
 from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
 
@@ -189,6 +195,9 @@ async def test_profile_dashboard_session_and_administration_actions(
         async def disable_user(self, _user_id: int) -> UserSummary:
             return _profile(2, disabled=True)
 
+        async def list_playback_languages(self) -> PlaybackLanguageOptions:
+            return PlaybackLanguageOptions(audio=("en", "ja"), subtitles=("en", "yue"))
+
     class FormRequest:
         def __init__(self, values: dict[str, str]) -> None:
             self._values = values
@@ -236,6 +245,12 @@ async def test_profile_dashboard_session_and_administration_actions(
         )
 
     monkeypatch.setattr(dashboard, "_data_profile", current_profile)
+    language_response = await dashboard.current_profile_playback_languages(_request({}))
+    assert language_response.status_code == 200
+    assert json.loads(bytes(language_response.body)) == {
+        "audio": ["en", "ja"],
+        "subtitles": ["en", "yue"],
+    }
     assert (
         await dashboard.create_profile_user(cast(Request, JsonRequest({"username": "two"})))
     ).status_code == 201

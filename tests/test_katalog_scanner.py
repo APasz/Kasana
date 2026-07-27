@@ -895,6 +895,18 @@ def test_ffprobe_normalises_attached_pictures_out_of_playable_video_streams(
                 "tags": {"language": "jpn", "title": "Signs"},
                 "disposition": {"forced": 1, "default": 0},
             },
+            {
+                "index": 5,
+                "codec_type": "attachment",
+                "codec_name": "ttf",
+                "tags": {"filename": "Dialogue.otf", "mimetype": "application/x-truetype-font"},
+            },
+            {
+                "index": 6,
+                "codec_type": "attachment",
+                "codec_name": "bin_data",
+                "tags": {"filename": "untrusted/Font.ttf"},
+            },
         ],
     }
 
@@ -933,6 +945,9 @@ def test_ffprobe_normalises_attached_pictures_out_of_playable_video_streams(
     )
     assert result.audio_streams[0]["title"] == "Surround"
     assert result.subtitle_streams[0]["forced"] is True
+    assert result.font_attachments == (
+        {"stream_index": 5, "filename": "Dialogue.otf", "format": "opentype"},
+    )
 
     movies = tmp_path / "Movies"
     movie = movies / "2000s" / "Artwork.mkv"
@@ -950,6 +965,7 @@ def test_ffprobe_normalises_attached_pictures_out_of_playable_video_streams(
     assert persisted is not None
     assert persisted.video_streams == list(result.video_streams)
     assert persisted.attached_pictures == list(result.attached_pictures)
+    assert persisted.font_attachments == list(result.font_attachments)
 
 
 def test_probe_failure_is_reported_without_cataloguing(

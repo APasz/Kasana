@@ -66,6 +66,10 @@ def _navigation(
                         f"data-accent-colour={profile.user.accent_colour!r}",
                         f"data-preferred-audio-language={profile.user.preferred_audio_language!r}",
                         f"data-preferred-subtitle-language={profile.user.preferred_subtitle_language!r}",
+                        "data-default-subtitle-font-scale-percent="
+                        f"{profile.user.default_subtitle_font_scale_percent!r}",
+                        f"data-default-subtitle-background={str(profile.user.default_subtitle_background).lower()!r}",
+                        f"data-default-subtitle-shadow={str(profile.user.default_subtitle_shadow).lower()!r}",
                     )
                 )
             )

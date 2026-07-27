@@ -100,3 +100,78 @@ async def start_fragmented_mp4(
     except OSError as error:
         raise FFmpegError(f"Unable to start FFmpeg: {error}") from error
     return FragmentedMp4Stream(process)
+
+
+async def start_subtitle_extract(
+    executable: str,
+    input_url: str,
+    *,
+    subtitle_stream_index: int,
+    ass: bool,
+) -> FragmentedMp4Stream:
+    """Extract one embedded text subtitle without re-encoding video or audio."""
+
+    if subtitle_stream_index < 0:
+        raise ValueError("Subtitle stream indexes cannot be negative.")
+    subtitle_format = "ass" if ass else "webvtt"
+    command = (
+        executable,
+        "-v",
+        "error",
+        "-nostdin",
+        "-i",
+        input_url,
+        "-map",
+        f"0:s:{subtitle_stream_index}",
+        "-c:s",
+        subtitle_format,
+        "-f",
+        subtitle_format,
+        "pipe:1",
+    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as error:
+        raise FFmpegError(f"Unable to start FFmpeg: {error}") from error
+    return FragmentedMp4Stream(process)
+
+
+async def start_font_attachment_extract(
+    executable: str, input_url: str, *, stream_index: int
+) -> FragmentedMp4Stream:
+    """Extract one embedded font attachment without decoding the media."""
+
+    if stream_index < 0:
+        raise ValueError("Font attachment stream indexes cannot be negative.")
+    command = (
+        executable,
+        "-v",
+        "error",
+        "-nostdin",
+        f"-dump_attachment:{stream_index}",
+        "pipe:1",
+        "-i",
+        input_url,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "0",
+        "-f",
+        "null",
+        "-",
+    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as error:
+        raise FFmpegError(f"Unable to start FFmpeg: {error}") from error
+    return FragmentedMp4Stream(process)

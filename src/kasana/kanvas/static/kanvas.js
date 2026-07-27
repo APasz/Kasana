@@ -36,7 +36,28 @@
   const normaliseHexColour = (value) => (
     typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) ? value : null
   );
-  const profileMenuMarkup = (name, accentColour, preferredAudioLanguage, preferredSubtitleLanguage) => `
+  const normaliseLanguageTag = (value) => (
+    typeof value === 'string' && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{2,8})*$/.test(value)
+      ? value.trim().toLowerCase()
+      : null
+  );
+  const languageDisplayName = (tag) => {
+    try {
+      const locale = navigator.language || 'en';
+      return new Intl.DisplayNames([locale], {type: 'language'}).of(tag) || tag;
+    } catch {
+      return tag;
+    }
+  };
+  const profileMenuMarkup = (
+    name,
+    accentColour,
+    preferredAudioLanguage,
+    preferredSubtitleLanguage,
+    defaultSubtitleFontScalePercent,
+    defaultSubtitleBackground,
+    defaultSubtitleShadow
+  ) => `
     <button type="button" class="k-profile-switcher" aria-haspopup="dialog" aria-label="Open profile settings" title="Profile settings">${escapeHtml(name)}</button>
     <dialog class="k-kanvas-dialog k-profile-dialog">
       <div class="k-picker k-profile-form" role="document">
@@ -45,29 +66,45 @@
           <button type="button" class="k-icon-action" data-profile-close aria-label="Close profile settings" title="Close">×</button>
         </div>
         <form data-profile-form>
-          <label class="k-control-shell k-input-shell">
-            <span class="k-sr-only">Profile name</span>
-            <input class="k-input" name="displayName" value="${escapeHtml(name)}" aria-label="Profile name" placeholder="Profile name">
-          </label>
-          <div class="k-profile-pin-field">
-            <label class="k-control-shell k-input-shell">
-              <span class="k-sr-only">New PIN</span>
-              <input class="k-input" name="pin" type="text" autocomplete="off" inputmode="numeric" minlength="${PROFILE_PIN_MIN_LENGTH}" maxlength="${PROFILE_PIN_MAX_LENGTH}" aria-label="New PIN" placeholder="New PIN">
-            </label>
-            <button type="button" class="k-button" data-profile-clear-pin>Clear PIN</button>
+          <div class="k-profile-tabs" role="tablist" aria-label="Profile settings">
+            <button type="button" class="k-profile-tab" data-profile-tab="profile" role="tab" aria-selected="true">Profile</button>
+            <button type="button" class="k-profile-tab" data-profile-tab="settings" role="tab" aria-selected="false">Settings</button>
           </div>
-          <label class="k-colour-field">
-            <span>Accent colour</span>
-            <input name="accentColour" type="color" value="${escapeHtml(accentColour)}" aria-label="Accent colour">
-          </label>
-          <label class="k-control-shell k-input-shell">
-            <span class="k-sr-only">Preferred audio language</span>
-            <input class="k-input" name="preferredAudioLanguage" value="${escapeHtml(preferredAudioLanguage)}" aria-label="Preferred audio language" placeholder="Preferred audio language (for example, en)">
-          </label>
-          <label class="k-control-shell k-input-shell">
-            <span class="k-sr-only">Preferred subtitle language</span>
-            <input class="k-input" name="preferredSubtitleLanguage" value="${escapeHtml(preferredSubtitleLanguage)}" aria-label="Preferred subtitle language" placeholder="Preferred subtitle language (for example, en)">
-          </label>
+          <section data-profile-panel="profile" role="tabpanel">
+            <label class="k-control-shell k-input-shell">
+              <span class="k-sr-only">Profile name</span>
+              <input class="k-input" name="displayName" value="${escapeHtml(name)}" aria-label="Profile name" placeholder="Profile name">
+            </label>
+            <div class="k-profile-pin-field">
+              <label class="k-control-shell k-input-shell">
+                <span class="k-sr-only">New PIN</span>
+                <input class="k-input" name="pin" type="text" autocomplete="off" inputmode="numeric" minlength="${PROFILE_PIN_MIN_LENGTH}" maxlength="${PROFILE_PIN_MAX_LENGTH}" aria-label="New PIN" placeholder="New PIN">
+              </label>
+              <button type="button" class="k-button" data-profile-clear-pin>Clear PIN</button>
+            </div>
+            <label class="k-colour-field">
+              <span>Accent colour</span>
+              <input name="accentColour" type="color" value="${escapeHtml(accentColour)}" aria-label="Accent colour">
+            </label>
+          </section>
+          <section data-profile-panel="settings" role="tabpanel" hidden>
+            <h3 class="k-profile-section-heading">Playback languages</h3>
+            <label class="k-control-shell k-select-wrap">
+              <span class="k-sr-only">Preferred audio language</span>
+              <select class="k-select" name="preferredAudioLanguage" aria-label="Preferred audio language" data-profile-language="audio"><option value="">Automatic audio</option></select>
+            </label>
+            <label class="k-control-shell k-select-wrap">
+              <span class="k-sr-only">Preferred subtitle language</span>
+              <select class="k-select" name="preferredSubtitleLanguage" aria-label="Preferred subtitle language" data-profile-language="subtitles"><option value="">Automatic subtitles</option></select>
+            </label>
+            <h3 class="k-profile-section-heading">Subtitle defaults</h3>
+            <label class="k-control-shell k-select-wrap">
+              <span class="k-sr-only">Default subtitle font size</span>
+              <select class="k-select" name="defaultSubtitleFontScalePercent" aria-label="Default subtitle font size">${[75, 100, 125, 150, 175, 200].map((value) => `<option value="${value}"${value === defaultSubtitleFontScalePercent ? ' selected' : ''}>${value}%</option>`).join('')}</select>
+            </label>
+            <label class="k-check"><input type="checkbox" name="defaultSubtitleBackground"${defaultSubtitleBackground ? ' checked' : ''}> Subtitle backdrop</label>
+            <label class="k-check"><input type="checkbox" name="defaultSubtitleShadow"${defaultSubtitleShadow ? ' checked' : ''}> Subtitle shadow</label>
+          </section>
           <div class="k-picker__status" data-profile-status aria-live="polite"></div>
           <div class="k-profile-actions">
             <button type="submit" class="k-button k-button--primary" data-profile-save>Save changes</button>
@@ -84,6 +121,9 @@
       this.status = null;
       this.saveButton = null;
       this.pinClearRequested = false;
+      this.languageOptions = {audio: [], subtitles: []};
+      this.languageOptionsLoaded = false;
+      this.languageOptionsLoading = false;
     }
 
     connectedCallback() {
@@ -91,15 +131,34 @@
       const accentColour = normaliseHexColour(this.getAttribute('data-accent-colour')) || PROFILE_ACCENT_DEFAULT;
       const preferredAudioLanguage = this.getAttribute('data-preferred-audio-language') || '';
       const preferredSubtitleLanguage = this.getAttribute('data-preferred-subtitle-language') || '';
-      this.innerHTML = profileMenuMarkup(name, accentColour, preferredAudioLanguage, preferredSubtitleLanguage);
+      const defaultSubtitleFontScalePercent = Number(
+        this.getAttribute('data-default-subtitle-font-scale-percent') || '100'
+      );
+      const defaultSubtitleBackground = this.getAttribute('data-default-subtitle-background') === 'true';
+      const defaultSubtitleShadow = this.getAttribute('data-default-subtitle-shadow') === 'true';
+      this.innerHTML = profileMenuMarkup(
+        name,
+        accentColour,
+        preferredAudioLanguage,
+        preferredSubtitleLanguage,
+        [75, 100, 125, 150, 175, 200].includes(defaultSubtitleFontScalePercent)
+          ? defaultSubtitleFontScalePercent
+          : 100,
+        defaultSubtitleBackground,
+        defaultSubtitleShadow
+      );
       this.dialog = this.querySelector('dialog');
       this.status = this.querySelector('[data-profile-status]');
       this.saveButton = this.querySelector('[data-profile-save]');
+      this.renderLanguageOptions();
       const closeDialog = () => this.dialog?.close();
       this.querySelector('.k-profile-switcher')?.addEventListener('click', () => this.open());
       this.querySelector('[data-profile-close]')?.addEventListener('click', closeDialog);
       this.querySelector('[data-profile-form]')?.addEventListener('submit', (event) => this.handleSubmit(event));
       this.querySelector('[data-profile-clear-pin]')?.addEventListener('click', () => this.requestPinClear());
+      this.querySelectorAll('[data-profile-tab]').forEach((tab) => {
+        tab.addEventListener('click', () => this.selectTab(tab.dataset.profileTab));
+      });
       this.querySelector('input[name="pin"]')?.addEventListener('input', () => this.cancelPinClearWhenReplacing());
       this.dialog?.addEventListener('click', (event) => this.closeFromBackdrop(event));
       this.dialog?.addEventListener('close', () => this.resetForm());
@@ -114,6 +173,64 @@
       if (!this.dialog) return;
       if (!this.dialog.open) this.dialog.showModal();
       this.querySelector('input[name="displayName"]')?.focus();
+      void this.loadLanguageOptions();
+    }
+
+    profileLanguagePreference(kind) {
+      const attribute = kind === 'audio'
+        ? 'data-preferred-audio-language'
+        : 'data-preferred-subtitle-language';
+      return normaliseLanguageTag(this.getAttribute(attribute));
+    }
+
+    renderLanguageOptions() {
+      this.renderLanguageSelect('audio', 'preferredAudioLanguage', 'Automatic audio');
+      this.renderLanguageSelect('subtitles', 'preferredSubtitleLanguage', 'Automatic subtitles');
+    }
+
+    renderLanguageSelect(kind, fieldName, automaticLabel) {
+      const select = this.querySelector(`select[name="${fieldName}"]`);
+      if (!(select instanceof HTMLSelectElement)) return;
+      const selected = this.profileLanguagePreference(kind);
+      const tags = this.languageOptions[kind]
+        .map(normaliseLanguageTag)
+        .filter(Boolean);
+      if (selected) tags.push(selected);
+      const choices = [...new Set(tags)].sort((left, right) => (
+        languageDisplayName(left).localeCompare(languageDisplayName(right), navigator.language)
+      ));
+      select.innerHTML = `<option value="">${escapeHtml(automaticLabel)}</option>${choices.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(languageDisplayName(tag))}</option>`).join('')}`;
+      select.value = selected || '';
+    }
+
+    async loadLanguageOptions() {
+      if (this.languageOptionsLoaded || this.languageOptionsLoading) return;
+      this.languageOptionsLoading = true;
+      try {
+        const response = await fetch('/profiles/current/playback-languages', {
+          headers: {'Accept': 'application/json'},
+          credentials: 'same-origin'
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || typeof payload !== 'object') return;
+        const audio = Array.isArray(payload.audio) ? payload.audio : [];
+        const subtitles = Array.isArray(payload.subtitles) ? payload.subtitles : [];
+        this.languageOptions = {audio, subtitles};
+        this.languageOptionsLoaded = true;
+        this.renderLanguageOptions();
+      } finally {
+        this.languageOptionsLoading = false;
+      }
+    }
+
+    selectTab(tabName) {
+      const selected = tabName === 'settings' ? 'settings' : 'profile';
+      this.querySelectorAll('[data-profile-tab]').forEach((tab) => {
+        tab.setAttribute('aria-selected', String(tab.dataset.profileTab === selected));
+      });
+      this.querySelectorAll('[data-profile-panel]').forEach((panel) => {
+        panel.hidden = panel.dataset.profilePanel !== selected;
+      });
     }
 
     closeFromBackdrop(event) {
@@ -150,6 +267,20 @@
       if (accentInput instanceof HTMLInputElement) {
         accentInput.value = normaliseHexColour(this.getAttribute('data-accent-colour')) || PROFILE_ACCENT_DEFAULT;
       }
+      this.renderLanguageOptions();
+      const fontScaleInput = form.elements.namedItem('defaultSubtitleFontScalePercent');
+      if (fontScaleInput instanceof HTMLSelectElement) {
+        fontScaleInput.value = this.getAttribute('data-default-subtitle-font-scale-percent') || '100';
+      }
+      const backdropInput = form.elements.namedItem('defaultSubtitleBackground');
+      if (backdropInput instanceof HTMLInputElement) {
+        backdropInput.checked = this.getAttribute('data-default-subtitle-background') === 'true';
+      }
+      const shadowInput = form.elements.namedItem('defaultSubtitleShadow');
+      if (shadowInput instanceof HTMLInputElement) {
+        shadowInput.checked = this.getAttribute('data-default-subtitle-shadow') === 'true';
+      }
+      this.selectTab('profile');
       this.pinClearRequested = false;
       this.setStatus('');
     }
@@ -180,6 +311,11 @@
       const preferredSubtitleLanguage = String(data.get('preferredSubtitleLanguage') || '').trim();
       profilePayload.preferred_audio_language = preferredAudioLanguage || null;
       profilePayload.preferred_subtitle_language = preferredSubtitleLanguage || null;
+      profilePayload.defaultSubtitleFontScalePercent = Number(
+        data.get('defaultSubtitleFontScalePercent')
+      );
+      profilePayload.defaultSubtitleBackground = data.has('defaultSubtitleBackground');
+      profilePayload.defaultSubtitleShadow = data.has('defaultSubtitleShadow');
       if (pin) profilePayload.pin = pin;
       else if (this.pinClearRequested) profilePayload.pin = null;
       this.saveButton?.setAttribute('disabled', 'disabled');
@@ -194,6 +330,15 @@
         this.setAttribute('data-accent-colour', savedColour);
         this.setAttribute('data-preferred-audio-language', profile.preferred_audio_language || '');
         this.setAttribute('data-preferred-subtitle-language', profile.preferred_subtitle_language || '');
+        this.renderLanguageOptions();
+        this.setAttribute(
+          'data-default-subtitle-font-scale-percent',
+          String(profile.default_subtitle_font_scale_percent)
+        );
+        this.setAttribute(
+          'data-default-subtitle-background', String(profile.default_subtitle_background)
+        );
+        this.setAttribute('data-default-subtitle-shadow', String(profile.default_subtitle_shadow));
         document.documentElement.style.setProperty('--k-accent', savedColour);
         const pinInput = form.elements.namedItem('pin');
         if (pinInput instanceof HTMLInputElement) pinInput.value = '';
@@ -1800,6 +1945,10 @@
         item, collectionChoices, collectionRelationships
       );
       content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit details</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><div class="k-item-editor__summary"><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span><span>${escapeHtml(item.title || `Item ${item.id || ''}`)}</span></div><section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><details><summary>Metadata locks</summary><div class="k-item-editor__checks" data-item-editor-locks>${this.renderLockRows(kind, locks)}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></details>${collectionControls}<details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
+      const auditDetails = Array.from(content.querySelectorAll('details')).find(
+        (details) => details.querySelector('summary')?.textContent === 'Edit audit'
+      );
+      auditDetails?.insertAdjacentHTML('beforebegin', this.renderPlaybackDefaults(item));
       this.status = content.querySelector('[data-item-editor-status]');
       content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
       content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
@@ -1830,6 +1979,30 @@
         ? `<div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Add to collection" data-item-collection-target>${choices.map((collection) => `<option value="${collection.id}:${collection.revision}">${escapeHtml(collection.name)}</option>`).join('')}</select></label><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Collection relationship" data-item-collection-relationship>${relationshipOptions}</select></label><button type="button" class="k-button" data-item-collection-add>Add to collection</button></div>`
         : '<p class="k-item-editor__muted">No other collections are available.</p>';
       return `<details><summary>Collections</summary><section class="k-item-editor__section">${memberRows}${addControl}</section></details>`;
+    }
+
+    renderPlaybackDefaults(item) {
+      const defaults = item.playback_defaults && typeof item.playback_defaults === 'object'
+        ? item.playback_defaults
+        : {};
+      const audioStreams = Array.isArray(item.playback_audio_streams)
+        ? item.playback_audio_streams
+        : [];
+      const subtitleTracks = Array.isArray(item.playback_subtitle_tracks)
+        ? item.playback_subtitle_tracks
+        : [];
+      if (!audioStreams.length && !subtitleTracks.length) return '';
+      const audioOptions = audioStreams.map((stream, index) => {
+        const label = [stream.language, stream.title, stream.codec].filter(Boolean).join(' · ') || `Audio ${index + 1}`;
+        return `<option value="${index}"${defaults.audio_stream_index === index ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+      const subtitleOptions = subtitleTracks.map((track) => {
+        const label = [track.language, track.title, track.codec].filter(Boolean).join(' · ') || 'Subtitle';
+        return `<option value="${escapeHtml(track.id)}"${defaults.subtitle_track_id === track.id ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+      const timing = defaults.subtitle_timing_offset_milliseconds ?? '';
+      const fontScale = defaults.subtitle_font_scale_percent ?? '';
+      return `<details><summary>Playback defaults</summary><section class="k-item-editor__section"><p class="k-item-editor__muted">Profile defaults take precedence unless the matching item control is forced. Playback-session choices remain changeable.</p><div class="k-item-editor__playback-option"><label class="k-control-shell k-select-wrap"><select class="k-select" name="defaultAudioStreamIndex" aria-label="Default audio track"><option value="">Automatic audio</option>${audioOptions}</select></label><label class="k-check"><input type="checkbox" name="forceDefaultAudioStream"${defaults.force_audio_stream ? ' checked' : ''}> Force this audio track</label></div><div class="k-item-editor__playback-option"><label class="k-control-shell k-select-wrap"><select class="k-select" name="defaultSubtitleTrackId" aria-label="Default subtitle track"><option value="">Automatic subtitles</option>${subtitleOptions}</select></label><label class="k-check"><input type="checkbox" name="forceDefaultSubtitleTrack"${defaults.force_subtitle_track ? ' checked' : ''}> Force this subtitle track</label></div><label class="k-control-shell k-input-shell"><input class="k-input" type="number" min="-30000" max="30000" step="100" name="defaultSubtitleTimingOffsetMilliseconds" value="${timing}" aria-label="Default subtitle timing offset in milliseconds" placeholder="Timing offset in milliseconds"></label><div class="k-item-editor__playback-option"><label class="k-control-shell k-select-wrap"><select class="k-select" name="defaultSubtitleFontScalePercent" aria-label="Default subtitle font size"><option value="">Use profile default</option>${[75, 100, 125, 150, 175, 200].map((value) => `<option value="${value}"${fontScale === value ? ' selected' : ''}>${value}%</option>`).join('')}</select></label><label class="k-check"><input type="checkbox" name="forceDefaultSubtitleFontScale"${defaults.force_subtitle_font_scale ? ' checked' : ''}> Force this subtitle font size</label></div></section></details>`;
     }
 
     bindCollectionControls(content) {
@@ -1982,6 +2155,25 @@
       else if (!numberNames.has('episodeNumber') && current.episode_number !== null && current.episode_number !== undefined) payload.episodeNumber = null;
       if (values.has('parentId')) payload.parentId = toNullableNumber('parentId');
       else if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) payload.parentId = null;
+      if (values.has('defaultAudioStreamIndex')) {
+        payload.defaultAudioStreamIndex = toNullableNumber('defaultAudioStreamIndex');
+        payload.forceDefaultAudioStream = values.has('forceDefaultAudioStream');
+      }
+      if (values.has('defaultSubtitleTrackId')) {
+        payload.defaultSubtitleTrackId = String(values.get('defaultSubtitleTrackId') || '') || null;
+        payload.forceDefaultSubtitleTrack = values.has('forceDefaultSubtitleTrack');
+      }
+      if (values.has('defaultSubtitleTimingOffsetMilliseconds')) {
+        payload.defaultSubtitleTimingOffsetMilliseconds = toNullableNumber(
+          'defaultSubtitleTimingOffsetMilliseconds'
+        );
+      }
+      if (values.has('defaultSubtitleFontScalePercent')) {
+        payload.defaultSubtitleFontScalePercent = toNullableNumber(
+          'defaultSubtitleFontScalePercent'
+        );
+        payload.forceDefaultSubtitleFontScale = values.has('forceDefaultSubtitleFontScale');
+      }
       if (visibleArtworkKinds.size) payload.selectedArtwork = selectedArtwork;
       return payload;
     }
@@ -1999,13 +2191,23 @@
       const remainingTime = this.querySelector('[data-player-remaining-time]');
       const volume = this.querySelector('[data-player-volume]');
       const contextMenu = this.querySelector('[data-player-context-menu]');
+      const audioMenu = this.querySelector('[data-player-audio-menu]');
+      const subtitleMenu = this.querySelector('[data-player-subtitle-menu]');
+      const subtitleTimingLabel = subtitleMenu?.querySelector('[data-player-subtitle-timing-label]');
+      const subtitleFontScaleLabel = subtitleMenu?.querySelector('[data-player-subtitle-font-scale-label]');
+      const subtitleAppearance = subtitleMenu?.querySelector('[data-player-subtitle-appearance]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
       const kestrelLink = this.querySelector('[data-player-kestrel]');
       const sessionId = this.getAttribute('session-id');
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
       let catalogueDuration = Number(this.getAttribute('duration-seconds') || '0');
-      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition)) return;
+      let subtitleTimingOffsetMilliseconds = Number(this.getAttribute('subtitle-timing-offset-milliseconds') || '0');
+      let subtitleFontScalePercent = Number(this.getAttribute('subtitle-font-scale-percent') || '100');
+      let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
+      let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
+      let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
+      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -2017,6 +2219,13 @@
       let deliveryMode = 'direct';
       let streamStartSeconds = 0;
       let generatedStreamSeekPending = false;
+      let pendingDirectSeek = null;
+      let assRenderer = null;
+      let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
+      let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
+      const maxSubtitleTimingOffsetMilliseconds = 30000;
+      const minSubtitleFontScalePercent = 75;
+      const maxSubtitleFontScalePercent = 200;
       const preserveVideoHeight = () => {
         const height = video.getBoundingClientRect().height;
         if (height <= 0) return;
@@ -2046,6 +2255,126 @@
           can_play_type: video.canPlayType(contentType)
         };
       }));
+      const selectedSubtitleButton = () => selectedSubtitleTrack === null
+        ? null
+        : subtitleMenu.querySelector(`[data-player-subtitle-track="${selectedSubtitleTrack}"]`);
+      const closeTrackMenus = () => {
+        audioMenu.hidden = true;
+        subtitleMenu.hidden = true;
+      };
+      const showTrackMenu = (menu, target) => {
+        const bounds = this.getBoundingClientRect();
+        const targetBounds = target.getBoundingClientRect();
+        contextMenu.hidden = true;
+        closeTrackMenus();
+        menu.hidden = false;
+        menu.style.left = `${Math.max(8, Math.min(targetBounds.left - bounds.left, bounds.width - 210))}px`;
+        menu.style.top = `${Math.max(8, targetBounds.top - bounds.top - 8)}px`;
+        showFullscreenControls();
+      };
+      const updateTrackOptions = () => {
+        audioMenu.querySelectorAll('[data-player-audio-stream]').forEach((option) => {
+          option.setAttribute('aria-pressed', String(Number(option.getAttribute('data-player-audio-stream')) === selectedAudioStream));
+        });
+        subtitleMenu.querySelectorAll('[data-player-subtitle-track]').forEach((option) => {
+          option.setAttribute('aria-pressed', String((option.getAttribute('data-player-subtitle-track') || null) === selectedSubtitleTrack));
+        });
+        subtitleTimingLabel.textContent = `${subtitleTimingOffsetMilliseconds >= 0 ? '+' : ''}${(subtitleTimingOffsetMilliseconds / 1000).toFixed(1)}s`;
+        subtitleFontScaleLabel.textContent = `${subtitleFontScalePercent}%`;
+        this.dataset.subtitleFontScale = String(subtitleFontScalePercent);
+        this.dataset.subtitleBackground = String(subtitleBackground);
+        this.dataset.subtitleShadow = String(subtitleShadow);
+        this.dataset.subtitleVerticalPosition = subtitleVerticalPosition;
+        const selectedSubtitle = selectedSubtitleButton();
+        const timingAvailable = selectedSubtitle !== null && !selectedSubtitle.hasAttribute('data-player-subtitle-unsupported');
+        const nativeCueAppearanceAvailable = typeof CSS !== 'undefined'
+          && typeof CSS.supports === 'function'
+          && CSS.supports('selector(video::cue)');
+        const appearanceAvailable = timingAvailable
+          && selectedSubtitle.getAttribute('data-player-subtitle-format') === 'webvtt'
+          && nativeCueAppearanceAvailable;
+        subtitleAppearance.hidden = !appearanceAvailable;
+        subtitleMenu.querySelectorAll('[data-player-subtitle-timing-step], [data-player-subtitle-timing-reset]').forEach((option) => {
+          option.toggleAttribute('disabled', !timingAvailable);
+        });
+        subtitleMenu.querySelectorAll('[data-player-subtitle-font-scale-step], [data-player-subtitle-background], [data-player-subtitle-shadow], [data-player-subtitle-position]').forEach((option) => {
+          option.toggleAttribute('disabled', !appearanceAvailable);
+        });
+        subtitleMenu.querySelector('[data-player-subtitle-background]')?.setAttribute('aria-pressed', String(subtitleBackground));
+        subtitleMenu.querySelector('[data-player-subtitle-shadow]')?.setAttribute('aria-pressed', String(subtitleShadow));
+        subtitleMenu.querySelectorAll('[data-player-subtitle-position]').forEach((option) => {
+          option.setAttribute('aria-pressed', String(option.getAttribute('data-player-subtitle-position') === subtitleVerticalPosition));
+        });
+      };
+      const clearNativeSubtitle = () => {
+        video.querySelectorAll('track[data-player-subtitle]').forEach((track) => track.remove());
+      };
+      const disposeAssRenderer = () => {
+        if (assRenderer && typeof assRenderer.dispose === 'function') assRenderer.dispose();
+        assRenderer = null;
+      };
+      const subtitleUrl = (trackId) => {
+        const url = new URL(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/subtitles/${encodeURIComponent(trackId)}`, window.location.origin);
+        if (streamStartSeconds > 0) url.searchParams.set('offsetSeconds', String(streamStartSeconds));
+        return url.href;
+      };
+      const assFontUrls = () => Array.from(
+        this.querySelectorAll('[data-player-ass-font]'),
+        (font) => new URL(
+          `/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/fonts/${encodeURIComponent(font.getAttribute('data-player-ass-font'))}`,
+          window.location.origin,
+        ).href,
+      );
+      const syncSubtitles = () => {
+        clearNativeSubtitle();
+        disposeAssRenderer();
+        const option = selectedSubtitleButton();
+        if (!option) return;
+        if (option.hasAttribute('data-player-subtitle-unsupported')) {
+          status.textContent = 'This image subtitle needs Kestrel.';
+          void offerKestrelFallback();
+          return;
+        }
+        const format = option.getAttribute('data-player-subtitle-format');
+        if (format === 'ass') {
+          if (typeof window.SubtitlesOctopus !== 'function') {
+            status.textContent = 'ASS subtitles are unavailable in this browser.';
+            return;
+          }
+          try {
+            assRenderer = new window.SubtitlesOctopus({
+              video,
+              subUrl: subtitleUrl(selectedSubtitleTrack),
+              workerUrl: '/_kanvas/libass/subtitles-octopus-worker.js',
+              legacyWorkerUrl: '/_kanvas/libass/subtitles-octopus-worker-legacy.js',
+              fallbackFont: '/_kanvas/libass/default.woff2',
+              fonts: assFontUrls(),
+              timeOffset: streamStartSeconds - subtitleTimingOffsetMilliseconds / 1000,
+              renderMode: 'wasm-blend',
+              onError: () => { status.textContent = 'ASS subtitles could not be rendered.'; }
+            });
+          } catch (_) {
+            status.textContent = 'ASS subtitles could not be rendered.';
+          }
+          return;
+        }
+        const track = document.createElement('track');
+        track.kind = 'subtitles';
+        track.src = subtitleUrl(selectedSubtitleTrack);
+        track.default = true;
+        track.dataset.playerSubtitle = 'true';
+        track.addEventListener('load', () => {
+          if (subtitleVerticalPosition === 'author' || !track.track.cues) return;
+          const line = {top: 10, middle: 50, bottom: 90}[subtitleVerticalPosition];
+          Array.from(track.track.cues).forEach((cue) => {
+            if (!('line' in cue) || !('snapToLines' in cue)) return;
+            cue.snapToLines = false;
+            cue.line = line;
+          });
+        });
+        video.appendChild(track);
+        track.track.mode = 'showing';
+      };
       const selectDelivery = async (autoplay, startSeconds = 0) => {
         status.textContent = 'Preparing playback…';
         const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/compatibility`, {
@@ -2058,6 +2387,8 @@
         if (!response.ok || typeof payload.mode !== 'string') throw new Error('Playback compatibility failed');
         if (payload.mode === 'unsupported' || typeof payload.mediaUrl !== 'string') {
           releaseVideoHeight();
+          clearNativeSubtitle();
+          disposeAssRenderer();
           video.removeAttribute('src');
           video.load();
           status.textContent = 'This browser cannot play this video.';
@@ -2071,11 +2402,13 @@
         if (kestrelLink instanceof HTMLAnchorElement) kestrelLink.hidden = true;
         deliveryMode = payload.mode;
         streamStartSeconds = deliveryMode === 'direct' ? 0 : startSeconds;
+        pendingDirectSeek = deliveryMode === 'direct' && startSeconds > 0 ? startSeconds : null;
         const mediaUrl = new URL(payload.mediaUrl, window.location.origin);
         if (streamStartSeconds > 0) mediaUrl.searchParams.set('startSeconds', String(streamStartSeconds));
         preserveVideoHeight();
         video.src = mediaUrl.href;
         video.load();
+        syncSubtitles();
         if (autoplay) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
         return true;
       };
@@ -2146,6 +2479,7 @@
         });
         volume.value = String(video.muted ? 0 : video.volume);
         volume.style.setProperty('--volume-percent', `${video.muted ? 0 : video.volume * 100}%`);
+        updateTrackOptions();
       };
       const isCardFullscreen = () => document.fullscreenElement === this;
       const clearFullscreenHideTimer = () => {
@@ -2166,6 +2500,7 @@
       };
       const hideContextMenu = () => {
         contextMenu.hidden = true;
+        closeTrackMenus();
         showFullscreenControls();
       };
       const showContextMenu = (clientX, clientY) => {
@@ -2237,6 +2572,51 @@
           status.textContent = 'Could not seek this video.';
         }
       };
+      const persistTrackSelection = async (
+        audioStream,
+        subtitleTrack,
+        subtitleOffsetMilliseconds,
+        subtitleFontScale,
+        subtitleBackdrop,
+        subtitleTextShadow,
+        subtitlePosition
+      ) => {
+        const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/tracks`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          credentials: 'same-origin',
+          body: JSON.stringify({entryPosition, audioStream, subtitleTrack, subtitleOffsetMilliseconds, subtitleFontScalePercent: subtitleFontScale, subtitleBackground: subtitleBackdrop, subtitleShadow: subtitleTextShadow, subtitleVerticalPosition: subtitlePosition})
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !Number.isSafeInteger(payload.audioStream) || !Number.isSafeInteger(payload.subtitleOffsetMilliseconds) || !Number.isSafeInteger(payload.subtitleFontScalePercent) || typeof payload.subtitleBackground !== 'boolean' || typeof payload.subtitleShadow !== 'boolean' || !['author', 'top', 'middle', 'bottom'].includes(payload.subtitleVerticalPosition)) throw new Error('Track selection failed');
+        selectedAudioStream = payload.audioStream;
+        selectedSubtitleTrack = typeof payload.subtitleTrack === 'string' ? payload.subtitleTrack : null;
+        subtitleTimingOffsetMilliseconds = payload.subtitleOffsetMilliseconds;
+        subtitleFontScalePercent = payload.subtitleFontScalePercent;
+        subtitleBackground = payload.subtitleBackground;
+        subtitleShadow = payload.subtitleShadow;
+        subtitleVerticalPosition = payload.subtitleVerticalPosition;
+        this.setAttribute('subtitle-timing-offset-milliseconds', String(subtitleTimingOffsetMilliseconds));
+        updateTrackOptions();
+      };
+      const offerKestrelFallback = async () => {
+        try {
+          const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/kestrel`, {
+            method: 'POST',
+            headers: {'Accept': 'application/json'},
+            credentials: 'same-origin'
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || typeof payload.fallbackUri !== 'string') throw new Error('Fallback failed');
+          if (kestrelLink instanceof HTMLAnchorElement) {
+            kestrelLink.href = payload.fallbackUri;
+            kestrelLink.textContent = 'Open in Kestrel for this subtitle';
+            kestrelLink.hidden = false;
+          }
+        } catch (_) {
+          status.textContent = 'This subtitle needs Kestrel, but its fallback is unavailable.';
+        }
+      };
       controls.addEventListener('click', (event) => {
         showFullscreenControls();
         const element = event.target instanceof Element ? event.target : null;
@@ -2256,12 +2636,109 @@
         } else if (action === 'menu') {
           const bounds = target.getBoundingClientRect();
           showContextMenu(bounds.left + bounds.width / 2, bounds.bottom);
+        } else if (action === 'audio') {
+          showTrackMenu(audioMenu, target);
+        } else if (action === 'subtitles') {
+          showTrackMenu(subtitleMenu, target);
         } else if (action === 'mute') {
           video.muted = !video.muted;
         } else if (action === 'fullscreen') {
           void toggleFullscreen();
         }
         updateControls();
+      });
+      audioMenu.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const option = element?.closest('[data-player-audio-stream]');
+        const audioStream = Number(option?.getAttribute('data-player-audio-stream'));
+        if (!Number.isSafeInteger(audioStream) || audioStream < 0 || audioStream === selectedAudioStream) {
+          closeTrackMenus();
+          return;
+        }
+        const position = playbackPosition();
+        const autoplay = !video.paused;
+        closeTrackMenus();
+        void (async () => {
+          try {
+            await persistTrackSelection(audioStream, selectedSubtitleTrack, subtitleTimingOffsetMilliseconds, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
+            await selectDelivery(autoplay, position);
+          } catch (_) {
+            status.textContent = 'Audio track could not be changed.';
+          }
+        })();
+      });
+      subtitleMenu.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const option = element?.closest('[data-player-subtitle-track]');
+        if (!option) return;
+        const subtitleTrack = option.getAttribute('data-player-subtitle-track') || null;
+        if (subtitleTrack === selectedSubtitleTrack) {
+          closeTrackMenus();
+          return;
+        }
+        const unsupported = option.hasAttribute('data-player-subtitle-unsupported');
+        closeTrackMenus();
+        void (async () => {
+          try {
+            await persistTrackSelection(selectedAudioStream, subtitleTrack, subtitleTimingOffsetMilliseconds, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
+            if (unsupported) {
+              clearNativeSubtitle();
+              disposeAssRenderer();
+              status.textContent = 'This image subtitle needs Kestrel.';
+              await offerKestrelFallback();
+            } else {
+              syncSubtitles();
+            }
+          } catch (_) {
+            status.textContent = 'Subtitle track could not be changed.';
+          }
+        })();
+      });
+      subtitleMenu.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const timingOption = element?.closest('[data-player-subtitle-timing-step], [data-player-subtitle-timing-reset]');
+        if (!timingOption || timingOption.hasAttribute('disabled')) return;
+        const step = timingOption.hasAttribute('data-player-subtitle-timing-reset')
+          ? -subtitleTimingOffsetMilliseconds
+          : Number(timingOption.getAttribute('data-player-subtitle-timing-step'));
+        if (!Number.isSafeInteger(step)) return;
+        const nextOffset = Math.min(
+          Math.max(subtitleTimingOffsetMilliseconds + step, -maxSubtitleTimingOffsetMilliseconds),
+          maxSubtitleTimingOffsetMilliseconds
+        );
+        if (nextOffset === subtitleTimingOffsetMilliseconds) return;
+        void (async () => {
+          try {
+            await persistTrackSelection(selectedAudioStream, selectedSubtitleTrack, nextOffset, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
+            syncSubtitles();
+          } catch (_) {
+            status.textContent = 'Subtitle timing could not be changed.';
+          }
+        })();
+      });
+      subtitleMenu.addEventListener('click', (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const option = element?.closest('[data-player-subtitle-font-scale-step], [data-player-subtitle-background], [data-player-subtitle-shadow], [data-player-subtitle-position]');
+        if (!option || option.hasAttribute('disabled')) return;
+        const scaleStep = Number(option.getAttribute('data-player-subtitle-font-scale-step'));
+        const nextFontScale = Number.isSafeInteger(scaleStep)
+          ? Math.min(Math.max(subtitleFontScalePercent + scaleStep, minSubtitleFontScalePercent), maxSubtitleFontScalePercent)
+          : subtitleFontScalePercent;
+        const nextBackground = option.hasAttribute('data-player-subtitle-background') ? !subtitleBackground : subtitleBackground;
+        const nextShadow = option.hasAttribute('data-player-subtitle-shadow') ? !subtitleShadow : subtitleShadow;
+        const requestedPosition = option.getAttribute('data-player-subtitle-position');
+        const nextPosition = ['author', 'top', 'middle', 'bottom'].includes(requestedPosition)
+          ? requestedPosition
+          : subtitleVerticalPosition;
+        if (nextFontScale === subtitleFontScalePercent && nextBackground === subtitleBackground && nextShadow === subtitleShadow && nextPosition === subtitleVerticalPosition) return;
+        void (async () => {
+          try {
+            await persistTrackSelection(selectedAudioStream, selectedSubtitleTrack, subtitleTimingOffsetMilliseconds, nextFontScale, nextBackground, nextShadow, nextPosition);
+            syncSubtitles();
+          } catch (_) {
+            status.textContent = 'Subtitle appearance could not be changed.';
+          }
+        })();
       });
       contextMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
@@ -2308,7 +2785,7 @@
       this.addEventListener('keydown', showFullscreenControls);
       this.addEventListener('focusin', showFullscreenControls);
       const onPointerDown = (event) => {
-        if (!contextMenu.contains(event.target)) hideContextMenu();
+        if (!contextMenu.contains(event.target) && !audioMenu.contains(event.target) && !subtitleMenu.contains(event.target)) hideContextMenu();
       };
       document.addEventListener('pointerdown', onPointerDown);
       this._dispose = () => {
@@ -2316,9 +2793,15 @@
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         window.removeEventListener('pagehide', flushProgressOnPageHide);
+        clearNativeSubtitle();
+        disposeAssRenderer();
       };
       video.addEventListener('loadedmetadata', () => {
-        if (!resumeApplied && resumePosition > 0) {
+        if (pendingDirectSeek !== null && deliveryMode === 'direct' && Number.isFinite(video.duration)) {
+          resumeApplied = true;
+          video.currentTime = Math.min(pendingDirectSeek, video.duration);
+          pendingDirectSeek = null;
+        } else if (!resumeApplied && resumePosition > 0) {
           if (deliveryMode === 'direct' && Number.isFinite(video.duration)) {
             resumeApplied = true;
             video.currentTime = Math.min(resumePosition, video.duration);

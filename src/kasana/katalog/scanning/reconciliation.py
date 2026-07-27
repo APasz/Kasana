@@ -286,6 +286,7 @@ def media_file(
         attached_pictures=list(probe.attached_pictures),
         audio_streams=list(probe.audio_streams),
         subtitle_streams=list(probe.subtitle_streams),
+        font_attachments=list(probe.font_attachments),
         local_poster_path=str(sidecars.poster) if sidecars.poster is not None else None,
         subtitle_sidecar_paths=[str(path) for path in sidecars.subtitles],
         availability=AvailabilityState.AVAILABLE,
@@ -312,6 +313,7 @@ def update_file_details(
     file.attached_pictures = list(probe.attached_pictures)
     file.audio_streams = list(probe.audio_streams)
     file.subtitle_streams = list(probe.subtitle_streams)
+    file.font_attachments = list(probe.font_attachments)
 
 
 def update_sidecars(file: MediaFile, sidecars: MediaSidecars) -> None:

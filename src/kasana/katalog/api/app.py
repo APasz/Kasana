@@ -60,12 +60,16 @@ from kasana.katalog.api.contracts import (
     OnDeckEntry,
     PaginatedResponse,
     PlaybackCompletionResult,
+    PlaybackLanguageOptions,
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackProgressResult,
     PlaybackSessionResponse,
+    PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
+    PlaybackStatesRequest,
+    PlaybackStatesResponse,
     ProgressUpdate,
     ScanRequest,
     SessionProgressUpdate,
@@ -306,6 +310,17 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> tuple[str, ...]:
         return await run_blocking(runtime.queries.list_item_tags)
+
+    @app.get(
+        "/api/v1/library/playback-languages",
+        response_model=PlaybackLanguageOptions,
+        operation_id="v1_list_playback_languages",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_playback_languages(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackLanguageOptions:
+        return await run_blocking(runtime.queries.list_playback_languages)
 
     @app.get(
         "/api/v1/scans/duplicate-episodes",
@@ -919,6 +934,21 @@ def create_app(
     ) -> PlaybackProgressResult:
         return await run_blocking(runtime.queries.update_session_progress, session_id, update)
 
+    @app.patch(
+        "/api/v1/playback/sessions/{session_id}/tracks",
+        response_model=PlaybackSessionResponse,
+        operation_id="v1_update_playback_session_tracks",
+        responses=_ERROR_RESPONSES,
+    )
+    async def update_playback_session_tracks(
+        session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        selection: PlaybackSessionTrackSelection,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackSessionResponse:
+        return await run_blocking(
+            runtime.queries.update_session_track_selection, session_id, selection
+        )
+
     @app.post(
         "/api/v1/playback/sessions/{session_id}/advance",
         response_model=PlaybackSessionResponse,
@@ -1039,6 +1069,52 @@ def create_app(
         )
 
     @app.get(
+        "/api/v1/subtitles/{access_token}",
+        operation_id="v1_stream_subtitle",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"text/plain": {}}}},
+    )
+    async def stream_subtitle(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        subtitle_file = await run_blocking(
+            runtime.queries.resolve_subtitle_access_token, access_token
+        )
+        return runtime.file_transfers.response(
+            subtitle_file,
+            method=request.method,
+            range_header=range_header,
+            if_none_match=if_none_match,
+            download=False,
+        )
+
+    @app.head(
+        "/api/v1/subtitles/{access_token}",
+        operation_id="v1_head_stream_subtitle",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"text/plain": {}}}},
+    )
+    async def head_stream_subtitle(
+        request: Request,
+        access_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        subtitle_file = await run_blocking(
+            runtime.queries.resolve_subtitle_access_token, access_token
+        )
+        return runtime.file_transfers.response(
+            subtitle_file,
+            method=request.method,
+            range_header=range_header,
+            if_none_match=if_none_match,
+            download=False,
+        )
+
+    @app.get(
         "/api/v1/downloads/{access_token}",
         operation_id="v1_download_media",
         responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
@@ -1115,6 +1191,19 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PlaybackStateResponse | None:
         return await run_blocking(runtime.queries.playback_state, user_id, item_id)
+
+    @app.post(
+        "/api/v1/users/{user_id}/playback-states",
+        response_model=PlaybackStatesResponse,
+        operation_id="v1_get_playback_states",
+        responses=_ERROR_RESPONSES,
+    )
+    async def playback_states(
+        user_id: Annotated[int, Path(gt=0)],
+        request: PlaybackStatesRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackStatesResponse:
+        return await run_blocking(runtime.queries.playback_states, user_id, request)
 
     @app.post(
         "/api/v1/users/{user_id}/items/{item_id}/watched",

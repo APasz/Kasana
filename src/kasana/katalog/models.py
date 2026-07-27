@@ -24,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.orm import relationship as orm_relationship
 
+from kasana.katalog.limits import MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS
+
 
 class ZaisanKind(StrEnum):
     MOVIE = "movie"
@@ -79,12 +81,20 @@ class PlaybackContextKind(StrEnum):
 class MediaAccessOperation(StrEnum):
     STREAM = "stream"
     DOWNLOAD = "download"
+    SUBTITLE = "subtitle"
 
 
 class PlaybackSessionEventKind(StrEnum):
     PROGRESS = "progress"
     COMPLETED = "completed"
     ADVANCED = "advanced"
+
+
+class SubtitleVerticalPosition(StrEnum):
+    AUTHOR = "author"
+    TOP = "top"
+    MIDDLE = "middle"
+    BOTTOM = "bottom"
 
 
 class UserRole(StrEnum):
@@ -181,6 +191,8 @@ class Kura(Base):
         _enum(ZaisanKind, "library_item_kind"), nullable=False
     )
     default_tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    preferred_audio_language: Mapped[str | None] = mapped_column(String(32))
+    preferred_subtitle_language: Mapped[str | None] = mapped_column(String(32))
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String)
     last_scan_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -332,6 +344,19 @@ class Zaisan(Base):
     selected_artwork_ids: Mapped[dict[str, int]] = mapped_column(
         JSON, nullable=False, default=dict, server_default="{}"
     )
+    default_audio_stream_index: Mapped[int | None] = mapped_column(Integer)
+    force_default_audio_stream: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    default_subtitle_track_id: Mapped[str | None] = mapped_column(String(64))
+    force_default_subtitle_track: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    default_subtitle_timing_offset_milliseconds: Mapped[int | None] = mapped_column(Integer)
+    default_subtitle_font_scale_percent: Mapped[int | None] = mapped_column(Integer)
+    force_default_subtitle_font_scale: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -473,6 +498,12 @@ class MediaFile(Base):
     )
     audio_streams: Mapped[list[JSONObject]] = mapped_column(JSON, nullable=False, default=list)
     subtitle_streams: Mapped[list[JSONObject]] = mapped_column(JSON, nullable=False, default=list)
+    font_attachments: Mapped[list[JSONObject]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     local_poster_path: Mapped[str | None] = mapped_column(String)
     subtitle_sidecar_paths: Mapped[list[str]] = mapped_column(
         JSON,
@@ -892,6 +923,28 @@ class PlaybackSessionEntry(Base):
         ForeignKey("media_file.id", ondelete="CASCADE"), nullable=False
     )
     source_watch_order_position: Mapped[int | None] = mapped_column(Integer)
+    selected_audio_stream_index: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    selected_subtitle_track_id: Mapped[str | None] = mapped_column(String(32))
+    subtitle_timing_offset_milliseconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    subtitle_font_scale_percent: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default="100"
+    )
+    subtitle_background: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    subtitle_shadow: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    subtitle_vertical_position: Mapped[SubtitleVerticalPosition] = mapped_column(
+        _enum(SubtitleVerticalPosition, "subtitle_vertical_position"),
+        nullable=False,
+        default=SubtitleVerticalPosition.AUTHOR,
+        server_default=SubtitleVerticalPosition.AUTHOR.value,
+    )
 
     session: Mapped[PlaybackSession] = orm_relationship(back_populates="entries")
     library_item: Mapped[Zaisan] = orm_relationship(back_populates="playback_session_entries")
@@ -902,6 +955,21 @@ class PlaybackSessionEntry(Base):
         CheckConstraint(
             "source_watch_order_position IS NULL OR source_watch_order_position >= 0",
             name="nonnegative_source_watch_order_position",
+        ),
+        CheckConstraint(
+            "selected_audio_stream_index >= 0",
+            name="nonnegative_selected_audio_stream_index",
+        ),
+        CheckConstraint(
+            "subtitle_timing_offset_milliseconds BETWEEN "
+            f"{-MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS} "
+            f"AND {MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS}",
+            name="valid_subtitle_timing_offset_milliseconds",
+        ),
+        CheckConstraint(
+            "subtitle_font_scale_percent BETWEEN 75 AND 200 "
+            "AND subtitle_font_scale_percent % 25 = 0",
+            name="valid_subtitle_font_scale_percent",
         ),
         Index(
             "ix_playback_session_entry_position",
@@ -945,6 +1013,7 @@ class MediaAccessToken(Base):
     operation: Mapped[MediaAccessOperation] = mapped_column(
         _enum(MediaAccessOperation, "media_access_operation"), nullable=False
     )
+    subtitle_sidecar_path: Mapped[str | None] = mapped_column(String)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     session: Mapped[PlaybackSession] = orm_relationship(back_populates="access_tokens")
