@@ -30,6 +30,7 @@ async def render_item(
     profile: SessionProfile,
     item_id: int,
     playback_session: PlaybackSessionResponse | None = None,
+    play_on_load: bool = False,
 ) -> None:
     """Render useful detail, playback, and compact child navigation for one item."""
 
@@ -47,7 +48,11 @@ async def render_item(
             return
 
         if playback_session is not None:
-            render_browser_playback_card(playback_session)
+            render_browser_playback_card(
+                playback_session,
+                autoplay_on_resume=profile.user.autoplay_on_resume,
+                play_on_load=play_on_load,
+            )
 
         with ui.element("article").classes("k-item"):
             with ui.element("div").classes("k-item__art"):
@@ -117,7 +122,7 @@ def _item_actions(
         except KatalogClientError:
             status.set_text("Could not start playback.")
             return
-        ui.navigate.to(f"/item/{item_id}?playbackSession={session.id}")
+        ui.navigate.to(f"/item/{item_id}?playbackSession={session.id}&start=true")
 
     async def stop() -> None:
         if playback_session_id is None:
@@ -169,6 +174,7 @@ def _item_editor_button(item_id: int, profile: SessionProfile) -> None:
         {
             "item-id": item_id,
             "source": f"/kanvas/data/items/{item_id}/edit",
+            "parent-choices-source": f"/kanvas/data/items/{item_id}/parent-choices",
             "action-source": f"/kanvas/actions/items/{item_id}",
         },
     )

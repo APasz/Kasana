@@ -78,6 +78,7 @@ from kasana.kanvas.viewmodels.library import (
     PosterView,
 )
 from kasana.katalog.public import (
+    MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
     ArtworkFetchRequest,
     CollectionRelationship,
     DuplicateResolutionBatchRequest,
@@ -87,6 +88,7 @@ from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryConsistencyRequest,
+    LibraryItemKind,
     LibraryItemUpdate,
     LibraryRootCreate,
     LibraryRootKind,
@@ -115,6 +117,7 @@ _pages_registered = False
 _LOGGER = logging.getLogger(__name__)
 _MAX_BROWSER_SUBTITLE_BYTES = 8 * 1024 * 1024
 _MAX_BROWSER_SUBTITLE_FONT_BYTES = 16 * 1024 * 1024
+_SUBTITLE_CACHE_CONTROL = "private, max-age=300"
 _SUBTITLE_FONT_CONTENT_TYPES: Mapping[PlaybackSubtitleFontFormat, str] = {
     PlaybackSubtitleFontFormat.TRUETYPE: "font/ttf",
     PlaybackSubtitleFontFormat.OPENTYPE: "font/otf",
@@ -261,6 +264,8 @@ async def update_current_profile(request: Request) -> JSONResponse:
         values["default_subtitle_background"] = _boolean(payload, "defaultSubtitleBackground")
     if "defaultSubtitleShadow" in payload:
         values["default_subtitle_shadow"] = _boolean(payload, "defaultSubtitleShadow")
+    if "autoplayOnResume" in payload:
+        values["autoplay_on_resume"] = _boolean(payload, "autoplayOnResume")
     try:
         update = UserUpdate.model_validate(values)
         async with KatalogClient(
@@ -474,7 +479,10 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
         item, audit = await gather(
             service.item_edit_detail(item_id), service.item_edit_audit(item_id)
         )
-        collection_choices = await service.item_edit_collection_choices(item)
+        collection_choices, parent_choices = await gather(
+            service.item_edit_collection_choices(item),
+            service.item_parent_choices(item_id, target_kind=item.kind),
+        )
     except KatalogClientError as error:
         return _katalog_data_error(error, "Katalog could not load this item for editing.")
     return JSONResponse(
@@ -482,11 +490,35 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
             "item": item.model_dump(mode="json"),
             "audit": [entry.model_dump(mode="json") for entry in audit],
             "collectionChoices": [choice.model_dump(mode="json") for choice in collection_choices],
+            "parentChoices": [choice.model_dump(mode="json") for choice in parent_choices],
             "collectionRelationships": [
                 relationship.value for relationship in CollectionRelationship
             ],
         }
     )
+
+
+@app.get("/kanvas/data/items/{item_id}/parent-choices", include_in_schema=False)
+async def item_parent_choices_data(item_id: int, request: Request) -> JSONResponse:
+    """Return type-valid, same-root parent choices for the item edit dialog."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    raw_kind = request.query_params.get("kind")
+    try:
+        target_kind = LibraryItemKind(raw_kind)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "A valid item kind is required."}, status_code=422)
+    try:
+        choices = await KanvasKatalogService(_settings, profile.user.id).item_parent_choices(
+            item_id, target_kind=target_kind
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not load eligible parents.")
+    return JSONResponse({"parentChoices": [choice.model_dump(mode="json") for choice in choices]})
 
 
 @app.post("/kanvas/actions/items/{item_id}", include_in_schema=False)
@@ -1286,7 +1318,9 @@ async def playback_subtitle(
     if track is None or track.format is PlaybackSubtitleFormat.UNSUPPORTED:
         raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
     offset_seconds = _requested_subtitle_offset_seconds(request, entry.duration_seconds)
-    timing_offset_seconds = entry.subtitle_timing_offset_milliseconds / 1_000
+    timing_offset_seconds = _requested_subtitle_timing_offset_seconds(
+        request, entry.subtitle_timing_offset_milliseconds
+    )
     if track.source is PlaybackSubtitleSource.SIDECAR:
         if track.content_url is None:
             raise HTTPException(status_code=404, detail="Playback subtitle is unavailable.")
@@ -1304,7 +1338,7 @@ async def playback_subtitle(
         return Response(
             content=content,
             media_type="text/x-ssa",
-            headers={"Cache-Control": "no-store"},
+            headers=_subtitle_cache_headers(),
         )
     try:
         return Response(
@@ -1315,7 +1349,7 @@ async def playback_subtitle(
                 timing_offset_seconds=timing_offset_seconds,
             ),
             media_type="text/vtt",
-            headers={"Cache-Control": "no-store"},
+            headers=_subtitle_cache_headers(),
         )
     except SubtitleConversionError as error:
         raise HTTPException(
@@ -1397,6 +1431,8 @@ async def playback_progress(session_id: str, request: Request) -> Response:
     except ValueError:
         return _invalid_action("Playback session is invalid.")
     except KatalogClientError as error:
+        if error.kind is KatalogClientErrorKind.NOT_FOUND:
+            return Response(status_code=204)
         return _katalog_data_error(error, "Playback progress could not be saved.")
     return Response(status_code=204)
 
@@ -1651,6 +1687,12 @@ def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return dict(headers)
 
 
+def _subtitle_cache_headers() -> dict[str, str]:
+    """Keep immutable, session-scoped subtitle variants in the private browser cache."""
+
+    return {"Cache-Control": _SUBTITLE_CACHE_CONTROL, "Vary": "Cookie"}
+
+
 def _requested_playback_delivery(request: Request) -> tuple[PlaybackMode, int]:
     """Parse the small, server-validated delivery selector issued by Kanvas."""
 
@@ -1706,6 +1748,28 @@ def _requested_subtitle_offset_seconds(request: Request, duration_seconds: float
     return offset_seconds
 
 
+def _requested_subtitle_timing_offset_seconds(
+    request: Request, default_milliseconds: int
+) -> float:
+    """Read a bounded subtitle timing adjustment, defaulting to the saved session value."""
+
+    value = request.query_params.get("timingOffsetMilliseconds")
+    if value is None:
+        return default_milliseconds / 1_000
+    try:
+        timing_offset_milliseconds = int(value)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422, detail="Playback subtitle timing offset is invalid."
+        ) from error
+    if (
+        str(timing_offset_milliseconds) != value
+        or abs(timing_offset_milliseconds) > MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS
+    ):
+        raise HTTPException(status_code=422, detail="Playback subtitle timing offset is invalid.")
+    return timing_offset_milliseconds / 1_000
+
+
 def _optional_track_id(value: object) -> str | None:
     if value is None:
         return None
@@ -1746,7 +1810,7 @@ async def _direct_webvtt_sidecar(subtitle_url: str) -> PlaybackStreamingResponse
 
     headers = _stream_response_headers(transfer.headers)
     headers["Content-Type"] = "text/vtt"
-    headers["Cache-Control"] = "no-store"
+    headers.update(_subtitle_cache_headers())
     return PlaybackStreamingResponse(stream(), status_code=transfer.status_code, headers=headers)
 
 
@@ -2410,6 +2474,7 @@ async def item_page(item_id: int, request: Request) -> Response | None:
     if isinstance(profile, RedirectResponse):
         return profile
     session_id = request.query_params.get("playbackSession")
+    play_on_load = _query_boolean(request, "start", default=False)
     playback_session = None
     if session_id is not None:
         try:
@@ -2430,11 +2495,12 @@ async def item_page(item_id: int, request: Request) -> Response | None:
                 )
             return
         if current_item.item_id != item_id:
+            start_query = "&start=true" if play_on_load else ""
             return RedirectResponse(
-                f"/item/{current_item.item_id}?playbackSession={playback_session.id}",
+                f"/item/{current_item.item_id}?playbackSession={playback_session.id}{start_query}",
                 status_code=303,
             )
-    await render_item(_settings, profile, item_id, playback_session)
+    await render_item(_settings, profile, item_id, playback_session, play_on_load)
 
 
 async def play_item_page(item_id: int, request: Request) -> Response | None:
@@ -2457,8 +2523,9 @@ async def play_item_page(item_id: int, request: Request) -> Response | None:
         with page_shell(_settings, "/library", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
+    start_query = "&start=true" if not resume else ""
     return RedirectResponse(
-        f"/item/{current_item.item_id}?playbackSession={session.id}", status_code=303
+        f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
 
 
@@ -2497,8 +2564,9 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
         with page_shell(_settings, "/collections", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
+    start_query = "&start=true" if not resume else ""
     return RedirectResponse(
-        f"/item/{current_item.item_id}?playbackSession={session.id}", status_code=303
+        f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
 
 

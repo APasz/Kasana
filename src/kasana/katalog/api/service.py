@@ -388,6 +388,7 @@ class KatalogQueryService:
                 default_subtitle_font_scale_percent=request.default_subtitle_font_scale_percent,
                 default_subtitle_background=request.default_subtitle_background,
                 default_subtitle_shadow=request.default_subtitle_shadow,
+                autoplay_on_resume=request.autoplay_on_resume,
             )
             self._user_configurations.save(user.id, configuration)
             return _profile_summary(user.id, configuration)
@@ -446,6 +447,10 @@ class KatalogQueryService:
             if "default_subtitle_shadow" in values:
                 configuration = configuration.model_copy(
                     update={"default_subtitle_shadow": request.default_subtitle_shadow}
+                )
+            if "autoplay_on_resume" in values:
+                configuration = configuration.model_copy(
+                    update={"autoplay_on_resume": request.autoplay_on_resume}
                 )
             self._user_configurations.save(user.id, configuration)
             session.flush()
@@ -872,6 +877,33 @@ class KatalogQueryService:
         def load(session: Session) -> LibraryItemDetail:
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             return _detail(session, item)
+
+        return self._database.run_transaction(load)
+
+    def item_parent_choices(
+        self, item_id: int, *, target_kind: LibraryItemKind
+    ) -> tuple[LibraryItemSummary, ...]:
+        """List same-root parents valid for a prospective hierarchy edit."""
+
+        def load(session: Session) -> tuple[LibraryItemSummary, ...]:
+            item = _require(session, Zaisan, item_id, "Library item")
+            parent_kinds = allowed_parent_kinds(ZaisanKind(target_kind.value))
+            if parent_kinds is None:
+                return ()
+            excluded_ids = _item_descendant_ids(session, item)
+            candidates = tuple(
+                session.scalars(
+                    select(Zaisan)
+                    .where(
+                        Zaisan.library_root_id == item.library_root_id,
+                        Zaisan.item_kind.in_(parent_kinds),
+                        Zaisan.id.not_in(excluded_ids),
+                    )
+                    .order_by(func.natural_sort_key(Zaisan.sort_title), Zaisan.sort_title, Zaisan.id)
+                )
+            )
+            summaries = _summaries_for(session, candidates)
+            return tuple(summaries[candidate.id] for candidate in candidates)
 
         return self._database.run_transaction(load)
 
@@ -2843,6 +2875,7 @@ def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSumm
         default_subtitle_font_scale_percent=configuration.default_subtitle_font_scale_percent,
         default_subtitle_background=configuration.default_subtitle_background,
         default_subtitle_shadow=configuration.default_subtitle_shadow,
+        autoplay_on_resume=configuration.autoplay_on_resume,
     )
 
 
@@ -3148,6 +3181,27 @@ def _validate_item_hierarchy(
             raise CatalogueValidationError(
                 f"Changing this item to {target_kind.value} would invalidate child {child.id}."
             )
+
+
+def _item_descendant_ids(session: Session, item: Zaisan) -> set[int]:
+    """Return an item and every descendant so hierarchy pickers cannot create a cycle."""
+
+    children_by_parent: dict[int, list[int]] = {}
+    for child_id, parent_id in session.execute(
+        select(Zaisan.id, Zaisan.parent_id).where(Zaisan.library_root_id == item.library_root_id)
+    ):
+        if parent_id is not None:
+            children_by_parent.setdefault(parent_id, []).append(child_id)
+    descendant_ids = {item.id}
+    pending_ids = [item.id]
+    while pending_ids:
+        parent_id = pending_ids.pop()
+        for child_id in children_by_parent.get(parent_id, ()):
+            if child_id in descendant_ids:
+                continue
+            descendant_ids.add(child_id)
+            pending_ids.append(child_id)
+    return descendant_ids
 
 
 def _validated_artwork_selection(

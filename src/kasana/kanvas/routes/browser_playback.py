@@ -180,7 +180,12 @@ def _subtitle_timing_label(offset_milliseconds: int) -> str:
     return f"{offset_milliseconds / 1_000:+.1f}s"
 
 
-def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
+def render_browser_playback_card(
+    session: PlaybackSessionResponse,
+    *,
+    autoplay_on_resume: bool = False,
+    play_on_load: bool = False,
+) -> None:
     """Render one current session entry with custom browser playback controls."""
 
     entry = session.current_item
@@ -197,6 +202,8 @@ def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
         .props(
             f'session-id="{session.id}" entry-position="{entry.position}" '
             f'resume-position="{entry.saved_resume_position_seconds}" '
+            f'autoplay-on-resume="{str(autoplay_on_resume).lower()}" '
+            f'play-on-load="{str(play_on_load).lower()}" '
             f'subtitle-timing-offset-milliseconds="{entry.subtitle_timing_offset_milliseconds}"'
             f' subtitle-font-scale-percent="{entry.subtitle_font_scale_percent}"'
             f' subtitle-background="{str(entry.subtitle_background).lower()}"'
@@ -214,13 +221,16 @@ def render_browser_playback_card(session: PlaybackSessionResponse) -> None:
             'data-player-kestrel hidden aria-live="polite"'
         )
         ui.element("video").classes("k-player__video").props(
-            'autoplay playsinline preload="metadata"'
+            'playsinline preload="metadata"'
         )
         for font in entry.subtitle_font_attachments:
             ui.element("span").props(f'data-player-ass-font="{font.id}" hidden')
         with ui.element("div").classes("k-player__progress"):
             ui.label("0:00").classes("k-player__time k-player__bar-label").props(
                 'data-player-current-time aria-live="off"'
+            )
+            ui.element("span").classes("k-player__buffered").props(
+                'data-player-buffered aria-hidden="true"'
             )
             ui.element("input").classes("k-player__timeline").props(
                 'type="range" min="0" max="0" value="0" step="0.1" '

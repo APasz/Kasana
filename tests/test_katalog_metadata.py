@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
 from datetime import date
 from pathlib import Path
 
@@ -38,14 +37,6 @@ from kasana.shared.metadata import (
     SearchResult,
     SeriesDetails,
 )
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Generator[KatalogDatabase]:
-    result = KatalogDatabase(tmp_path / "metadata.sqlite3")
-    result.create_schema()
-    yield result
-    result.close()
 
 
 class _FakeProvider:

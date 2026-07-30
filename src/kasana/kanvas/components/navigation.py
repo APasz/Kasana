@@ -70,6 +70,7 @@ def _navigation(
                         f"{profile.user.default_subtitle_font_scale_percent!r}",
                         f"data-default-subtitle-background={str(profile.user.default_subtitle_background).lower()!r}",
                         f"data-default-subtitle-shadow={str(profile.user.default_subtitle_shadow).lower()!r}",
+                        f"data-autoplay-on-resume={str(profile.user.autoplay_on_resume).lower()!r}",
                     )
                 )
             )

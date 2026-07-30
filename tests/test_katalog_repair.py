@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -39,14 +37,6 @@ from kasana.katalog.services import (
     create_watch_order,
     record_playback_progress,
 )
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Generator[KatalogDatabase]:
-    katalog_database = KatalogDatabase(tmp_path / "katalog.sqlite3")
-    katalog_database.create_schema()
-    yield katalog_database
-    katalog_database.close()
 
 
 def test_hierarchy_repair_renames_decade_pseudo_movie_without_changing_its_id(

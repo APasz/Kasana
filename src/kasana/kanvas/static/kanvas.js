@@ -56,7 +56,8 @@
     preferredSubtitleLanguage,
     defaultSubtitleFontScalePercent,
     defaultSubtitleBackground,
-    defaultSubtitleShadow
+    defaultSubtitleShadow,
+    autoplayOnResume
   ) => `
     <button type="button" class="k-profile-switcher" aria-haspopup="dialog" aria-label="Open profile settings" title="Profile settings">${escapeHtml(name)}</button>
     <dialog class="k-kanvas-dialog k-profile-dialog">
@@ -104,6 +105,8 @@
             </label>
             <label class="k-check"><input type="checkbox" name="defaultSubtitleBackground"${defaultSubtitleBackground ? ' checked' : ''}> Subtitle backdrop</label>
             <label class="k-check"><input type="checkbox" name="defaultSubtitleShadow"${defaultSubtitleShadow ? ' checked' : ''}> Subtitle shadow</label>
+            <h3 class="k-profile-section-heading">Playback</h3>
+            <label class="k-check"><input type="checkbox" name="autoplayOnResume"${autoplayOnResume ? ' checked' : ''}> Automatically play media when resuming</label>
           </section>
           <div class="k-picker__status" data-profile-status aria-live="polite"></div>
           <div class="k-profile-actions">
@@ -136,6 +139,7 @@
       );
       const defaultSubtitleBackground = this.getAttribute('data-default-subtitle-background') === 'true';
       const defaultSubtitleShadow = this.getAttribute('data-default-subtitle-shadow') === 'true';
+      const autoplayOnResume = this.getAttribute('data-autoplay-on-resume') === 'true';
       this.innerHTML = profileMenuMarkup(
         name,
         accentColour,
@@ -145,7 +149,8 @@
           ? defaultSubtitleFontScalePercent
           : 100,
         defaultSubtitleBackground,
-        defaultSubtitleShadow
+        defaultSubtitleShadow,
+        autoplayOnResume
       );
       this.dialog = this.querySelector('dialog');
       this.status = this.querySelector('[data-profile-status]');
@@ -280,6 +285,10 @@
       if (shadowInput instanceof HTMLInputElement) {
         shadowInput.checked = this.getAttribute('data-default-subtitle-shadow') === 'true';
       }
+      const autoplayOnResumeInput = form.elements.namedItem('autoplayOnResume');
+      if (autoplayOnResumeInput instanceof HTMLInputElement) {
+        autoplayOnResumeInput.checked = this.getAttribute('data-autoplay-on-resume') === 'true';
+      }
       this.selectTab('profile');
       this.pinClearRequested = false;
       this.setStatus('');
@@ -316,6 +325,7 @@
       );
       profilePayload.defaultSubtitleBackground = data.has('defaultSubtitleBackground');
       profilePayload.defaultSubtitleShadow = data.has('defaultSubtitleShadow');
+      profilePayload.autoplayOnResume = data.has('autoplayOnResume');
       if (pin) profilePayload.pin = pin;
       else if (this.pinClearRequested) profilePayload.pin = null;
       this.saveButton?.setAttribute('disabled', 'disabled');
@@ -339,6 +349,7 @@
           'data-default-subtitle-background', String(profile.default_subtitle_background)
         );
         this.setAttribute('data-default-subtitle-shadow', String(profile.default_subtitle_shadow));
+        this.setAttribute('data-autoplay-on-resume', String(profile.autoplay_on_resume));
         document.documentElement.style.setProperty('--k-accent', savedColour);
         const pinInput = form.elements.namedItem('pin');
         if (pinInput instanceof HTMLInputElement) pinInput.value = '';
@@ -381,7 +392,7 @@
     const poster = value;
     if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id) || poster.id <= 0) return null;
     if (typeof poster.title !== 'string' || !poster.title) return null;
-    if (typeof poster.href !== 'string' || !/^\/(?:item\/\d+|play\/watch-orders\/\d+\?resume=true)$/.test(poster.href)) return null;
+    if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
@@ -1878,6 +1889,15 @@
   const itemEditorRelevantLocks = (kind) => ITEM_EDITOR_LOCK_FIELDS.filter((field) => field.kinds.includes(kind));
   const itemEditorNumberFields = (kind) => ITEM_EDITOR_NUMBER_FIELDS[kind] || [];
   const itemEditorItemValue = (item, value) => item?.[value] ?? '';
+  const normaliseItemEditorParentChoice = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const choice = value;
+    if (!Number.isSafeInteger(choice.id) || choice.id <= 0) return null;
+    if (typeof choice.title !== 'string' || !choice.title.trim()) return null;
+    if (!ITEM_EDITOR_KINDS.includes(choice.kind)) return null;
+    if (choice.season_number != null && (!Number.isSafeInteger(choice.season_number) || choice.season_number < 0)) return null;
+    return choice;
+  };
 
   class KanvasItemEditor extends HTMLElement {
     constructor() {
@@ -1885,15 +1905,27 @@
       this.dialog = null;
       this.status = null;
       this.controller = null;
-      this.initialLocks = new Set();
+      this.lockedMetadataFields = new Set();
       this.initialSelectedArtwork = new Map();
       this.currentItem = null;
+      this.parentChoices = [];
+      this.parentChoiceLoad = 0;
+      this.isDirty = false;
+      this.isSaving = false;
     }
 
     connectedCallback() {
       this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit Details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
       this.dialog = this.querySelector('dialog');
       this.querySelector('[data-item-edit-open]')?.addEventListener('click', () => this.open());
+      this.dialog?.addEventListener('cancel', (event) => {
+        if (!this.confirmDiscard()) event.preventDefault();
+      });
+      this.dialog?.addEventListener('close', () => {
+        this.controller?.abort();
+        this.isDirty = false;
+        this.isSaving = false;
+      });
     }
 
     disconnectedCallback() { this.controller?.abort(); }
@@ -1904,6 +1936,16 @@
       await this.load();
     }
 
+    confirmDiscard() {
+      if (this.isSaving || !this.isDirty) return !this.isSaving;
+      return window.confirm('Discard unsaved changes to this item?');
+    }
+
+    requestClose() {
+      if (!this.confirmDiscard()) return;
+      this.dialog?.close();
+    }
+
     async load() {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
@@ -1911,7 +1953,10 @@
       this.controller?.abort();
       this.controller = new AbortController();
       const source = this.getAttribute('source');
-      if (!source) return;
+      if (!source) {
+        content.innerHTML = '<div class="k-picker__status">This item cannot be edited because its data source is unavailable.</div>';
+        return;
+      }
       try {
         const response = await fetch(source, {headers: {'Accept': 'application/json'}, credentials: 'same-origin', signal: this.controller.signal});
         if (!response.ok) throw new Error('Item editor request failed');
@@ -1921,21 +1966,22 @@
           payload.item,
           Array.isArray(payload.audit) ? payload.audit : [],
           Array.isArray(payload.collectionChoices) ? payload.collectionChoices : [],
-          Array.isArray(payload.collectionRelationships) ? payload.collectionRelationships : []
+          Array.isArray(payload.collectionRelationships) ? payload.collectionRelationships : [],
+          Array.isArray(payload.parentChoices) ? payload.parentChoices : []
         );
       } catch (error) {
         if (error?.name !== 'AbortError') content.innerHTML = '<div class="k-picker__status">This item could not be loaded for editing. Close and try again.</div>';
       }
     }
 
-    render(item, audit, collectionChoices, collectionRelationships) {
+    render(item, audit, collectionChoices, collectionRelationships, parentChoices) {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
       this.currentItem = item;
       const selected = new Map((Array.isArray(item.selected_artwork) ? item.selected_artwork : []).map((entry) => [entry.kind, entry.artwork_id]));
       this.initialSelectedArtwork = selected;
       const locks = new Set(Array.isArray(item.locked_metadata_fields) ? item.locked_metadata_fields : []);
-      this.initialLocks = locks;
+      this.lockedMetadataFields = locks;
       const artworks = Array.isArray(item.artwork) ? item.artwork : [];
       const artworkKinds = [...new Set(artworks.map((artwork) => artwork.kind))];
       const artworkRows = this.renderArtworkRows(artworks, artworkKinds, selected);
@@ -1944,16 +1990,53 @@
       const collectionControls = this.renderCollectionControls(
         item, collectionChoices, collectionRelationships
       );
+      this.parentChoices = parentChoices.map(normaliseItemEditorParentChoice).filter(Boolean);
       content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><strong>Edit details</strong><button type="button" class="k-button" data-item-editor-close>Close</button></div><div class="k-item-editor__summary"><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span><span>${escapeHtml(item.title || `Item ${item.id || ''}`)}</span></div><section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><details><summary>Metadata locks</summary><div class="k-item-editor__checks" data-item-editor-locks>${this.renderLockRows(kind, locks)}</div></details><details><summary>Selected artwork</summary><div class="k-item-editor__artwork-grid">${artworkRows}</div></details><details><summary>Advanced hierarchy</summary><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></details>${collectionControls}<details><summary>Edit audit</summary><ul class="k-item-editor__audit">${auditRows}</ul></details><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save metadata</button></div></form>`;
       const auditDetails = Array.from(content.querySelectorAll('details')).find(
         (details) => details.querySelector('summary')?.textContent === 'Edit audit'
       );
       auditDetails?.insertAdjacentHTML('beforebegin', this.renderPlaybackDefaults(item));
       this.status = content.querySelector('[data-item-editor-status]');
-      content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.dialog?.close());
-      content.querySelector('[data-item-editor-form]')?.addEventListener('submit', (event) => this.submit(event));
-      content.querySelector('[data-item-editor-kind]')?.addEventListener('change', (event) => this.updateKindFields(event.currentTarget?.value));
+      content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.requestClose());
+      const form = content.querySelector('[data-item-editor-form]');
+      form?.addEventListener('submit', (event) => this.submit(event));
+      form?.addEventListener('input', () => { this.isDirty = true; });
+      form?.addEventListener('change', () => { this.isDirty = true; });
+      content.querySelector('[data-item-editor-kind]')?.addEventListener('change', (event) => {
+        void this.updateKindFields(event.currentTarget?.value);
+      });
       this.bindCollectionControls(content);
+      this.bindPlaybackForceControls(content);
+      this.addVisibleFieldLabels(content);
+      this.isDirty = false;
+    }
+
+    addVisibleFieldLabels(content) {
+      const labels = {
+        title: 'Title',
+        sortTitle: 'Sort title',
+        overview: 'Overview',
+        releaseDate: 'Release date',
+        releaseYear: 'Release year',
+        tags: 'Tags',
+        seasonNumber: 'Season number',
+        episodeNumber: 'Episode number',
+        kind: 'Item type',
+        defaultAudioStreamIndex: 'Default audio',
+        defaultSubtitleTrackId: 'Default subtitles',
+        defaultSubtitleTimingOffsetMilliseconds: 'Subtitle timing',
+        defaultSubtitleFontScalePercent: 'Subtitle size',
+      };
+      Object.entries(labels).forEach(([name, label]) => {
+        const control = content.querySelector(`[name="${name}"]`);
+        const shell = control?.closest('.k-control-shell');
+        if (!shell || shell.querySelector('.k-item-editor__field-label')) return;
+        const fieldLabel = document.createElement('span');
+        fieldLabel.className = 'k-item-editor__field-label';
+        fieldLabel.textContent = label;
+        shell.classList.add('k-item-editor__field');
+        shell.prepend(fieldLabel);
+      });
     }
 
     renderCollectionControls(item, collectionChoices, collectionRelationships) {
@@ -2053,15 +2136,32 @@
       }
     }
 
-    renderKindFields(kind, item) {
+    renderKindFields(kind, item, values = new Map()) {
       const fields = itemEditorNumberFields(kind);
       if (!fields.length) return '';
-      return `<div class="k-item-editor__grid">${fields.map((field) => `<label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="${field.name}" value="${itemEditorItemValue(item, field.value)}" placeholder="${field.placeholder}" aria-label="${field.label}"></label>`).join('')}</div>`;
+      return `<div class="k-item-editor__grid">${fields.map((field) => {
+        const value = values.has(field.name)
+          ? values.get(field.name)
+          : itemEditorItemValue(item, field.value);
+        return `<label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="0" name="${field.name}" value="${escapeHtml(String(value ?? ''))}" placeholder="${field.placeholder}" aria-label="${field.label}"></label>`;
+      }).join('')}</div>`;
     }
 
-    renderHierarchyFields(kind, item) {
+    renderHierarchyFields(kind, item, parentId, parentChoices = this.parentChoices) {
       if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) return '<span class="k-item-editor__muted">Top-level item</span>';
-      return `<label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" name="parentId" value="${item.parent_id || ''}" placeholder="Parent ID" aria-label="Parent item ID"></label>`;
+      const value = parentId === undefined ? item.parent_id : parentId;
+      const selectedId = value == null ? '' : String(value);
+      const choices = Array.isArray(parentChoices) ? parentChoices : [];
+      const options = choices.map((choice) => {
+        const context = choice.kind === 'season' && choice.season_number != null
+          ? `Season ${choice.season_number}`
+          : ITEM_EDITOR_KIND_LABELS[choice.kind];
+        return `<option value="${choice.id}"${String(choice.id) === selectedId ? ' selected' : ''}>${escapeHtml(choice.title)} · ${escapeHtml(context)}</option>`;
+      }).join('');
+      const emptyOption = choices.length
+        ? '<option value="">Select a parent</option>'
+        : '<option value="">No eligible parents are available</option>';
+      return `<label class="k-item-editor__field"><span class="k-item-editor__field-label">Parent</span><span class="k-control-shell k-select-wrap"><select class="k-select" name="parentId" aria-label="Parent item" required>${emptyOption}${options}</select></span></label>`;
     }
 
     renderLockRows(kind, locks) {
@@ -2083,16 +2183,93 @@
       }).join('');
     }
 
-    updateKindFields(value) {
+    async updateKindFields(value) {
       const kind = itemEditorKind(value);
       const content = this.querySelector('[data-item-editor-content]');
       const item = this.currentItem || {};
       const fields = content?.querySelector('[data-item-editor-kind-fields]');
       const locks = content?.querySelector('[data-item-editor-locks]');
       const hierarchy = content?.querySelector('[data-item-editor-hierarchy-fields]');
-      if (fields) fields.innerHTML = this.renderKindFields(kind, item);
-      if (locks) locks.innerHTML = this.renderLockRows(kind, this.initialLocks);
-      if (hierarchy) hierarchy.innerHTML = this.renderHierarchyFields(kind, item);
+      const fieldValues = new Map(
+        Array.from(content?.querySelectorAll('[data-item-editor-kind-fields] input[name]') || [])
+          .filter((input) => typeof input.name === 'string' && typeof input.value === 'string')
+          .map((input) => [input.name, input.value])
+      );
+      const parentInput = content?.querySelector('[data-item-editor-hierarchy-fields] [name="parentId"]');
+      const parentId = parentInput && typeof parentInput.value === 'string'
+        ? parentInput.value
+        : undefined;
+      this.lockedMetadataFields = this.lockedMetadataFieldsFromForm(content);
+      if (fields) fields.innerHTML = this.renderKindFields(kind, item, fieldValues);
+      if (locks) locks.innerHTML = this.renderLockRows(kind, this.lockedMetadataFields);
+      this.addVisibleFieldLabels(content);
+      const load = ++this.parentChoiceLoad;
+      const saveButton = content.querySelector('button[type="submit"]');
+      if (!hierarchy) return;
+      if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) {
+        this.parentChoices = [];
+        hierarchy.innerHTML = this.renderHierarchyFields(kind, item, parentId);
+        if (saveButton) saveButton.disabled = false;
+        return;
+      }
+      if (saveButton) saveButton.disabled = true;
+      hierarchy.innerHTML = '<span class="k-item-editor__muted">Loading eligible parents…</span>';
+      try {
+        const choices = await this.loadParentChoices(kind);
+        if (load !== this.parentChoiceLoad) return;
+        this.parentChoices = choices;
+        hierarchy.innerHTML = this.renderHierarchyFields(kind, item, parentId);
+        if (saveButton) saveButton.disabled = false;
+      } catch (_) {
+        if (load !== this.parentChoiceLoad) return;
+        this.parentChoices = [];
+        hierarchy.innerHTML = `${this.renderHierarchyFields(kind, item, parentId)}<span class="k-item-editor__muted">Eligible parents could not be loaded.</span>`;
+        if (saveButton) saveButton.disabled = false;
+      }
+    }
+
+    async loadParentChoices(kind) {
+      const source = this.getAttribute('parent-choices-source');
+      if (!source) throw new Error('Missing parent choices source');
+      const url = new URL(source, window.location.origin);
+      url.searchParams.set('kind', kind);
+      const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+      if (!response.ok) throw new Error('Parent choices request failed');
+      const payload = await response.json();
+      if (!Array.isArray(payload.parentChoices)) throw new Error('Parent choices response was invalid');
+      return payload.parentChoices.map(normaliseItemEditorParentChoice).filter(Boolean);
+    }
+
+    bindPlaybackForceControls(content) {
+      const pairs = [
+        ['defaultAudioStreamIndex', 'forceDefaultAudioStream'],
+        ['defaultSubtitleTrackId', 'forceDefaultSubtitleTrack'],
+        ['defaultSubtitleFontScalePercent', 'forceDefaultSubtitleFontScale'],
+      ];
+      pairs.forEach(([choiceName, forceName]) => {
+        const choice = content.querySelector(`[name="${choiceName}"]`);
+        const force = content.querySelector(`[name="${forceName}"]`);
+        const forceControl = force?.closest('.k-check');
+        if (!(choice instanceof HTMLSelectElement) || !(force instanceof HTMLInputElement) || !forceControl) return;
+        const sync = () => {
+          const visible = choice.value !== '';
+          forceControl.hidden = !visible;
+          force.disabled = !visible;
+          if (!visible) force.checked = false;
+        };
+        choice.addEventListener('change', sync);
+        sync();
+      });
+    }
+
+    lockedMetadataFieldsFromForm(form) {
+      const locks = new Set(this.lockedMetadataFields);
+      form?.querySelectorAll('input[name="lock"]').forEach((input) => {
+        if (typeof input.value !== 'string' || typeof input.checked !== 'boolean') return;
+        if (input.checked) locks.add(input.value);
+        else locks.delete(input.value);
+      });
+      return locks;
     }
 
     async submit(event) {
@@ -2103,18 +2280,22 @@
       const payload = this.payloadFromForm(form, values);
       const button = form.querySelector('button[type="submit"]');
       if (button) button.disabled = true;
+      this.isSaving = true;
       this.status.textContent = 'Saving metadata…';
       try {
         const source = this.getAttribute('action-source');
         if (!source) throw new Error('Missing item edit action');
         const response = await fetch(source, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify(payload)});
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Item edit failed');
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(typeof result.error === 'string' ? result.error : 'Item edit failed');
+        }
         this.status.textContent = `Saved ${result.audit?.changed_fields?.join(', ') || 'metadata'}.`;
         window.setTimeout(() => window.location.reload(), 450);
       } catch (error) {
         this.status.textContent = error?.message || 'Item edit could not be applied.';
         if (button) button.disabled = false;
+        this.isSaving = false;
       }
     }
 
@@ -2131,11 +2312,7 @@
       for (const [kind, artworkId] of this.initialSelectedArtwork.entries()) {
         if (!visibleArtworkKinds.has(kind)) selectedArtwork.push({kind, artworkId});
       }
-      const visibleLockValues = new Set(Array.from(form.querySelectorAll('input[name="lock"]')).map((input) => input.value));
-      const lockedMetadataFields = Array.from(form.querySelectorAll('input[name="lock"]:checked')).map((input) => input.value);
-      for (const lock of this.initialLocks) {
-        if (!visibleLockValues.has(lock)) lockedMetadataFields.push(lock);
-      }
+      const lockedMetadataFields = Array.from(this.lockedMetadataFieldsFromForm(form));
       const payload = {
         title: String(values.get('title') || ''),
         sortTitle: String(values.get('sortTitle') || ''),
@@ -2157,11 +2334,15 @@
       else if (!ITEM_EDITOR_PARENT_KINDS.has(kind)) payload.parentId = null;
       if (values.has('defaultAudioStreamIndex')) {
         payload.defaultAudioStreamIndex = toNullableNumber('defaultAudioStreamIndex');
-        payload.forceDefaultAudioStream = values.has('forceDefaultAudioStream');
+        payload.forceDefaultAudioStream = (
+          payload.defaultAudioStreamIndex !== null && values.has('forceDefaultAudioStream')
+        );
       }
       if (values.has('defaultSubtitleTrackId')) {
         payload.defaultSubtitleTrackId = String(values.get('defaultSubtitleTrackId') || '') || null;
-        payload.forceDefaultSubtitleTrack = values.has('forceDefaultSubtitleTrack');
+        payload.forceDefaultSubtitleTrack = (
+          payload.defaultSubtitleTrackId !== null && values.has('forceDefaultSubtitleTrack')
+        );
       }
       if (values.has('defaultSubtitleTimingOffsetMilliseconds')) {
         payload.defaultSubtitleTimingOffsetMilliseconds = toNullableNumber(
@@ -2172,7 +2353,10 @@
         payload.defaultSubtitleFontScalePercent = toNullableNumber(
           'defaultSubtitleFontScalePercent'
         );
-        payload.forceDefaultSubtitleFontScale = values.has('forceDefaultSubtitleFontScale');
+        payload.forceDefaultSubtitleFontScale = (
+          payload.defaultSubtitleFontScalePercent !== null
+          && values.has('forceDefaultSubtitleFontScale')
+        );
       }
       if (visibleArtworkKinds.size) payload.selectedArtwork = selectedArtwork;
       return payload;
@@ -2187,6 +2371,7 @@
       const status = this.querySelector('.k-player__status');
       const controls = this.querySelector('.k-player__controls');
       const timeline = this.querySelector('[data-player-timeline]');
+      const bufferedIndicator = this.querySelector('[data-player-buffered]');
       const currentTime = this.querySelector('[data-player-current-time]');
       const remainingTime = this.querySelector('[data-player-remaining-time]');
       const volume = this.querySelector('[data-player-volume]');
@@ -2201,13 +2386,15 @@
       const sessionId = this.getAttribute('session-id');
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
+      const autoplayOnResume = this.getAttribute('autoplay-on-resume') === 'true';
+      const playOnLoad = this.getAttribute('play-on-load') === 'true';
       let catalogueDuration = Number(this.getAttribute('duration-seconds') || '0');
       let subtitleTimingOffsetMilliseconds = Number(this.getAttribute('subtitle-timing-offset-milliseconds') || '0');
       let subtitleFontScalePercent = Number(this.getAttribute('subtitle-font-scale-percent') || '100');
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -2221,11 +2408,35 @@
       let generatedStreamSeekPending = false;
       let pendingDirectSeek = null;
       let assRenderer = null;
+      let nativeSubtitleTrack = null;
+      let nativeSubtitleTrackLoaded = false;
+      let nativeSubtitleTimingOffsetMilliseconds = 0;
+      const nativeSubtitleCueStates = new Map();
+      let pendingTrackSelectionSave = null;
+      let trackSelectionSaveTimer = null;
+      let trackSelectionSaveSequence = Promise.resolve();
+      let latestTrackSelectionSaveVersion = 0;
+      let audioSelectionVersion = 0;
+      let playbackAttemptVersion = 0;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
       let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
       const maxSubtitleTimingOffsetMilliseconds = 30000;
       const minSubtitleFontScalePercent = 75;
       const maxSubtitleFontScalePercent = 200;
+      const selectPlayStatus = 'Select Play to start this video.';
+      const invalidatePlaybackAttempts = () => {
+        playbackAttemptVersion += 1;
+      };
+      const requestPlayback = () => {
+        const attemptVersion = ++playbackAttemptVersion;
+        void video.play().catch(() => {
+          if (attemptVersion !== playbackAttemptVersion || !video.paused) return;
+          status.textContent = selectPlayStatus;
+        });
+      };
+      const clearSelectPlayStatus = () => {
+        if (status.textContent === selectPlayStatus) status.textContent = '';
+      };
       const preserveVideoHeight = () => {
         const height = video.getBoundingClientRect().height;
         if (height <= 0) return;
@@ -2308,14 +2519,18 @@
       };
       const clearNativeSubtitle = () => {
         video.querySelectorAll('track[data-player-subtitle]').forEach((track) => track.remove());
+        nativeSubtitleTrack = null;
+        nativeSubtitleTrackLoaded = false;
+        nativeSubtitleCueStates.clear();
       };
       const disposeAssRenderer = () => {
         if (assRenderer && typeof assRenderer.dispose === 'function') assRenderer.dispose();
         assRenderer = null;
       };
-      const subtitleUrl = (trackId) => {
+      const subtitleUrl = (trackId, timingOffsetMilliseconds = subtitleTimingOffsetMilliseconds) => {
         const url = new URL(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/subtitles/${encodeURIComponent(trackId)}`, window.location.origin);
         if (streamStartSeconds > 0) url.searchParams.set('offsetSeconds', String(streamStartSeconds));
+        url.searchParams.set('timingOffsetMilliseconds', String(timingOffsetMilliseconds));
         return url.href;
       };
       const assFontUrls = () => Array.from(
@@ -2325,7 +2540,43 @@
           window.location.origin,
         ).href,
       );
-      const syncSubtitles = () => {
+      const applyNativeSubtitlePosition = () => {
+        for (const [cue, state] of nativeSubtitleCueStates) {
+          if (!('line' in cue) || !('snapToLines' in cue)) continue;
+          if (subtitleVerticalPosition === 'author') {
+            cue.snapToLines = state.snapToLines;
+            cue.line = state.line;
+            continue;
+          }
+          cue.snapToLines = false;
+          cue.line = {top: 10, middle: 50, bottom: 90}[subtitleVerticalPosition];
+        }
+      };
+      const applyNativeSubtitleTiming = () => {
+        if (!nativeSubtitleTrack || !nativeSubtitleTrackLoaded) return true;
+        const textTrack = nativeSubtitleTrack.track;
+        if (!textTrack || typeof textTrack.addCue !== 'function' || typeof textTrack.removeCue !== 'function') return false;
+        const timingDeltaSeconds = (subtitleTimingOffsetMilliseconds - nativeSubtitleTimingOffsetMilliseconds) / 1000;
+        try {
+          for (const [cue, state] of nativeSubtitleCueStates) {
+            const startTime = Math.max(0, state.startTime + timingDeltaSeconds);
+            const endTime = state.endTime + timingDeltaSeconds;
+            if (endTime <= 0) {
+              if (state.attached) textTrack.removeCue(cue);
+              state.attached = false;
+              continue;
+            }
+            cue.startTime = startTime;
+            cue.endTime = Math.max(startTime + 0.001, endTime);
+            if (!state.attached) textTrack.addCue(cue);
+            state.attached = true;
+          }
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
+      const reloadSubtitles = () => {
         clearNativeSubtitle();
         disposeAssRenderer();
         const option = selectedSubtitleButton();
@@ -2342,6 +2593,7 @@
             return;
           }
           try {
+            status.textContent = 'Loading subtitles…';
             assRenderer = new window.SubtitlesOctopus({
               video,
               subUrl: subtitleUrl(selectedSubtitleTrack),
@@ -2351,6 +2603,9 @@
               fonts: assFontUrls(),
               timeOffset: streamStartSeconds - subtitleTimingOffsetMilliseconds / 1000,
               renderMode: 'wasm-blend',
+              onReady: () => {
+                if (status.textContent === 'Loading subtitles…') status.textContent = '';
+              },
               onError: () => { status.textContent = 'ASS subtitles could not be rendered.'; }
             });
           } catch (_) {
@@ -2360,22 +2615,45 @@
         }
         const track = document.createElement('track');
         track.kind = 'subtitles';
-        track.src = subtitleUrl(selectedSubtitleTrack);
+        const trackTimingOffsetMilliseconds = subtitleTimingOffsetMilliseconds;
+        track.src = subtitleUrl(selectedSubtitleTrack, trackTimingOffsetMilliseconds);
         track.default = true;
         track.dataset.playerSubtitle = 'true';
         track.addEventListener('load', () => {
-          if (subtitleVerticalPosition === 'author' || !track.track.cues) return;
-          const line = {top: 10, middle: 50, bottom: 90}[subtitleVerticalPosition];
+          if (nativeSubtitleTrack !== track || !track.track.cues) return;
+          nativeSubtitleTrackLoaded = true;
+          nativeSubtitleTimingOffsetMilliseconds = trackTimingOffsetMilliseconds;
+          nativeSubtitleCueStates.clear();
           Array.from(track.track.cues).forEach((cue) => {
-            if (!('line' in cue) || !('snapToLines' in cue)) return;
-            cue.snapToLines = false;
-            cue.line = line;
+            nativeSubtitleCueStates.set(cue, {
+              attached: true,
+              endTime: cue.endTime,
+              line: cue.line,
+              snapToLines: cue.snapToLines,
+              startTime: cue.startTime
+            });
           });
+          applyNativeSubtitlePosition();
+          if (
+            subtitleTimingOffsetMilliseconds !== trackTimingOffsetMilliseconds
+            && !applyNativeSubtitleTiming()
+          ) {
+            reloadSubtitles();
+            return;
+          }
+          if (status.textContent === 'Loading subtitles…') status.textContent = '';
         });
+        track.addEventListener('error', () => {
+          if (nativeSubtitleTrack === track) status.textContent = 'Subtitles could not be loaded.';
+        });
+        nativeSubtitleTrack = track;
+        nativeSubtitleTrackLoaded = false;
+        status.textContent = 'Loading subtitles…';
         video.appendChild(track);
         track.track.mode = 'showing';
       };
       const selectDelivery = async (autoplay, startSeconds = 0) => {
+        invalidatePlaybackAttempts();
         status.textContent = 'Preparing playback…';
         const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/compatibility`, {
           method: 'POST',
@@ -2408,8 +2686,8 @@
         preserveVideoHeight();
         video.src = mediaUrl.href;
         video.load();
-        syncSubtitles();
-        if (autoplay) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
+        reloadSubtitles();
+        if (autoplay) requestPlayback();
         return true;
       };
       const loadEntry = async (nextPosition, nextResumePosition, nextDuration, autoplay) => {
@@ -2446,6 +2724,27 @@
         const offset = deliveryMode === 'direct' ? 0 : streamStartSeconds;
         return Math.min(Math.max(offset + mediaPosition, 0), duration);
       };
+      const bufferedEnd = () => {
+        const mediaPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+        const buffered = video.buffered;
+        for (let index = 0; index < buffered.length; index += 1) {
+          const start = buffered.start(index);
+          const end = buffered.end(index);
+          if (Number.isFinite(start) && Number.isFinite(end) && start <= mediaPosition && mediaPosition <= end) return end;
+        }
+        return null;
+      };
+      const updateBufferedIndicator = (duration, position) => {
+        const bufferedMediaEnd = bufferedEnd();
+        const offset = deliveryMode === 'direct' ? 0 : streamStartSeconds;
+        const end = bufferedMediaEnd === null
+          ? position
+          : Math.min(Math.max(offset + bufferedMediaEnd, position), duration);
+        const startPercent = duration === 0 ? 0 : (position / duration) * 100;
+        const endPercent = duration === 0 ? 0 : (end / duration) * 100;
+        bufferedIndicator.style.setProperty('--buffered-start-percent', `${startPercent}%`);
+        bufferedIndicator.style.setProperty('--buffered-end-percent', `${endPercent}%`);
+      };
       const updateControls = () => {
         const duration = playbackDuration();
         const position = playbackPosition();
@@ -2455,6 +2754,7 @@
         timeline.style.setProperty(
           '--progress-percent', `${duration === 0 ? 0 : (position / duration) * 100}%`
         );
+        updateBufferedIndicator(duration, position);
         currentTime.textContent = formatTime(position);
         remainingTime.textContent = `-${formatTime(Math.max(duration - position, 0))}`;
         const toggle = actionButton('toggle');
@@ -2572,33 +2872,81 @@
           status.textContent = 'Could not seek this video.';
         }
       };
-      const persistTrackSelection = async (
-        audioStream,
-        subtitleTrack,
-        subtitleOffsetMilliseconds,
-        subtitleFontScale,
-        subtitleBackdrop,
-        subtitleTextShadow,
-        subtitlePosition
-      ) => {
+      const currentTrackSelection = () => ({
+        audioStream: selectedAudioStream,
+        subtitleBackdrop: subtitleBackground,
+        subtitleFontScale: subtitleFontScalePercent,
+        subtitleOffsetMilliseconds: subtitleTimingOffsetMilliseconds,
+        subtitlePosition: subtitleVerticalPosition,
+        subtitleTextShadow: subtitleShadow,
+        subtitleTrack: selectedSubtitleTrack
+      });
+      const persistTrackSelection = async (selection) => {
         const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/tracks`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
           credentials: 'same-origin',
-          body: JSON.stringify({entryPosition, audioStream, subtitleTrack, subtitleOffsetMilliseconds, subtitleFontScalePercent: subtitleFontScale, subtitleBackground: subtitleBackdrop, subtitleShadow: subtitleTextShadow, subtitleVerticalPosition: subtitlePosition})
+          body: JSON.stringify({
+            audioStream: selection.audioStream,
+            entryPosition,
+            subtitleBackground: selection.subtitleBackdrop,
+            subtitleFontScalePercent: selection.subtitleFontScale,
+            subtitleOffsetMilliseconds: selection.subtitleOffsetMilliseconds,
+            subtitleShadow: selection.subtitleTextShadow,
+            subtitleTrack: selection.subtitleTrack,
+            subtitleVerticalPosition: selection.subtitlePosition
+          })
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !Number.isSafeInteger(payload.audioStream) || !Number.isSafeInteger(payload.subtitleOffsetMilliseconds) || !Number.isSafeInteger(payload.subtitleFontScalePercent) || typeof payload.subtitleBackground !== 'boolean' || typeof payload.subtitleShadow !== 'boolean' || !['author', 'top', 'middle', 'bottom'].includes(payload.subtitleVerticalPosition)) throw new Error('Track selection failed');
-        selectedAudioStream = payload.audioStream;
-        selectedSubtitleTrack = typeof payload.subtitleTrack === 'string' ? payload.subtitleTrack : null;
-        subtitleTimingOffsetMilliseconds = payload.subtitleOffsetMilliseconds;
-        subtitleFontScalePercent = payload.subtitleFontScalePercent;
-        subtitleBackground = payload.subtitleBackground;
-        subtitleShadow = payload.subtitleShadow;
-        subtitleVerticalPosition = payload.subtitleVerticalPosition;
-        this.setAttribute('subtitle-timing-offset-milliseconds', String(subtitleTimingOffsetMilliseconds));
-        updateTrackOptions();
       };
+      const flushTrackSelectionSave = () => {
+        if (trackSelectionSaveTimer !== null) {
+          window.clearTimeout(trackSelectionSaveTimer);
+          trackSelectionSaveTimer = null;
+        }
+        const pending = pendingTrackSelectionSave;
+        if (!pending) return;
+        pendingTrackSelectionSave = null;
+        const save = async () => {
+          try {
+            await persistTrackSelection(pending.selection);
+            pending.resolve();
+          } catch (_) {
+            if (pending.version === latestTrackSelectionSaveVersion) {
+              status.textContent = pending.failureMessage;
+            }
+            pending.reject(new Error(pending.failureMessage));
+          }
+        };
+        trackSelectionSaveSequence = trackSelectionSaveSequence.then(save, save);
+      };
+      const queueTrackSelectionSave = (failureMessage, immediate = false) => new Promise((resolve, reject) => {
+        const version = ++latestTrackSelectionSaveVersion;
+        const selection = currentTrackSelection();
+        if (pendingTrackSelectionSave) {
+          pendingTrackSelectionSave.selection = selection;
+          pendingTrackSelectionSave.failureMessage = failureMessage;
+          pendingTrackSelectionSave.version = version;
+          const previousResolve = pendingTrackSelectionSave.resolve;
+          const previousReject = pendingTrackSelectionSave.reject;
+          pendingTrackSelectionSave.resolve = () => {
+            previousResolve();
+            resolve();
+          };
+          pendingTrackSelectionSave.reject = (error) => {
+            previousReject(error);
+            reject(error);
+          };
+        } else {
+          pendingTrackSelectionSave = {failureMessage, reject, resolve, selection, version};
+        }
+        if (immediate) {
+          flushTrackSelectionSave();
+        } else if (trackSelectionSaveTimer === null) {
+          trackSelectionSaveTimer = window.setTimeout(flushTrackSelectionSave, 150);
+        }
+      });
       const offerKestrelFallback = async () => {
         try {
           const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/kestrel`, {
@@ -2624,7 +2972,7 @@
         if (!target) return;
         const action = target.getAttribute('data-player-action');
         if (action === 'toggle') {
-          if (video.paused) void video.play().catch(() => { status.textContent = 'Select Play to start this video.'; });
+          if (video.paused) requestPlayback();
           else video.pause();
         } else if (action === 'rewind' || action === 'forward') {
           const offset = action === 'rewind' ? -10 : 10;
@@ -2658,9 +3006,13 @@
         const position = playbackPosition();
         const autoplay = !video.paused;
         closeTrackMenus();
+        selectedAudioStream = audioStream;
+        updateTrackOptions();
+        const selectionVersion = ++audioSelectionVersion;
         void (async () => {
           try {
-            await persistTrackSelection(audioStream, selectedSubtitleTrack, subtitleTimingOffsetMilliseconds, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
+            await queueTrackSelectionSave('Audio track could not be changed.', true);
+            if (selectionVersion !== audioSelectionVersion) return;
             await selectDelivery(autoplay, position);
           } catch (_) {
             status.textContent = 'Audio track could not be changed.';
@@ -2678,21 +3030,17 @@
         }
         const unsupported = option.hasAttribute('data-player-subtitle-unsupported');
         closeTrackMenus();
-        void (async () => {
-          try {
-            await persistTrackSelection(selectedAudioStream, subtitleTrack, subtitleTimingOffsetMilliseconds, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
-            if (unsupported) {
-              clearNativeSubtitle();
-              disposeAssRenderer();
-              status.textContent = 'This image subtitle needs Kestrel.';
-              await offerKestrelFallback();
-            } else {
-              syncSubtitles();
-            }
-          } catch (_) {
-            status.textContent = 'Subtitle track could not be changed.';
-          }
-        })();
+        selectedSubtitleTrack = subtitleTrack;
+        updateTrackOptions();
+        void queueTrackSelectionSave('Subtitle track could not be changed.', true).catch(() => {});
+        if (unsupported) {
+          clearNativeSubtitle();
+          disposeAssRenderer();
+          status.textContent = 'This image subtitle needs Kestrel.';
+          void offerKestrelFallback();
+        } else {
+          reloadSubtitles();
+        }
       });
       subtitleMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
@@ -2707,14 +3055,16 @@
           maxSubtitleTimingOffsetMilliseconds
         );
         if (nextOffset === subtitleTimingOffsetMilliseconds) return;
-        void (async () => {
-          try {
-            await persistTrackSelection(selectedAudioStream, selectedSubtitleTrack, nextOffset, subtitleFontScalePercent, subtitleBackground, subtitleShadow, subtitleVerticalPosition);
-            syncSubtitles();
-          } catch (_) {
-            status.textContent = 'Subtitle timing could not be changed.';
-          }
-        })();
+        subtitleTimingOffsetMilliseconds = nextOffset;
+        this.setAttribute('subtitle-timing-offset-milliseconds', String(subtitleTimingOffsetMilliseconds));
+        updateTrackOptions();
+        const selectedSubtitle = selectedSubtitleButton();
+        if (selectedSubtitle?.getAttribute('data-player-subtitle-format') === 'ass') {
+          reloadSubtitles();
+        } else if (!applyNativeSubtitleTiming()) {
+          reloadSubtitles();
+        }
+        void queueTrackSelectionSave('Subtitle timing could not be changed.').catch(() => {});
       });
       subtitleMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
@@ -2731,14 +3081,13 @@
           ? requestedPosition
           : subtitleVerticalPosition;
         if (nextFontScale === subtitleFontScalePercent && nextBackground === subtitleBackground && nextShadow === subtitleShadow && nextPosition === subtitleVerticalPosition) return;
-        void (async () => {
-          try {
-            await persistTrackSelection(selectedAudioStream, selectedSubtitleTrack, subtitleTimingOffsetMilliseconds, nextFontScale, nextBackground, nextShadow, nextPosition);
-            syncSubtitles();
-          } catch (_) {
-            status.textContent = 'Subtitle appearance could not be changed.';
-          }
-        })();
+        subtitleFontScalePercent = nextFontScale;
+        subtitleBackground = nextBackground;
+        subtitleShadow = nextShadow;
+        subtitleVerticalPosition = nextPosition;
+        updateTrackOptions();
+        applyNativeSubtitlePosition();
+        void queueTrackSelectionSave('Subtitle appearance could not be changed.').catch(() => {});
       });
       contextMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
@@ -2789,6 +3138,7 @@
       };
       document.addEventListener('pointerdown', onPointerDown);
       this._dispose = () => {
+        invalidatePlaybackAttempts();
         clearFullscreenHideTimer();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
@@ -2818,6 +3168,7 @@
         }
       });
       video.addEventListener('play', () => {
+        clearSelectPlayStatus();
         updateControls();
         showFullscreenControls();
       });
@@ -2842,6 +3193,7 @@
         updateControls();
         void reportProgress(false, false);
       });
+      video.addEventListener('progress', updateControls);
       video.addEventListener('seeking', () => { seeking = true; });
       video.addEventListener('seeked', () => {
         void reportProgress(true, seeking);
@@ -2849,6 +3201,7 @@
       });
       video.addEventListener('pause', () => { void reportProgress(true, false); });
       video.addEventListener('error', () => {
+        invalidatePlaybackAttempts();
         releaseVideoHeight();
         status.textContent = 'This video format is not supported by this browser.';
       });
@@ -2875,7 +3228,8 @@
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();
-      void loadEntry(entryPosition, resumePosition, catalogueDuration, true).catch(() => {
+      const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);
+      void loadEntry(entryPosition, resumePosition, catalogueDuration, shouldPlayOnLoad).catch(() => {
         status.textContent = 'Playback compatibility could not be checked.';
       });
     }

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
 
-_POSTER_HREF_PATTERN = r"^/(?:item/\d+|play/watch-orders/\d+\?resume=true)$"
+_POSTER_HREF_PATTERN = r"^/item/\d+$"
 
 
 class PlaceholderArtView(BaseModel):

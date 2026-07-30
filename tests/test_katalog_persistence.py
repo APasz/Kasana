@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -36,14 +35,6 @@ from kasana.katalog.services import (
     record_playback_progress,
     set_media_file_availability,
 )
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Generator[KatalogDatabase]:
-    katalog_database = KatalogDatabase(tmp_path / "katalog.sqlite3")
-    katalog_database.create_schema()
-    yield katalog_database
-    katalog_database.close()
 
 
 def _create_root(database: KatalogDatabase, path: Path) -> int:

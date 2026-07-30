@@ -268,6 +268,7 @@ async def test_profile_dashboard_session_and_administration_actions(
                         "displayName": "Owner",
                         "pin": "1357",
                         "accent_colour": "#336699",
+                        "autoplayOnResume": True,
                     }
                 ),
             )
@@ -278,6 +279,7 @@ async def test_profile_dashboard_session_and_administration_actions(
     assert current_profile_update.display_name == "Owner"
     assert current_profile_update.pin == "1357"
     assert current_profile_update.accent_colour == "#336699"
+    assert current_profile_update.autoplay_on_resume is True
     assert (
         await dashboard.update_current_profile(
             cast(Request, JsonRequest({"pin": None})),

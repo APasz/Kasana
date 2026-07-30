@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -38,14 +37,6 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.services import create_library_item, create_library_root
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Generator[KatalogDatabase]:
-    database = KatalogDatabase(tmp_path / "katalog.sqlite3")
-    database.create_schema()
-    yield database
-    database.close()
 
 
 def _queries(database: KatalogDatabase, tmp_path: Path) -> KatalogQueryService:

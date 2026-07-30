@@ -243,13 +243,11 @@ function testPosterPlaceholderNormalisation() {
   );
 }
 
-function testPosterNormalisationAllowsOnlySafeCollectionResumeLinks() {
-  const resumePoster = globalThis.__libraryTest.normalisePoster({
-    ...validPoster(13),
-    href: '/play/watch-orders/4?resume=true'
-  });
-
-  assert.equal(resumePoster.href, '/play/watch-orders/4?resume=true');
+function testPosterNormalisationAllowsOnlyItemDetailLinks() {
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(13), href: '/item/13'}).href,
+    '/item/13'
+  );
   assert.equal(
     globalThis.__libraryTest.normalisePoster({...validPoster(14), href: '/play/watch-orders/4'}),
     null
@@ -257,7 +255,7 @@ function testPosterNormalisationAllowsOnlySafeCollectionResumeLinks() {
   assert.equal(
     globalThis.__libraryTest.normalisePoster({
       ...validPoster(15),
-      href: '/play/watch-orders/4?resume=false'
+      href: '/play/watch-orders/4?resume=true'
     }),
     null
   );
@@ -530,15 +528,59 @@ function testItemEditorShowsOnlyRelevantKindFields() {
   assert.match(editor.renderKindFields('episode', item), /name="seasonNumber"/);
   assert.match(editor.renderKindFields('episode', item), /name="episodeNumber"/);
   assert.match(editor.renderHierarchyFields('movie', item), /Top-level item/);
-  assert.match(editor.renderHierarchyFields('episode', item), /name="parentId"/);
+  editor.parentChoices = [{id: 8, title: 'Stargate', kind: 'series'}];
+  const hierarchy = editor.renderHierarchyFields('episode', item);
+  assert.match(hierarchy, /name="parentId"/);
+  assert.match(hierarchy, /Stargate · Series/);
+  assert.doesNotMatch(hierarchy, /Parent ID/);
   assert.doesNotMatch(editor.renderLockRows('movie', new Set()), /Episode number/);
   assert.match(editor.renderLockRows('episode', new Set(['episode_number'])), /Episode number/);
+}
+
+function testItemEditorConfirmsDiscardingUnsavedChanges() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+  const confirm = window.confirm;
+  let prompts = 0;
+  window.confirm = () => { prompts += 1; return false; };
+  editor.isDirty = true;
+  assert.equal(editor.confirmDiscard(), false);
+  editor.isSaving = true;
+  assert.equal(editor.confirmDiscard(), false);
+  assert.equal(prompts, 1);
+  window.confirm = confirm;
+}
+
+function testItemEditorHidesForceControlsForAutomaticDefaults() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+  const choice = new HTMLSelectElement();
+  choice.value = '';
+  const force = new HTMLInputElement();
+  force.checked = true;
+  const forceControl = {hidden: false};
+  force.closest = () => forceControl;
+  const content = {
+    querySelector(selector) {
+      if (selector === '[name="defaultAudioStreamIndex"]') return choice;
+      if (selector === '[name="forceDefaultAudioStream"]') return force;
+      return null;
+    }
+  };
+
+  editor.bindPlaybackForceControls(content);
+
+  assert.equal(forceControl.hidden, true);
+  assert.equal(force.disabled, true);
+  assert.equal(force.checked, false);
+  choice.value = '1';
+  choice.listeners.get('change')[0].listener();
+  assert.equal(forceControl.hidden, false);
+  assert.equal(force.disabled, false);
 }
 
 function testItemEditorPayloadPreservesHiddenState() {
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
   editor.currentItem = {kind: 'episode', season_number: 1, episode_number: 2, parent_id: 8};
-  editor.initialLocks = new Set(['overview', 'episode_number']);
+  editor.lockedMetadataFields = new Set(['overview', 'episode_number']);
   editor.initialSelectedArtwork = new Map([['poster', 8], ['still', 10]]);
   const form = {
     querySelectorAll(selector) {
@@ -555,7 +597,10 @@ function testItemEditorPayloadPreservesHiddenState() {
         ];
       }
       if (selector === 'input[name="lock"]') {
-        return [{value: 'title'}, {value: 'overview'}];
+        return [
+          {value: 'title', checked: true},
+          {value: 'overview', checked: false}
+        ];
       }
       if (selector === 'input[name="lock"]:checked') {
         return [{value: 'title'}];
@@ -584,10 +629,40 @@ function testItemEditorPayloadPreservesHiddenState() {
   ]);
 }
 
+function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+  editor.lockedMetadataFields = new Set();
+  const form = {querySelectorAll: () => []};
+
+  const payload = editor.payloadFromForm(form, fakeFormValues({
+    title: 'Movie',
+    sortTitle: 'Movie',
+    overview: '',
+    releaseDate: '',
+    releaseYear: '',
+    tags: '',
+    kind: 'movie',
+    defaultAudioStreamIndex: '',
+    forceDefaultAudioStream: 'on',
+    defaultSubtitleTrackId: '',
+    forceDefaultSubtitleTrack: 'on',
+    defaultSubtitleTimingOffsetMilliseconds: '',
+    defaultSubtitleFontScalePercent: '',
+    forceDefaultSubtitleFontScale: 'on'
+  }));
+
+  assert.equal(payload.defaultAudioStreamIndex, null);
+  assert.equal(payload.forceDefaultAudioStream, false);
+  assert.equal(payload.defaultSubtitleTrackId, null);
+  assert.equal(payload.forceDefaultSubtitleTrack, false);
+  assert.equal(payload.defaultSubtitleFontScalePercent, null);
+  assert.equal(payload.forceDefaultSubtitleFontScale, false);
+}
+
 async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
-  testPosterNormalisationAllowsOnlySafeCollectionResumeLinks();
+  testPosterNormalisationAllowsOnlyItemDetailLinks();
   testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();
@@ -599,7 +674,10 @@ async function main() {
   testAdministrationPollsTrackedJobsFrequently();
   await testAdministrationReplacesPriorCompletionWithActionFailure();
   testItemEditorShowsOnlyRelevantKindFields();
+  testItemEditorConfirmsDiscardingUnsavedChanges();
+  testItemEditorHidesForceControlsForAutomaticDefaults();
   testItemEditorPayloadPreservesHiddenState();
+  testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults();
   process.stdout.write('browser library grid checks passed\n');
 }
 

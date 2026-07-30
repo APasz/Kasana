@@ -9,10 +9,10 @@ from pathlib import Path
 _SOURCE_ROOT = Path(__file__).parents[1] / "src" / "kasana"
 
 
-def test_kanvas_and_kestrel_only_use_katalog_public_surface() -> None:
+def test_components_only_use_katalog_public_surface() -> None:
     components = tuple(
         component
-        for component in ("kanvas", "kestrel", "yukibot")
+        for component in ("kanvas", "kestrel", "yukibot", "kourier")
         if (_SOURCE_ROOT / component).is_dir()
     )
     for component in components:
@@ -24,17 +24,6 @@ def test_kanvas_and_kestrel_only_use_katalog_public_surface() -> None:
             and not imported.startswith("kasana.katalog.public.")
         ]
         assert not forbidden, f"{component} imports Katalog internals: {forbidden}"
-
-
-def test_kourier_only_uses_katalog_public_surface() -> None:
-    forbidden = [
-        imported
-        for imported in component_imports("kourier")
-        if imported.startswith("kasana.katalog")
-        and imported != "kasana.katalog.public"
-        and not imported.startswith("kasana.katalog.public.")
-    ]
-    assert not forbidden, f"Kourier imports Katalog internals: {forbidden}"
 
 
 def test_shared_modules_do_not_depend_on_component_implementations() -> None:

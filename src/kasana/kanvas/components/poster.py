@@ -35,4 +35,4 @@ def poster_placeholder_art(_item_id: int, placeholder: PlaceholderArtView) -> El
     )
     return ui.html(
         f'<span class="k-poster__fallback" aria-hidden="true">{line_markup}{footer_markup}</span>'
-    )
+    ).classes("k-poster__fallback-host")

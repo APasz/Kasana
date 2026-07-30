@@ -73,6 +73,7 @@ from kasana.kanvas.dashboard import (
     design_page,
     item_edit_action,
     item_edit_data,
+    item_parent_choices_data,
     library_data,
     remove_collection_member_action,
     update_collection_action,
@@ -772,17 +773,17 @@ def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_her
     assert request.context.start_item_id == 9
 
 
-def test_poster_view_allows_only_the_collection_resume_destination() -> None:
+def test_poster_view_allows_only_item_detail_destinations() -> None:
     poster = PosterView(
         id=7,
         title="Stargateo · Chronological",
-        href="/play/watch-orders/11?resume=true",
+        href="/item/7",
         available=True,
     )
 
-    assert poster.href == "/play/watch-orders/11?resume=true"
+    assert poster.href == "/item/7"
     with pytest.raises(ValueError):
-        PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?resume=false", available=True)
+        PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?resume=true", available=True)
 
 
 def test_collection_mosaic_is_stable_and_never_returns_an_absolute_artwork_path() -> None:
@@ -2411,6 +2412,14 @@ async def test_katalog_service_item_edit_contracts(
             calls.append("audit")
             return (audit,)
 
+        async def list_library_item_parent_choices(
+            self, item_id: int, *, target_kind: LibraryItemKind
+        ) -> tuple[LibraryItemSummary, ...]:
+            assert item_id == 7
+            assert target_kind is LibraryItemKind.SEASON
+            calls.append("parents")
+            return (_library_summary(item_id=8, title="Stargate", kind=LibraryItemKind.SERIES),)
+
         async def list_collections(self, *, limit: int) -> PaginatedResponse[CollectionSummary]:
             assert limit == 100
             calls.append("collections")
@@ -2443,12 +2452,14 @@ async def test_katalog_service_item_edit_contracts(
     )
     audits = await service.item_edit_audit(7)
     collection_choices = await service.item_edit_collection_choices(detail)
+    parent_choices = await service.item_parent_choices(7, target_kind=LibraryItemKind.SEASON)
 
     assert detail.title == "A title"
     assert result.audit.changed_fields == ("title", "selected_artwork")
     assert audits == (audit,)
     assert collection_choices == (CollectionChoiceView(id=4, name="Stargate", revision=8),)
-    assert calls == ["detail", "update", "audit", "collections"]
+    assert parent_choices[0].title == "Stargate"
+    assert calls == ["detail", "update", "audit", "collections", "parents"]
 
 
 async def test_item_edit_endpoints_report_data_and_validation(
@@ -2478,6 +2489,13 @@ async def test_item_edit_endpoints_report_data_and_validation(
             self, _item: LibraryItemDetail
         ) -> tuple[CollectionChoiceView, ...]:
             return (CollectionChoiceView(id=4, name="Stargate", revision=8),)
+
+        async def item_parent_choices(
+            self, item_id: int, *, target_kind: LibraryItemKind
+        ) -> tuple[LibraryItemSummary, ...]:
+            assert item_id == 7
+            assert target_kind in {LibraryItemKind.MOVIE, LibraryItemKind.SEASON}
+            return ()
 
         async def update_item(
             self, item_id: int, request: LibraryItemUpdate
@@ -2511,6 +2529,10 @@ async def test_item_edit_endpoints_report_data_and_validation(
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", EditingCatalogue)
     detail_response = await item_edit_data(
         7, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    parent_choices_response = await item_parent_choices_data(
+        7,
+        Request({"type": "http", "query_string": b"kind=season", "headers": []}),
     )
     action_response = await item_edit_action(
         7,
@@ -2552,6 +2574,8 @@ async def test_item_edit_endpoints_report_data_and_validation(
     assert json.loads(bytes(detail_response.body))["collectionChoices"] == [
         {"id": 4, "name": "Stargate", "revision": 8}
     ]
+    assert json.loads(bytes(detail_response.body))["parentChoices"] == []
+    assert json.loads(bytes(parent_choices_response.body))["parentChoices"] == []
     assert json.loads(bytes(detail_response.body))["collectionRelationships"] == [
         "primary",
         "sequel",
@@ -2946,6 +2970,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         assert collection_sections
         assert len(item_editors) == 1
         assert _element_props(item_editors[0])["action-source"] == "/kanvas/actions/items/7"
+        assert _element_props(item_editors[0])["parent-choices-source"] == (
+            "/kanvas/data/items/7/parent-choices"
+        )
 
 
 def test_item_page_omits_the_included_in_section_without_collection_memberships() -> None:
@@ -3268,6 +3295,7 @@ def test_server_placeholder_poster_uses_standardised_art_treatment() -> None:
         )
 
     markup = cast(str, _element_props(element)["innerHTML"])
+    assert "k-poster__fallback-host" in _element_classes(element)
     assert 'class="k-poster__fallback"' in markup
     assert "k-poster__fallback--" not in markup
     assert "S01 E02" in markup
@@ -3348,6 +3376,10 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
     assert {
         _element_props(profile_menu)["data-accent-colour"] for profile_menu in owner_profile_menus
     } == {"#123456"}
+    assert {
+        _element_props(profile_menu)["data-autoplay-on-resume"]
+        for profile_menu in owner_profile_menus
+    } == {"false"}
     assert member_shortcuts == []
 
 
@@ -3476,7 +3508,7 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
 
     assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
-    assert rails[1].posters[0].href == "/play/watch-orders/11?resume=true"
+    assert rails[1].posters[0].href == "/item/7"
     assert posters[0].poster_url == "/kanvas/artwork/7/8"
     assert next_cursor == "next"
 
@@ -3572,6 +3604,8 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert ".k-select-wrap > .k-select" in css
     assert ".k-profile-form [data-profile-panel][hidden] { display: none; }" in css
     assert ".k-item-editor__playback-option" in css
+    assert ".k-item-editor__field-label" in css
+    assert ".k-item-editor__form > .k-action-row:last-child { position: sticky;" in css
     assert ".k-check input:focus-visible { outline: none; }" in css
     assert ".k-check-menu__summary" in css
     assert ".k-check-menu__option" in css
@@ -3598,8 +3632,11 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-item-picker" in javascript
     assert "kanvas-watch-order-list" in javascript
     assert "k-item-editor__playback-option" in javascript
+    assert "parent-choices-source" in javascript
+    assert "confirmDiscard" in javascript
     assert 'data-profile-language="audio"' in javascript
     assert 'data-profile-language="subtitles"' in javascript
+    assert 'name="autoplayOnResume"' in javascript
     assert "/profiles/current/playback-languages" in javascript
     assert "new Intl.DisplayNames" in javascript
     assert "k-watch-order-poster" in javascript

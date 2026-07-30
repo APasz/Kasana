@@ -548,6 +548,54 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     assert hierarchy_item["parent_id"] == 1
 
 
+async def test_library_item_parent_choices_are_type_and_cycle_aware(
+    api_fixture: ApiFixture,
+) -> None:
+    with api_fixture.database.transaction() as session:
+        series = create_library_item(
+            session,
+            library_root_id=1,
+            item_kind=ZaisanKind.SERIES,
+            title="Stargate",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=1,
+            item_kind=ZaisanKind.SEASON,
+            parent_id=series.id,
+            title="Season 1",
+            season_number=1,
+        )
+        create_library_item(
+            session,
+            library_root_id=1,
+            item_kind=ZaisanKind.EPISODE,
+            parent_id=season.id,
+            title="Pilot",
+            season_number=1,
+            episode_number=1,
+        )
+    extra_parents = await api_fixture.client.get(
+        "/api/v1/library/items/1/parent-choices", params={"kind": "extra"}
+    )
+    cycle_candidates = await api_fixture.client.get(
+        f"/api/v1/library/items/{series.id}/parent-choices", params={"kind": "extra"}
+    )
+    season_parents = await api_fixture.client.get(
+        "/api/v1/library/items/1/parent-choices", params={"kind": "season"}
+    )
+    invalid = await api_fixture.client.get("/api/v1/library/items/1/parent-choices")
+
+    assert extra_parents.status_code == 200
+    extra_parent_titles = {choice["title"] for choice in extra_parents.json()}
+    assert extra_parent_titles.issuperset({"Beta", "Gamma"})
+    assert "Alpha" not in extra_parent_titles
+    assert {choice["title"] for choice in cycle_candidates.json()}.isdisjoint({"Season 1", "Pilot"})
+    assert season_parents.status_code == 200
+    assert [choice["title"] for choice in season_parents.json()] == ["Stargate"]
+    assert invalid.status_code == 422
+
+
 async def test_recently_added_coalesces_new_series_activity_and_excludes_unavailable_items(
     api_fixture: ApiFixture,
 ) -> None:
@@ -1081,6 +1129,7 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
     assert set(configuration) == {
             "accent_colour",
+            "autoplay_on_resume",
             "default_subtitle_background",
             "default_subtitle_font_scale_percent",
             "default_subtitle_shadow",
@@ -1141,6 +1190,7 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "is_disabled": False,
             "pin_required": False,
             "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
+            "autoplay_on_resume": False,
             "preferred_audio_language": None,
             "preferred_subtitle_language": None,
             "default_subtitle_font_scale_percent": 100,
@@ -1156,12 +1206,17 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     assert (
         await api_fixture.client.patch(
             f"/api/v1/users/{user['id']}",
-            json={"display_name": "Profile", "accent_colour": "#445566"},
+            json={
+                "display_name": "Profile",
+                "accent_colour": "#445566",
+                "autoplay_on_resume": True,
+            },
         )
     ).json()["display_name"] == "Profile"
     saved_configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
     assert saved_configuration["name"] == "Profile"
     assert saved_configuration["accent_colour"] == "#445566"
+    assert saved_configuration["autoplay_on_resume"] is True
     assert (await api_fixture.client.post(f"/api/v1/users/{user['id']}/disable")).json()[
         "is_disabled"
     ] is True

@@ -395,6 +395,19 @@ def create_app(
         item = await run_blocking(runtime.queries.get_item, item_id)
         return JSONResponse(content=item.model_dump(mode="json"), headers={"ETag": etag})
 
+    @app.get(
+        "/api/v1/library/items/{item_id}/parent-choices",
+        response_model=tuple[LibraryItemSummary, ...],
+        operation_id="v1_list_library_item_parent_choices",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_library_item_parent_choices(
+        item_id: Annotated[int, Path(gt=0)],
+        kind: LibraryItemKind,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[LibraryItemSummary, ...]:
+        return await run_blocking(runtime.queries.item_parent_choices, item_id, target_kind=kind)
+
     @app.patch(
         "/api/v1/library/items/{item_id}",
         response_model=LibraryItemMutationResult,

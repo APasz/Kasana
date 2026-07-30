@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Generator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -71,14 +71,6 @@ class _FailingFfprobeClient(FFProbeClient):
     ) -> tuple[dict[Path, ProbeResult], tuple[ProbeFailure, ...]]:
         assert concurrency == 4
         return {}, tuple(ProbeFailure(path, "Invalid media data.") for path in paths)
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Generator[KatalogDatabase]:
-    katalog_database = KatalogDatabase(tmp_path / "katalog.sqlite3")
-    katalog_database.create_schema()
-    yield katalog_database
-    katalog_database.close()
 
 
 @pytest.fixture

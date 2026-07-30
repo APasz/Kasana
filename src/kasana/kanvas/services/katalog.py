@@ -511,6 +511,14 @@ class KanvasKatalogService:
             raise RuntimeError("Katalog returned an unexpected empty item response.")
         return response.item
 
+    async def item_parent_choices(
+        self, item_id: int, *, target_kind: LibraryItemKind
+    ) -> tuple[LibraryItemSummary, ...]:
+        """Return valid same-root hierarchy parents for the item editor."""
+
+        async with self._client() as client:
+            return await client.list_library_item_parent_choices(item_id, target_kind=target_kind)
+
     async def item_edit_collection_choices(
         self, item: LibraryItemDetail
     ) -> tuple[CollectionChoiceView, ...]:
@@ -1195,7 +1203,7 @@ async def _playback_for_item(
 
 
 def _on_deck_poster(entry: OnDeckEntry) -> PosterView:
-    """Make an active default order a single launch target instead of a duplicate item rail."""
+    """Describe an active default order while linking to its next item detail."""
 
     poster = poster_from_summary(entry.item)
     if entry.source_watch_order_id is None:
@@ -1206,6 +1214,5 @@ def _on_deck_poster(entry: OnDeckEntry) -> PosterView:
         update={
             "title": f"{collection_name} · {order_name}",
             "subtitle": f"Next: {entry.item.title}",
-            "href": f"/play/watch-orders/{entry.source_watch_order_id}?resume=true",
         }
     )

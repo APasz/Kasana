@@ -126,9 +126,11 @@ from kasana.katalog.client import (
     KatalogClientErrorKind,
     MediaTransfer,
 )
+from kasana.katalog.limits import MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS
 from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
 __all__ = [
+    "MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS",
     "NUMERAL_TOKEN_PATTERN",
     "APIError",
     "ArtworkContent",

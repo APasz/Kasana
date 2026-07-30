@@ -200,6 +200,7 @@ class UserSummary(APIModel):
     default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
     default_subtitle_background: bool = False
     default_subtitle_shadow: bool = False
+    autoplay_on_resume: bool = False
 
 
 class UserCreate(APIModel):
@@ -217,6 +218,7 @@ class UserCreate(APIModel):
     default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
     default_subtitle_background: bool = False
     default_subtitle_shadow: bool = False
+    autoplay_on_resume: bool = False
 
     @field_validator("username", "display_name")
     @classmethod
@@ -239,6 +241,7 @@ class UserUpdate(APIModel):
     )
     default_subtitle_background: bool | None = None
     default_subtitle_shadow: bool | None = None
+    autoplay_on_resume: bool | None = None
 
     @field_validator("username", "display_name")
     @classmethod
@@ -251,6 +254,7 @@ class UserUpdate(APIModel):
             "default_subtitle_font_scale_percent",
             "default_subtitle_background",
             "default_subtitle_shadow",
+            "autoplay_on_resume",
         ):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null.")

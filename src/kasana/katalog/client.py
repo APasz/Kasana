@@ -105,6 +105,9 @@ _LIBRARY_TAGS_ADAPTER: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...
 _ITEM_EDIT_AUDIT_ADAPTER: TypeAdapter[tuple[LibraryItemEditAudit, ...]] = TypeAdapter(
     tuple[LibraryItemEditAudit, ...]
 )
+_ITEM_PARENT_CHOICES_ADAPTER: TypeAdapter[tuple[LibraryItemSummary, ...]] = TypeAdapter(
+    tuple[LibraryItemSummary, ...]
+)
 _DUPLICATE_EPISODE_ISSUES_ADAPTER: TypeAdapter[tuple[DuplicateEpisodeIssue, ...]] = TypeAdapter(
     tuple[DuplicateEpisodeIssue, ...]
 )
@@ -348,6 +351,21 @@ class KatalogClient:
                 "Katalog returned an invalid library item.", response.request_id
             ) from error
         return ConditionalItem(item=item, etag=response.headers.get("ETag"), not_modified=False)
+
+    async def list_library_item_parent_choices(
+        self, item_id: int, *, target_kind: LibraryItemKind
+    ) -> tuple[LibraryItemSummary, ...]:
+        response = await self._request(
+            "GET",
+            f"/api/v1/library/items/{item_id}/parent-choices",
+            params=_params(kind=target_kind.value),
+        )
+        try:
+            return _ITEM_PARENT_CHOICES_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid library item parent choices.", response.request_id
+            ) from error
 
     async def update_library_item(
         self, item_id: int, request: LibraryItemUpdate

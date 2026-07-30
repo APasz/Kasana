@@ -33,6 +33,8 @@ from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.subtitles import SubtitleConversionError, as_webvtt
 from kasana.katalog.api.service import _stream_summary  # pyright: ignore[reportPrivateUsage]
 from kasana.katalog.public import (
+    KatalogClientError,
+    KatalogClientErrorKind,
     PlaybackContext,
     PlaybackContextKind,
     PlaybackPlanEntry,
@@ -355,6 +357,20 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
     assert dashboard._optional_track_id("embedded-3") == "embedded-3"  # pyright: ignore[reportPrivateUsage]
     assert dashboard._optional_track_id(None) is None  # pyright: ignore[reportPrivateUsage]
     assert dashboard._is_webvtt_track("webvtt")  # pyright: ignore[reportPrivateUsage]
+    assert dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        Request(
+            {
+                "type": "http",
+                "query_string": b"timingOffsetMilliseconds=-500",
+                "headers": [],
+            }
+        ),
+        default_milliseconds=0,
+    ) == -0.5
+    assert dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        Request({"type": "http", "query_string": b"", "headers": []}),
+        default_milliseconds=500,
+    ) == 0.5
     with pytest.raises(HTTPException):
         dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"offsetSeconds=nan", "headers": []}),
@@ -362,6 +378,17 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
         )
     with pytest.raises(ValueError):
         dashboard._optional_track_id("not-a-track")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(HTTPException):
+        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request(
+                {
+                    "type": "http",
+                    "query_string": b"timingOffsetMilliseconds=30001",
+                    "headers": [],
+                }
+            ),
+            default_milliseconds=0,
+        )
 
 
 def test_next_episode_navigates_to_its_item_page_and_pagehide_flushes_progress() -> None:
@@ -402,11 +429,19 @@ def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time
     assert "subtitleOffsetMilliseconds" in script
     assert "subtitleFontScalePercent" in script
     assert "subtitleVerticalPosition" in script
+    assert "timingOffsetMilliseconds" in script
     assert "CSS.supports('selector(video::cue)')" in script
     assert "subtitleAppearance.hidden = !appearanceAvailable" in script
+    assert "applyNativeSubtitlePosition" in script
+    assert "applyNativeSubtitleTiming" in script
+    assert "queueTrackSelectionSave" in script
     assert "pendingDirectSeek" in script
     assert "persistTrackSelection" in script
     assert "await selectDelivery(autoplay, position)" in script
+    assert (
+        "const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);"
+        in script
+    )
     assert "Open in Kestrel for this subtitle" in script
     assert "libass_script" in head
     assert libass.is_file()
@@ -462,6 +497,76 @@ async def test_browser_completion_returns_the_next_item_playback_page(
     }
 
 
+@pytest.mark.asyncio
+async def test_explicit_start_is_retained_when_playback_redirects_to_its_current_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="s" * 32, current_item=SimpleNamespace(item_id=2))
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def playback_session(self, _session_id: str) -> object:
+            return session
+
+    async def page_profile(_request: Request) -> object:
+        return profile
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+
+    response = await dashboard.item_page(
+        1,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"playbackSession=" + b"s" * 32 + b"&start=true",
+                "headers": [],
+            }
+        ),
+    )
+
+    assert response is not None
+    assert response.headers["location"] == f"/item/2?playbackSession={'s' * 32}&start=true"
+
+
+@pytest.mark.asyncio
+async def test_play_route_starts_but_resume_route_uses_the_profile_autoplay_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="s" * 32, current_item=SimpleNamespace(item_id=2))
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def create_item_playback_session(
+            self, _item_id: int, *, resume: bool
+        ) -> object:
+            return session
+
+    async def page_profile(_request: Request) -> object:
+        return profile
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+
+    played = await dashboard.play_item_page(
+        2, Request({"type": "http", "query_string": b"resume=false", "headers": []})
+    )
+    resumed = await dashboard.play_item_page(
+        2, Request({"type": "http", "query_string": b"resume=true", "headers": []})
+    )
+
+    assert played is not None
+    assert played.headers["location"] == f"/item/2?playbackSession={'s' * 32}&start=true"
+    assert resumed is not None
+    assert resumed.headers["location"] == f"/item/2?playbackSession={'s' * 32}"
+
+
 def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_skips() -> None:
     repository_root = Path(__file__).parents[1]
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
@@ -515,10 +620,53 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
 
     assert len(video_elements) == 1
     assert "src" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
+    assert "autoplay" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
     assert len(player_elements) == 1
     assert player_elements[0]._props["duration-seconds"] == "120"  # pyright: ignore[reportPrivateUsage]
+    assert player_elements[0]._props["autoplay-on-resume"] == "false"  # pyright: ignore[reportPrivateUsage]
+    assert player_elements[0]._props["play-on-load"] == "false"  # pyright: ignore[reportPrivateUsage]
     assert len(fallback_links) == 1
     assert queues == []
+
+    with Client(page("")) as client:
+        render_browser_playback_card(session, play_on_load=True)
+        started_player = next(
+            element
+            for element in client.elements.values()
+            if element.tag == "kanvas-playback-player"
+        )
+
+    assert started_player._props["play-on-load"] == "true"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_stale_progress_after_stopping_a_session_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def report_playback_progress(self, _session_id: str, _update: object) -> None:
+            raise KatalogClientError(
+                KatalogClientErrorKind.NOT_FOUND, "Playback session is unavailable."
+            )
+
+    async def require_profile(_request: Request) -> object:
+        return profile
+
+    async def payload(_request: Request) -> dict[str, object]:
+        return {"positionSeconds": 30, "entryPosition": 0}
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
+    monkeypatch.setattr(dashboard, "_json_object", payload)
+
+    response = await dashboard.playback_progress("s" * 32, Request({"type": "http", "headers": []}))
+
+    assert response.status_code == 204
 
 
 def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:

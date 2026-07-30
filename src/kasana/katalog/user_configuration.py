@@ -50,6 +50,7 @@ class UserConfiguration(BaseModel):
     default_subtitle_font_scale_percent: int = Field(default=100, ge=75, le=200, multiple_of=25)
     default_subtitle_background: bool = False
     default_subtitle_shadow: bool = False
+    autoplay_on_resume: bool = False
 
     @field_validator("username", "name")
     @classmethod
