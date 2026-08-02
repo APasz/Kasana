@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const {escapeHtml, jobDetail} = window.kanvasInternals;
+  const {escapeHtml, jobDetail, providerEntryUrl} = window.kanvasInternals;
   const adminDate = (value) => {
     if (typeof value !== 'string') return '—';
     const parsed = new Date(value);
@@ -46,22 +46,6 @@
     retype: 'Change type',
     remove_empty: 'Remove empty record',
   }[kind] || 'Other change');
-  const providerEntryUrl = (candidate) => {
-    const provider = typeof candidate?.provider === 'string' ? candidate.provider.toLowerCase() : '';
-    const providerId = typeof candidate?.providerId === 'string' ? candidate.providerId : '';
-    if (provider === 'tmdb' && /^\d+$/.test(providerId)) {
-      const section = candidate.kind === 'movie' ? 'movie' : candidate.kind === 'series' ? 'tv' : null;
-      return section ? `https://www.themoviedb.org/${section}/${providerId}` : null;
-    }
-    if ((provider === 'imdb' || provider === 'omdb') && /^tt\d+$/i.test(providerId)) {
-      return `https://www.imdb.com/title/${providerId}/`;
-    }
-    if (provider === 'tvmaze' && candidate.kind === 'series' && /^\d+$/.test(providerId)) {
-      return `https://www.tvmaze.com/shows/${providerId}`;
-    }
-    return null;
-  };
-
   class KanvasAdministration extends HTMLElement {
     constructor() {
       super();

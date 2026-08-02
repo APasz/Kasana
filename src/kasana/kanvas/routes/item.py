@@ -175,6 +175,9 @@ def _item_editor_button(item_id: int, profile: SessionProfile) -> None:
             "item-id": item_id,
             "source": f"/kanvas/data/items/{item_id}/edit",
             "parent-choices-source": f"/kanvas/data/items/{item_id}/parent-choices",
+            "metadata-search-source": f"/kanvas/data/items/{item_id}/metadata-search",
+            "metadata-match-source": f"/kanvas/actions/items/{item_id}/metadata-match",
+            "artwork-fetch-source": f"/kanvas/actions/items/{item_id}/artwork-fetch",
             "action-source": f"/kanvas/actions/items/{item_id}",
         },
     )

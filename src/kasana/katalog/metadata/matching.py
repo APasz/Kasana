@@ -140,6 +140,18 @@ class MetadataWorkflow:
             auto_matched_provider_id=selected.result.reference.raw_id,
         )
 
+    async def search_item_records(
+        self, item_id: int, providers: Sequence[MetadataProvider], *, query: str
+    ) -> tuple[ScoredSearchResult, ...]:
+        """Search configured providers without persisting a match suggestion."""
+
+        context, _ = await run_blocking(self._item_context, item_id)
+        return await self._search_and_score(
+            context,
+            tuple(providers),
+            query=SearchQuery(query=query),
+        )
+
     async def match_item(
         self,
         item_id: int,
@@ -225,30 +237,40 @@ class MetadataWorkflow:
         )
 
     async def fetch_posters(
-        self, providers: Sequence[MetadataProvider], *, root_id: int | None = None
+        self,
+        providers: Sequence[MetadataProvider],
+        *,
+        root_id: int | None = None,
+        item_id: int | None = None,
     ) -> tuple[ArtworkCacheView, ...]:
-        return await self.artwork.fetch_posters(tuple(providers), root_id=root_id)
+        return await self.artwork.fetch_posters(
+            tuple(providers), root_id=root_id, item_id=item_id
+        )
 
     async def prune_artwork(self) -> tuple[int, int]:
         return await self.artwork.prune()
 
     async def _search_and_score(
-        self, context: ItemMatchContext, providers: tuple[MetadataProvider, ...]
+        self,
+        context: ItemMatchContext,
+        providers: tuple[MetadataProvider, ...],
+        *,
+        query: SearchQuery | None = None,
     ) -> tuple[ScoredSearchResult, ...]:
         semaphore = Semaphore(min(4, max(1, len(providers))))
+        search_query = query or SearchQuery(
+            query=context.title, year=context.release_year or context.path_year
+        )
 
         async def search(provider: MetadataProvider) -> tuple[SearchResult, ...]:
             async with semaphore:
-                query = SearchQuery(
-                    query=context.title, year=context.release_year or context.path_year
-                )
                 if context.item_kind is ZaisanKind.MOVIE:
                     if not provider.supports(ProviderCapability.SEARCH_MOVIES):
                         return ()
-                    return await provider.search_movies(query)
+                    return await provider.search_movies(search_query)
                 if not provider.supports(ProviderCapability.SEARCH_SERIES):
                     return ()
-                return await provider.search_series(query)
+                return await provider.search_series(search_query)
 
         result_groups = await asyncio.gather(*(search(provider) for provider in providers))
         scored = [

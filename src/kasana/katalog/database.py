@@ -42,13 +42,21 @@ class KatalogDatabase:
     def _configure_sqlite(self, busy_timeout_ms: int) -> None:
         def configure_connection(connection: sqlite3.Connection, _: object) -> None:
             cursor: Cursor = connection.cursor()
-            cursor.execute("PRAGMA foreign_keys = ON")
-            cursor.execute("PRAGMA journal_mode = WAL")
             cursor.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            cursor.execute("PRAGMA foreign_keys = ON")
             cursor.close()
             connection.create_function("natural_sort_key", 1, natural_sort_key, deterministic=True)
 
         event.listen(self.engine, "connect", configure_connection)
+        self._ensure_wal_journal_mode()
+
+    def _ensure_wal_journal_mode(self) -> None:
+        """Persist WAL mode once without demanding an exclusive lock per request."""
+
+        with self.engine.connect() as connection:
+            journal_mode = str(connection.exec_driver_sql("PRAGMA journal_mode").scalar_one())
+            if journal_mode.casefold() != "wal":
+                connection.exec_driver_sql("PRAGMA journal_mode = WAL")
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)

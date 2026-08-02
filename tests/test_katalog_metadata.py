@@ -19,8 +19,10 @@ from kasana.katalog.metadata import (
 from kasana.katalog.models import (
     CachedArtwork,
     MetadataBinding,
+    MetadataCandidate,
     MetadataCandidateStatus,
     MetadataField,
+    MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
 )
@@ -52,6 +54,7 @@ class _FakeProvider:
         self.details = details
         self.artwork = artwork
         self.search_calls = 0
+        self.last_search_query: SearchQuery | None = None
         self.artwork_calls = 0
 
     @property
@@ -62,12 +65,12 @@ class _FakeProvider:
         return capability in self.capabilities
 
     async def search_movies(self, query: SearchQuery) -> tuple[SearchResult, ...]:
-        del query
+        self.last_search_query = query
         self.search_calls += 1
         return self.results
 
     async def search_series(self, query: SearchQuery) -> tuple[SearchResult, ...]:
-        del query
+        self.last_search_query = query
         self.search_calls += 1
         return self.results
 
@@ -195,7 +198,6 @@ def test_scoring_is_deterministic_for_exact_titles_remakes_and_anime() -> None:
         "media_kind",
         "directory_title",
     }
-
     anime_context = ItemMatchContext(
         item_id=2,
         title="Galaxy Express",
@@ -213,6 +215,64 @@ def test_scoring_is_deterministic_for_exact_titles_remakes_and_anime() -> None:
         anime_context, _search_result("5", "Galaxy Express", language="en")
     )
     assert japanese.confidence > english.confidence
+
+
+async def test_manual_metadata_search_does_not_persist_candidates(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    item_id = _create_movie(database, tmp_path / "Movies", title="Local title", year=2000)
+    provider = _FakeProvider(
+        (_search_result("17", "Correct record", year=2001),),
+        {"17": _movie_details("17", "Correct record", year=2001)},
+    )
+
+    results = await _workflow(database, tmp_path / "cache").search_item_records(
+        item_id, (provider,), query="Correct record"
+    )
+
+    assert [result.result.reference.raw_id for result in results] == ["17"]
+    assert provider.last_search_query == SearchQuery(query="Correct record")
+    bindings = database.run_transaction(
+        lambda session: session.scalars(select(MetadataBinding)).all()
+    )
+    assert bindings == []
+
+
+async def test_manual_reassignment_replaces_the_active_provider_record(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    item_id = _create_movie(database, tmp_path / "Movies", title="Local title", year=2000)
+    provider = _FakeProvider(
+        (),
+        {
+            "41": _movie_details("41", "First record", year=2001),
+            "42": _movie_details("42", "Replacement record", year=2002),
+        },
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.match_item(item_id, provider, "41")
+    await workflow.match_item(item_id, provider, "42")
+
+    def load(session: Session) -> tuple[MetadataBinding, dict[str, MetadataCandidateStatus]]:
+        bindings = session.scalars(select(MetadataBinding)).all()
+        assert len(bindings) == 1
+        candidates = {
+            candidate.provider_id: candidate.status
+            for candidate in session.scalars(select(MetadataCandidate)).all()
+        }
+        return bindings[0], candidates
+
+    binding, candidates = database.run_transaction(load)
+    assert (binding.provider_id, binding.status, binding.manual_decision) == (
+        "42",
+        MetadataMatchStatus.MATCHED,
+        True,
+    )
+    assert candidates == {
+        "41": MetadataCandidateStatus.SUGGESTED,
+        "42": MetadataCandidateStatus.ACCEPTED,
+    }
 
 
 async def test_exact_match_auto_accepts_and_applies_unlocked_metadata(
@@ -427,6 +487,45 @@ async def test_artwork_cache_deduplicates_and_prunes_unmatched_records(
     assert (removed_files, removed_bytes) == (1, len(artwork_content.content))
     assert not cache_path.exists()
     assert database.run_transaction(lambda session: session.scalar(select(CachedArtwork))) is None
+
+
+async def test_artwork_cache_fetches_only_the_requested_item(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    first_item_id = _create_movie(database, tmp_path / "First", title="Paprika", year=2006)
+    second_item_id = _create_movie(database, tmp_path / "Second", title="Perfect Blue", year=1997)
+    first_poster = _poster_reference("/paprika.png")
+    second_poster = _poster_reference("/perfect-blue.png")
+    content = ArtworkContent(
+        reference=first_poster,
+        content=b"\x89PNG\r\n\x1a\nminimal",
+        media_type="image/png",
+    )
+    provider = _FakeProvider(
+        (
+            _search_result("51", "Paprika", year=2006, poster=first_poster),
+            _search_result("61", "Perfect Blue", year=1997, poster=second_poster),
+        ),
+        {
+            "51": _movie_details("51", "Paprika", year=2006, poster=first_poster),
+            "61": _movie_details("61", "Perfect Blue", year=1997, poster=second_poster),
+        },
+        content,
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.search_item(first_item_id, (provider,))
+    await workflow.search_item(second_item_id, (provider,))
+    artwork = await workflow.fetch_posters((provider,), item_id=first_item_id)
+
+    assert len(artwork) == provider.artwork_calls == 1
+    assert artwork[0].library_item_id == first_item_id
+    cached_item_ids = database.run_transaction(
+        lambda session: tuple(session.scalars(select(CachedArtwork.library_item_id)))
+    )
+    assert cached_item_ids == (first_item_id,)
+    with pytest.raises(ValueError, match="either a library root or an item"):
+        await workflow.fetch_posters((provider,), root_id=1, item_id=first_item_id)
 
 
 async def test_cancelled_artwork_fetch_leaves_no_partial_file(

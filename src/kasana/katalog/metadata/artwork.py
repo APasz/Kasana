@@ -88,9 +88,18 @@ class ArtworkCache:
         self.maximum_size_bytes = maximum_size_bytes
 
     async def fetch_posters(
-        self, providers: tuple[MetadataProvider, ...], *, root_id: int | None
+        self,
+        providers: tuple[MetadataProvider, ...],
+        *,
+        root_id: int | None = None,
+        item_id: int | None = None,
     ) -> tuple[ArtworkCacheView, ...]:
-        requests = await run_blocking(self._poster_requests, root_id)
+        """Cache accepted poster artwork, optionally for one root or one item."""
+
+        if root_id is not None and item_id is not None:
+            msg = "Artwork fetch accepts either a library root or an item, not both."
+            raise ValueError(msg)
+        requests = await run_blocking(self._poster_requests, root_id, item_id)
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def fetch(request: ArtworkRequest) -> ArtworkCacheView | None:
@@ -113,7 +122,9 @@ class ArtworkCache:
             await run_blocking(self._delete_artwork_record, record.id)
         return removed_files, removed_bytes
 
-    def _poster_requests(self, root_id: int | None) -> tuple[ArtworkRequest, ...]:
+    def _poster_requests(
+        self, root_id: int | None, item_id: int | None
+    ) -> tuple[ArtworkRequest, ...]:
         def load(session: Session) -> tuple[ArtworkRequest, ...]:
             statement = (
                 select(MetadataCandidate)
@@ -126,6 +137,8 @@ class ArtworkCache:
             )
             if root_id is not None:
                 statement = statement.where(Zaisan.library_root_id == root_id)
+            if item_id is not None:
+                statement = statement.where(Zaisan.id == item_id)
             requests: dict[tuple[str, str, str], ArtworkRequest] = {}
             for candidate in session.scalars(statement).all():
                 key = (candidate.provider, candidate.provider_id, candidate.poster_revision or "")

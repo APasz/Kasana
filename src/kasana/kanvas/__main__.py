@@ -36,6 +36,7 @@ def console_main() -> None:
         tailwind=False,
         show=settings.auto_browser_open,
         show_welcome_message=False,
+        uvicorn_logging_level=shared_settings.log_level.value.casefold(),
         log_config=None,
         timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
     )

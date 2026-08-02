@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from kasana.katalog.admin import DatabaseAdmin
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import (
     AvailabilityState,
@@ -67,6 +69,49 @@ def test_sqlite_connection_policy(database: KatalogDatabase) -> None:
         assert connection.scalar(text("PRAGMA foreign_keys")) == 1
         assert connection.scalar(text("PRAGMA journal_mode")) == "wal"
         assert connection.scalar(text("PRAGMA busy_timeout")) == 5_000
+
+
+def test_sqlite_connection_policy_does_not_reset_journal_mode_per_connection(
+    database: KatalogDatabase,
+) -> None:
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        statements.append(statement.casefold())
+
+    event.listen(database.engine, "before_cursor_execute", record_statement)
+    try:
+        with database.engine.connect() as connection:
+            assert connection.scalar(text("SELECT 1")) == 1
+        with database.engine.connect() as connection:
+            assert connection.scalar(text("SELECT 1")) == 1
+    finally:
+        event.remove(database.engine, "before_cursor_execute", record_statement)
+
+    assert all("pragma journal_mode = wal" not in statement for statement in statements)
+
+
+def test_database_upgrade_preserves_application_info_logging(tmp_path: Path) -> None:
+    root_logger = logging.getLogger()
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    previous_level = root_logger.level
+    previous_uvicorn_level = uvicorn_logger.level
+    root_logger.setLevel(logging.INFO)
+    uvicorn_logger.setLevel(logging.INFO)
+    try:
+        DatabaseAdmin(tmp_path / "katalog.sqlite3").initialise()
+        assert root_logger.isEnabledFor(logging.INFO)
+        assert uvicorn_logger.isEnabledFor(logging.INFO)
+    finally:
+        root_logger.setLevel(previous_level)
+        uvicorn_logger.setLevel(previous_uvicorn_level)
 
 
 def test_hierarchy_integrity_and_playable_file_ownership(

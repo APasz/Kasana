@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -368,6 +368,17 @@ class LibraryItemDetailBase(LibraryItemSummary):
 class LibraryItemUpdate(APIModel):
     """A validated, non-file-system mutation submitted by an administrator."""
 
+    # These fields are optional in a PATCH solely so callers can omit them.  The
+    # corresponding persisted values are non-nullable, so an explicitly supplied
+    # null must never reach the write path.
+    NON_NULLABLE_PATCH_FIELDS: ClassVar[tuple[str, ...]] = (
+        "title",
+        "sort_title",
+        "force_default_audio_stream",
+        "force_default_subtitle_track",
+        "force_default_subtitle_font_scale",
+    )
+
     actor: str = Field(min_length=1, max_length=200)
     title: str | None = Field(default=None, max_length=1_000)
     sort_title: str | None = Field(default=None, max_length=1_000)
@@ -421,7 +432,7 @@ class LibraryItemUpdate(APIModel):
     def require_change(self) -> Self:
         if self.model_fields_set == {"actor"}:
             raise ValueError("Library item update must include a change.")
-        for field in ("title", "sort_title"):
+        for field in self.NON_NULLABLE_PATCH_FIELDS:
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field.replace('_', ' ')} cannot be null.")
         selected_kinds = [selection.kind for selection in self.selected_artwork or ()]
@@ -1119,6 +1130,28 @@ class MetadataMatchRequest(APIModel):
 
 class MetadataRejectRequest(MetadataMatchRequest):
     pass
+
+
+class MetadataBindingReference(APIModel):
+    """The active provider record currently associated with a library item."""
+
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500)
+    title: str | None = Field(default=None, max_length=1_000)
+    year: int | None = Field(default=None, ge=1, le=9999)
+    kind: LibraryItemKind
+    matched_at: datetime | None = None
+
+
+class MetadataSearchResult(APIModel):
+    """One provider record offered for an administrator-selected reassignment."""
+
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=1_000)
+    year: int | None = Field(default=None, ge=1, le=9999)
+    kind: LibraryItemKind
+    confidence: float = Field(ge=0, le=1)
 
 
 class ScanRequest(APIModel):

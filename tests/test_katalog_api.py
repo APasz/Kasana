@@ -9,7 +9,7 @@ import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -19,7 +19,7 @@ import httpx
 import pytest
 import uvicorn
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from kasana.katalog.api.app import create_app
@@ -39,8 +39,10 @@ from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
     KeiroKind,
+    MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
+    MetadataMatchStatus,
     User,
     Zaisan,
     ZaisanKind,
@@ -49,6 +51,7 @@ from kasana.katalog.public import (
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPair,
     JobStatus,
+    LibraryItemUpdate,
     UserAuthentication,
     UserCreate,
     UserUpdate,
@@ -532,6 +535,13 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     assert clear_artwork.json()["item"]["selected_artwork"] == []
     assert clear_artwork.json()["audit"]["changed_fields"] == ["selected_artwork"]
 
+    invalid_force_flag = await api_fixture.client.patch(
+        "/api/v1/library/items/1",
+        json={"actor": "owner", "force_default_audio_stream": None},
+    )
+    assert invalid_force_flag.status_code == 422
+    assert invalid_force_flag.json()["code"] == "validation_error"
+
     invalid_hierarchy = await api_fixture.client.patch(
         "/api/v1/library/items/1",
         json={"actor": "owner", "kind": "series"},
@@ -842,6 +852,82 @@ async def test_metadata_review_only_returns_unresolved_suggestions(
     assert review.json()["items"] == []
 
 
+async def test_metadata_binding_and_search_endpoints_support_reassignment(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def add_binding(session: Session) -> None:
+        session.add(
+            MetadataBinding(
+                library_item_id=1,
+                provider="tmdb",
+                provider_id="550",
+                provider_media_kind=ZaisanKind.MOVIE,
+                status=MetadataMatchStatus.MATCHED,
+                confidence=0.98,
+                scoring_explanation=[],
+                provider_title="Fight Club",
+                provider_original_title=None,
+                provider_release_year=1999,
+                provider_original_language="en",
+                provider_external_ids=[],
+                accepted_at=datetime(2026, 1, 1, tzinfo=UTC),
+                manual_decision=True,
+            )
+        )
+
+    api_fixture.database.run_transaction(add_binding)
+    binding = await api_fixture.client.get("/api/v1/metadata/items/1/binding")
+
+    assert binding.status_code == 200
+    assert binding.json() == {
+        "provider": "tmdb",
+        "provider_id": "550",
+        "title": "Fight Club",
+        "year": 1999,
+        "kind": "movie",
+        "matched_at": "2026-01-01T00:00:00",
+    }
+
+    searched_queries: list[str] = []
+
+    class FakeWorkflow:
+        async def search_item_records(
+            self, item_id: int, _providers: tuple[MetadataProvider, ...], *, query: str
+        ) -> tuple[SimpleNamespace, ...]:
+            assert item_id == 1
+            searched_queries.append(query)
+            return (
+                SimpleNamespace(
+                    result=SimpleNamespace(
+                        reference=SimpleNamespace(provider="tmdb", raw_id="603"),
+                        title="The Matrix",
+                        release_date=date(1999, 3, 31),
+                        media_kind=SimpleNamespace(value="movie"),
+                    ),
+                    confidence=0.82,
+                ),
+            )
+
+    async def with_fake_provider(operation: Callable[..., Awaitable[object]]) -> object:
+        return await operation(FakeWorkflow(), ())
+
+    monkeypatch.setattr(api_fixture.runtime, "_with_provider", with_fake_provider)
+    search = await api_fixture.client.get("/api/v1/metadata/items/1/search?query=matrix")
+
+    assert search.status_code == 200
+    assert searched_queries == ["matrix"]
+    assert search.json() == [
+        {
+            "provider": "tmdb",
+            "provider_id": "603",
+            "title": "The Matrix",
+            "year": 1999,
+            "kind": "movie",
+            "confidence": 0.82,
+        }
+    ]
+
+
 async def test_completed_scan_auto_matches_safe_candidates(
     api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -970,9 +1056,13 @@ async def test_seeded_library_deployment_smoke_path(
             matched.append((item_id, provider_id, actor))
 
         async def fetch_posters(
-            self, _providers: tuple[MetadataProvider, ...], *, root_id: int | None
+            self,
+            _providers: tuple[MetadataProvider, ...],
+            *,
+            root_id: int | None = None,
+            item_id: int | None = None,
         ) -> tuple[object, ...]:
-            assert root_id == 1
+            assert (root_id, item_id) in {(1, None), (None, 1)}
             return (object(),)
 
     async def with_fake_provider(operation: Callable[..., Awaitable[object]]) -> object:
@@ -997,6 +1087,10 @@ async def test_seeded_library_deployment_smoke_path(
     )
     assert artwork.status_code == 202
     await api_fixture.runtime.jobs._tasks[artwork.json()["job"]["id"]]  # pyright: ignore[reportPrivateUsage]
+
+    item_artwork = await api_fixture.client.post("/api/v1/library/items/1/artwork/fetch")
+    assert item_artwork.status_code == 200
+    assert isinstance(item_artwork.json(), list)
 
     browse = await api_fixture.client.get("/api/v1/library/items", params={"search": "Alpha"})
     assert [item["title"] for item in browse.json()["items"]] == ["Alpha"]
@@ -1253,6 +1347,15 @@ async def test_errors_are_structured_and_database_errors_are_mapped(
     assert failed.status_code == 503
     assert failed.json()["code"] == "service_unavailable"
 
+    def integrity_failure(*_: object, **__: object) -> object:
+        raise IntegrityError("SELECT 1", {}, ValueError("fixture constraint failure"))
+
+    monkeypatch.setattr(api_fixture.runtime.queries, "list_items", integrity_failure)
+    invalid_write = await api_fixture.client.get("/api/v1/library/items")
+    assert invalid_write.status_code == 422
+    assert invalid_write.json()["code"] == "validation_error"
+    assert invalid_write.json()["message"] == "The requested change violates library data rules."
+
 
 async def test_metadata_identity_conflicts_are_actionable(
     api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
@@ -1370,6 +1473,12 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             detail = await client.get_library_item(1)
             assert detail.item is not None
             assert (await client.get_library_item(1, etag=detail.etag)).not_modified is True
+            item_update = await client.update_library_item(
+                1, LibraryItemUpdate(actor="client", title="Client-edited Alpha")
+            )
+            assert item_update.item.title == "Client-edited Alpha"
+            assert item_update.audit.changed_fields == ("title",)
+            assert await client.metadata_binding(1) is None
             initial_state = await client.playback_state(1, 1)
             assert initial_state is not None
             assert initial_state.completed is True

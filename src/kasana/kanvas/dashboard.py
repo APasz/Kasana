@@ -93,6 +93,7 @@ from kasana.katalog.public import (
     LibraryRootCreate,
     LibraryRootKind,
     LibraryRootUpdate,
+    MetadataMatchRequest,
     PlaybackPlanEntry,
     PlaybackSessionTrackSelection,
     PlaybackSubtitleFontAttachment,
@@ -476,8 +477,10 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
         return forbidden
     service = KanvasKatalogService(_settings, profile.user.id)
     try:
-        item, audit = await gather(
-            service.item_edit_detail(item_id), service.item_edit_audit(item_id)
+        item, audit, metadata_binding = await gather(
+            service.item_edit_detail(item_id),
+            service.item_edit_audit(item_id),
+            service.item_metadata_binding(item_id),
         )
         collection_choices, parent_choices = await gather(
             service.item_edit_collection_choices(item),
@@ -489,6 +492,9 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
         {
             "item": item.model_dump(mode="json"),
             "audit": [entry.model_dump(mode="json") for entry in audit],
+            "metadataBinding": (
+                metadata_binding.model_dump(mode="json") if metadata_binding is not None else None
+            ),
             "collectionChoices": [choice.model_dump(mode="json") for choice in collection_choices],
             "parentChoices": [choice.model_dump(mode="json") for choice in parent_choices],
             "collectionRelationships": [
@@ -521,6 +527,68 @@ async def item_parent_choices_data(item_id: int, request: Request) -> JSONRespon
     return JSONResponse({"parentChoices": [choice.model_dump(mode="json") for choice in choices]})
 
 
+@app.get("/kanvas/data/items/{item_id}/metadata-search", include_in_schema=False)
+async def item_metadata_search_data(item_id: int, request: Request) -> JSONResponse:
+    """Search the configured provider for an administrator-selected replacement record."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    query = request.query_params.get("query", "").strip()
+    if not 1 <= len(query) <= 500:
+        return _invalid_action("A metadata search must contain between 1 and 500 characters.")
+    try:
+        results = await KanvasKatalogService(_settings, profile.user.id).search_item_metadata(
+            item_id, query=query
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not search metadata records.")
+    return JSONResponse({"results": [result.model_dump(mode="json") for result in results]})
+
+
+@app.post("/kanvas/actions/items/{item_id}/metadata-match", include_in_schema=False)
+async def item_metadata_match_action(item_id: int, request: Request) -> JSONResponse:
+    """Apply one confirmed, lock-aware metadata reassignment for an item."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    _require_administrator(profile)
+    payload = await _json_object(request)
+    if payload.get("confirmed") is not True:
+        return _invalid_action("Changing a metadata match requires confirmation.")
+    try:
+        match = MetadataMatchRequest(
+            provider=_string(payload, "provider", maximum_length=100),
+            provider_id=_string(payload, "providerId", maximum_length=500),
+        )
+        await KanvasKatalogService(_settings, profile.user.id).reassign_metadata_item(
+            item_id, provider=match.provider, provider_id=match.provider_id
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Metadata reassignment could not be applied.")
+    except (ValidationError, ValueError) as error:
+        return _invalid_action(str(error))
+    return JSONResponse({"itemId": item_id, "action": "reassigned"})
+
+
+@app.post("/kanvas/actions/items/{item_id}/artwork-fetch", include_in_schema=False)
+async def item_artwork_fetch_action(item_id: int, request: Request) -> JSONResponse:
+    """Fetch cached poster artwork for this item's accepted metadata match."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    _require_administrator(profile)
+    try:
+        artwork = await KanvasKatalogService(_settings, profile.user.id).fetch_item_artwork(item_id)
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Artwork could not be fetched.")
+    return JSONResponse({"artwork": [entry.model_dump(mode="json") for entry in artwork]})
+
+
 @app.post("/kanvas/actions/items/{item_id}", include_in_schema=False)
 async def item_edit_action(item_id: int, request: Request) -> JSONResponse:
     """Apply an audited metadata edit without exposing any media-file operation."""
@@ -536,7 +604,7 @@ async def item_edit_action(item_id: int, request: Request) -> JSONResponse:
         )
         result = await KanvasKatalogService(_settings, profile.user.id).update_item(item_id, update)
     except KatalogClientError as error:
-        return _katalog_data_error(error, "Item edit could not be applied.")
+        return _item_edit_error(error)
     except (ValidationError, ValueError) as error:
         return _invalid_action(str(error))
     return JSONResponse(result.model_dump(mode="json"))
@@ -2096,7 +2164,14 @@ def _library_item_update_payload(payload: dict[str, object], *, actor: str) -> d
     for browser_name, contract_name in field_names.items():
         if browser_name not in payload:
             continue
-        values[contract_name] = payload[browser_name]
+        value = payload[browser_name]
+        # The browser omits disabled inputs, but older cached clients can send
+        # null for an unavailable force toggle.  For these non-nullable PATCH
+        # fields, omission preserves the existing setting; forwarding null
+        # would turn an artwork-only change into a database constraint failure.
+        if value is None and contract_name in LibraryItemUpdate.NON_NULLABLE_PATCH_FIELDS:
+            continue
+        values[contract_name] = value
     if "tags" in payload:
         values["tags"] = _tag_values(payload["tags"])
     if "lockedMetadataFields" in payload:
@@ -2275,6 +2350,21 @@ def _katalog_data_error(error: KatalogClientError, message: str) -> JSONResponse
     if error.request_id is not None:
         payload["requestId"] = error.request_id
     return JSONResponse(payload, status_code=_katalog_status(error))
+
+
+def _item_edit_error(error: KatalogClientError) -> JSONResponse:
+    """Keep item-edit validation and conflict feedback actionable in the editor."""
+
+    if error.kind in {
+        KatalogClientErrorKind.CONFLICT,
+        KatalogClientErrorKind.NOT_FOUND,
+        KatalogClientErrorKind.VALIDATION,
+    }:
+        payload: dict[str, str] = {"error": str(error)}
+        if error.request_id is not None:
+            payload["requestId"] = error.request_id
+        return JSONResponse(payload, status_code=_katalog_status(error))
+    return _katalog_data_error(error, "Item edit could not be applied.")
 
 
 def _administration_operation_failure_message(operation: object, error: KatalogClientError) -> str:

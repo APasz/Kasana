@@ -66,6 +66,7 @@ from kasana.kanvas.viewmodels.library import (
 from kasana.katalog.public import (
     ArtworkFetchRequest,
     ArtworkKind,
+    ArtworkSelection,
     Availability,
     CollectionCreate,
     CollectionMembership,
@@ -91,9 +92,11 @@ from kasana.katalog.public import (
     LibraryRootCreate,
     LibraryRootSummary,
     LibraryRootUpdate,
+    MetadataBindingReference,
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    MetadataSearchResult,
     OnDeckEntry,
     PaginatedResponse,
     PlaybackStateResponse,
@@ -319,10 +322,38 @@ class KanvasKatalogService:
     async def match_metadata_candidate(
         self, item_id: int, *, provider: str, provider_id: str
     ) -> None:
+        await self.match_metadata(item_id, provider=provider, provider_id=provider_id)
+
+    async def reassign_metadata_item(
+        self, item_id: int, *, provider: str, provider_id: str
+    ) -> None:
+        """Associate an item with an administrator-selected provider record."""
+
+        await self.match_metadata(item_id, provider=provider, provider_id=provider_id)
+
+    async def match_metadata(self, item_id: int, *, provider: str, provider_id: str) -> None:
+        """Apply one provider record through Katalog's lock-aware match operation."""
+
         async with self._client() as client:
             await client.match_metadata(
                 item_id, MetadataMatchRequest(provider=provider, provider_id=provider_id)
             )
+
+    async def item_metadata_binding(self, item_id: int) -> MetadataBindingReference | None:
+        async with self._client() as client:
+            return await client.metadata_binding(item_id)
+
+    async def search_item_metadata(
+        self, item_id: int, *, query: str
+    ) -> tuple[MetadataSearchResult, ...]:
+        async with self._client() as client:
+            return await client.search_metadata(item_id, query=query)
+
+    async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+        """Fetch the accepted metadata poster and return the item's cached artwork."""
+
+        async with self._client() as client:
+            return await client.fetch_library_item_artwork(item_id)
 
     async def reject_metadata_candidate(
         self, item_id: int, *, provider: str, provider_id: str

@@ -537,6 +537,99 @@ function testItemEditorShowsOnlyRelevantKindFields() {
   assert.match(editor.renderLockRows('episode', new Set(['episode_number'])), /Episode number/);
 }
 
+function testItemEditorUsesTaskFocusedTabs() {
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+
+  assert.deepEqual(
+    editor.editorTabs(false).map((tab) => tab.id),
+    ['details', 'match', 'organise', 'artwork', 'history']
+  );
+  assert.deepEqual(
+    editor.editorTabs(true).map((tab) => tab.id),
+    ['details', 'match', 'organise', 'artwork', 'playback', 'history']
+  );
+  assert.equal(editor.availableTab('playback', editor.editorTabs(false)), 'details');
+  assert.equal(editor.availableTab('history', editor.editorTabs(false)), 'history');
+  editor.activeTab = 'match';
+  assert.match(editor.renderTabNavigation(editor.editorTabs(false)), /role="tablist"/);
+  assert.match(editor.renderTabNavigation(editor.editorTabs(false)), /aria-selected="true"/);
+  assert.match(
+    editor.renderMatchTab(
+      'movie',
+      new Set(),
+      {provider: 'tmdb', provider_id: '314', title: 'Pan’s Labyrinth', year: 2006, kind: 'movie'},
+      'Pan’s Labyrinth'
+    ),
+    /Current metadata match/
+  );
+  assert.match(
+    editor.renderMatchTab('movie', new Set(), null, 'Pan’s Labyrinth'),
+    /Search database/
+  );
+  assert.match(editor.renderOrganiseTab('movie', {}, ''), /Library organisation/);
+  assert.match(
+    editor.renderArtworkTab('', 'series', {provider: 'tmdb', provider_id: '63712'}),
+    /Fetch poster from current match/
+  );
+  assert.doesNotMatch(editor.renderArtworkTab('', 'episode', null), /Fetch poster from current match/);
+}
+
+function testMetadataProviderLinksSupportDirectReassignment() {
+  const {tmdbEntryReferenceFromUrl, providerEntryUrl} = window.kanvasInternals;
+  const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
+
+  assert.equal(
+    providerEntryUrl({provider: 'tmdb', provider_id: '550', kind: 'movie'}),
+    'https://www.themoviedb.org/movie/550'
+  );
+  assert.equal(
+    providerEntryUrl({provider: 'tmdb', providerId: '1399', kind: 'series'}),
+    'https://www.themoviedb.org/tv/1399'
+  );
+  assert.deepEqual(
+    tmdbEntryReferenceFromUrl('https://www.themoviedb.org/en-AU/movie/550-fight-club', 'movie'),
+    {provider: 'tmdb', provider_id: '550', kind: 'movie'}
+  );
+  assert.equal(tmdbEntryReferenceFromUrl('https://www.imdb.com/title/tt0137523/', 'movie'), null);
+  assert.equal(
+    tmdbEntryReferenceFromUrl('https://www.themoviedb.org/tv/1399-game-of-thrones', 'movie'),
+    null
+  );
+  assert.equal(tmdbEntryReferenceFromUrl('https://example.com/movie/550', 'movie'), null);
+  editor.currentItem = {kind: 'series'};
+  const directMatch = editor.metadataMatchFromLink(
+    'https://www.themoviedb.org/tv/63712-acchi-kocchi'
+  );
+  assert.deepEqual(
+    directMatch,
+    {provider: 'tmdb', provider_id: '63712', kind: 'series', title: 'TMDB record 63712', year: null}
+  );
+  assert.equal(editor.metadataMatchFromLink('https://www.themoviedb.org/movie/550-fight-club'), null);
+  const confirmation = new FakeElement('section');
+  const applyButton = new FakeElement('button');
+  confirmation.hidden = true;
+  confirmation.querySelector = () => applyButton;
+  editor.querySelector = (selector) => selector === '[data-item-editor-content]'
+    ? {querySelector: (target) => target === '[data-item-match-confirmation]' ? confirmation : null}
+    : null;
+  editor.selectMetadataMatchResult(directMatch);
+  assert.equal(confirmation.hidden, false);
+  assert.match(confirmation.innerHTML, /Apply selected match/);
+  assert.match(
+    editor.renderMatchTab(
+      'movie',
+      new Set(),
+      {provider: 'tmdb', provider_id: '550', title: 'Fight Club', year: 1999, kind: 'movie'},
+      'Fight Club'
+    ),
+    /href="https:\/\/www\.themoviedb\.org\/movie\/550"/
+  );
+  const matchTab = editor.renderMatchTab('movie', new Set(), null, 'Fight Club');
+  assert.match(matchTab, /Or paste a TMDB link/);
+  assert.match(matchTab, /Review link match/);
+  assert.match(matchTab, /Save local edits does not change the metadata association/);
+}
+
 function testItemEditorConfirmsDiscardingUnsavedChanges() {
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
   const confirm = window.confirm;
@@ -674,6 +767,8 @@ async function main() {
   testAdministrationPollsTrackedJobsFrequently();
   await testAdministrationReplacesPriorCompletionWithActionFailure();
   testItemEditorShowsOnlyRelevantKindFields();
+  testItemEditorUsesTaskFocusedTabs();
+  testMetadataProviderLinksSupportDirectReassignment();
   testItemEditorConfirmsDiscardingUnsavedChanges();
   testItemEditorHidesForceControlsForAutomaticDefaults();
   testItemEditorPayloadPreservesHiddenState();

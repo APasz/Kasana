@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from kasana.katalog.api.contracts import (
+    ArtworkSelection,
     BackgroundJob,
     DirectoryEntry,
     DirectoryListing,
@@ -20,6 +21,8 @@ from kasana.katalog.api.contracts import (
     HierarchyRepairImpact,
     HierarchyRepairManualReview,
     HierarchyRepairPreview,
+    LibraryItemKind,
+    MetadataSearchResult,
 )
 from kasana.katalog.api.jobs import JobCancelledError, JobContext, JobOutcome, JobRegistry
 from kasana.katalog.api.service import KatalogQueryService
@@ -103,6 +106,42 @@ class KatalogApiRuntime:
             await workflow.match_item(item_id, selected, provider_id, actor="api")
 
         await self._with_provider(operation)
+
+    async def search_metadata(
+        self, item_id: int, *, query: str
+    ) -> tuple[MetadataSearchResult, ...]:
+        async def operation(
+            workflow: MetadataWorkflow, providers: tuple[MetadataProvider, ...]
+        ) -> tuple[MetadataSearchResult, ...]:
+            results = await workflow.search_item_records(item_id, providers, query=query)
+            return tuple(
+                MetadataSearchResult(
+                    provider=result.result.reference.provider,
+                    provider_id=result.result.reference.raw_id,
+                    title=result.result.title,
+                    year=(
+                        result.result.release_date.year
+                        if result.result.release_date is not None
+                        else None
+                    ),
+                    kind=LibraryItemKind(result.result.media_kind.value),
+                    confidence=result.confidence,
+                )
+                for result in results
+            )
+
+        return await self._with_provider(operation)
+
+    async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+        """Fetch the accepted metadata poster for one library item."""
+
+        async def operation(
+            workflow: MetadataWorkflow, providers: tuple[MetadataProvider, ...]
+        ) -> tuple[ArtworkSelection, ...]:
+            await workflow.fetch_posters(providers, item_id=item_id)
+            return await run_blocking(self.queries.list_artwork, item_id)
+
+        return await self._with_provider(operation)
 
     async def reject_item(self, item_id: int, provider: str, provider_id: str) -> None:
         workflow = self._workflow()

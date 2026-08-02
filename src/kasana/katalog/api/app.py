@@ -13,7 +13,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from kasana.katalog.admin import DatabaseAdmin
 from kasana.katalog.api.contracts import (
@@ -53,9 +53,11 @@ from kasana.katalog.api.contracts import (
     LibraryRootSummary,
     LibraryRootUpdate,
     MediaTechnicalSummary,
+    MetadataBindingReference,
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    MetadataSearchResult,
     MutationResult,
     OnDeckEntry,
     PaginatedResponse,
@@ -476,6 +478,18 @@ def create_app(
     ) -> tuple[ArtworkSelection, ...]:
         return await run_blocking(runtime.queries.list_artwork, item_id)
 
+    @app.post(
+        "/api/v1/library/items/{item_id}/artwork/fetch",
+        response_model=list[ArtworkSelection],
+        operation_id="v1_fetch_library_item_artwork",
+        responses=_ERROR_RESPONSES,
+    )
+    async def fetch_library_item_artwork(
+        item_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[ArtworkSelection, ...]:
+        return await runtime.fetch_item_artwork(item_id)
+
     @app.get(
         "/api/v1/library/items/{item_id}/artwork/{artwork_id}",
         operation_id="v1_get_library_item_artwork_content",
@@ -859,6 +873,31 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PaginatedResponse[MetadataReviewCandidate]:
         return await run_blocking(runtime.queries.metadata_review, cursor=cursor, limit=limit)
+
+    @app.get(
+        "/api/v1/metadata/items/{item_id}/binding",
+        response_model=MetadataBindingReference | None,
+        operation_id="v1_get_metadata_binding",
+        responses=_ERROR_RESPONSES,
+    )
+    async def metadata_binding(
+        item_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> MetadataBindingReference | None:
+        return await run_blocking(runtime.queries.metadata_binding, item_id)
+
+    @app.get(
+        "/api/v1/metadata/items/{item_id}/search",
+        response_model=tuple[MetadataSearchResult, ...],
+        operation_id="v1_search_metadata_for_item",
+        responses=_ERROR_RESPONSES,
+    )
+    async def metadata_search(
+        item_id: Annotated[int, Path(gt=0)],
+        query: Annotated[str, Query(min_length=1, max_length=500)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[MetadataSearchResult, ...]:
+        return await runtime.search_metadata(item_id, query=query)
 
     @app.get(
         "/api/v1/jobs",
@@ -1519,6 +1558,22 @@ def _install_exception_handlers(app: FastAPI) -> None:
             "validation_error",
             "The request is invalid.",
             details,
+        )
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error(request: Request, error: IntegrityError) -> JSONResponse:
+        _LOGGER.warning(
+            "Katalog API data-integrity failure: method=%s path=%s request_id=%s",
+            request.method,
+            request.url.path,
+            getattr(request.state, "request_id", None),
+            exc_info=error,
+        )
+        return _error_response(
+            request,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "validation_error",
+            "The requested change violates library data rules.",
         )
 
     @app.exception_handler(MetadataProviderConfigurationError)

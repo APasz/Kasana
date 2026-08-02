@@ -71,8 +71,11 @@ from kasana.kanvas.dashboard import (
     delete_collection_action,
     delete_watch_order_action,
     design_page,
+    item_artwork_fetch_action,
     item_edit_action,
     item_edit_data,
+    item_metadata_match_action,
+    item_metadata_search_data,
     item_parent_choices_data,
     library_data,
     remove_collection_member_action,
@@ -170,7 +173,9 @@ from kasana.katalog.public import (
     LibraryRootKind,
     LibraryRootSummary,
     LibraryRootUpdate,
+    MetadataBindingReference,
     MetadataReviewCandidate,
+    MetadataSearchResult,
     OnDeckEntry,
     PaginatedResponse,
     PlaybackStateResponse,
@@ -2377,6 +2382,30 @@ async def test_katalog_service_item_edit_contracts(
         occurred_at=datetime.now(UTC),
     )
     mutation = LibraryItemMutationResult(item=item, audit=audit)
+    metadata_binding = MetadataBindingReference(
+        provider="tmdb",
+        provider_id="42",
+        title="The answer",
+        year=2001,
+        kind=LibraryItemKind.MOVIE,
+    )
+    metadata_results = (
+        MetadataSearchResult(
+            provider="tmdb",
+            provider_id="43",
+            title="The correct answer",
+            year=2002,
+            kind=LibraryItemKind.MOVIE,
+            confidence=0.9,
+        ),
+    )
+    artwork = ArtworkSelection(
+        id=8,
+        kind=ArtworkKind.POSTER,
+        url="/api/v1/library/items/7/artwork/8",
+        content_type="image/jpeg",
+        size_bytes=4,
+    )
     calls: list[str] = []
 
     class FakeClient:
@@ -2405,12 +2434,35 @@ async def test_katalog_service_item_edit_contracts(
             calls.append("update")
             return mutation
 
+        async def fetch_library_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+            assert item_id == 7
+            calls.append("artwork-fetch")
+            return (artwork,)
+
         async def list_library_item_edit_audit(
             self, item_id: int
         ) -> tuple[LibraryItemEditAudit, ...]:
             assert item_id == 7
             calls.append("audit")
             return (audit,)
+
+        async def metadata_binding(self, item_id: int) -> MetadataBindingReference:
+            assert item_id == 7
+            calls.append("metadata-binding")
+            return metadata_binding
+
+        async def search_metadata(
+            self, item_id: int, *, query: str
+        ) -> tuple[MetadataSearchResult, ...]:
+            assert (item_id, query) == (7, "correct")
+            calls.append("metadata-search")
+            return metadata_results
+
+        async def match_metadata(self, item_id: int, request: object) -> None:
+            assert item_id == 7
+            assert getattr(request, "provider", None) == "tmdb"
+            assert getattr(request, "provider_id", None) == "43"
+            calls.append("metadata-match")
 
         async def list_library_item_parent_choices(
             self, item_id: int, *, target_kind: LibraryItemKind
@@ -2453,13 +2505,30 @@ async def test_katalog_service_item_edit_contracts(
     audits = await service.item_edit_audit(7)
     collection_choices = await service.item_edit_collection_choices(detail)
     parent_choices = await service.item_parent_choices(7, target_kind=LibraryItemKind.SEASON)
+    binding = await service.item_metadata_binding(7)
+    search_results = await service.search_item_metadata(7, query="correct")
+    await service.reassign_metadata_item(7, provider="tmdb", provider_id="43")
+    fetched_artwork = await service.fetch_item_artwork(7)
 
     assert detail.title == "A title"
     assert result.audit.changed_fields == ("title", "selected_artwork")
     assert audits == (audit,)
     assert collection_choices == (CollectionChoiceView(id=4, name="Stargate", revision=8),)
     assert parent_choices[0].title == "Stargate"
-    assert calls == ["detail", "update", "audit", "collections", "parents"]
+    assert binding == metadata_binding
+    assert search_results == metadata_results
+    assert fetched_artwork == (artwork,)
+    assert calls == [
+        "detail",
+        "update",
+        "audit",
+        "collections",
+        "parents",
+        "metadata-binding",
+        "metadata-search",
+        "metadata-match",
+        "artwork-fetch",
+    ]
 
 
 async def test_item_edit_endpoints_report_data_and_validation(
@@ -2472,6 +2541,33 @@ async def test_item_edit_endpoints_report_data_and_validation(
         changed_fields=("title", "tags"),
         occurred_at=datetime.now(UTC),
     )
+    metadata_binding = MetadataBindingReference(
+        provider="tmdb",
+        provider_id="314",
+        title="Pan's Labyrinth",
+        year=2006,
+        kind=LibraryItemKind.MOVIE,
+    )
+    metadata_results = (
+        MetadataSearchResult(
+            provider="tmdb",
+            provider_id="315",
+            title="Correct record",
+            year=2006,
+            kind=LibraryItemKind.MOVIE,
+            confidence=0.98,
+        ),
+    )
+    fetched_artwork = (
+        ArtworkSelection(
+            id=18,
+            kind=ArtworkKind.POSTER,
+            url="/api/v1/library/items/7/artwork/18",
+            content_type="image/jpeg",
+            size_bytes=4,
+        ),
+    )
+    reassigned: list[tuple[int, str, str]] = []
 
     class EditingCatalogue:
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
@@ -2484,6 +2580,25 @@ async def test_item_edit_endpoints_report_data_and_validation(
         async def item_edit_audit(self, item_id: int) -> tuple[LibraryItemEditAudit, ...]:
             assert item_id == 7
             return (audit,)
+
+        async def item_metadata_binding(self, item_id: int) -> MetadataBindingReference:
+            assert item_id == 7
+            return metadata_binding
+
+        async def search_item_metadata(
+            self, item_id: int, *, query: str
+        ) -> tuple[MetadataSearchResult, ...]:
+            assert (item_id, query) == (7, "Correct record")
+            return metadata_results
+
+        async def reassign_metadata_item(
+            self, item_id: int, *, provider: str, provider_id: str
+        ) -> None:
+            reassigned.append((item_id, provider, provider_id))
+
+        async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+            assert item_id == 7
+            return fetched_artwork
 
         async def item_edit_collection_choices(
             self, _item: LibraryItemDetail
@@ -2534,6 +2649,10 @@ async def test_item_edit_endpoints_report_data_and_validation(
         7,
         Request({"type": "http", "query_string": b"kind=season", "headers": []}),
     )
+    metadata_search_response = await item_metadata_search_data(
+        7,
+        Request({"type": "http", "query_string": b"query=Correct%20record", "headers": []}),
+    )
     action_response = await item_edit_action(
         7,
         cast(
@@ -2566,16 +2685,48 @@ async def test_item_edit_endpoints_report_data_and_validation(
     invalid_action_response = await item_edit_action(
         7, cast(Request, JsonRequest({"tags": "anime"}))
     )
+    artwork_fetch_response = await item_artwork_fetch_action(
+        7, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    metadata_match_response = await item_metadata_match_action(
+        7,
+        cast(
+            Request,
+            JsonRequest({"provider": "tmdb", "providerId": "315", "confirmed": True}),
+        ),
+    )
+    unconfirmed_match_response = await item_metadata_match_action(
+        7,
+        cast(Request, JsonRequest({"provider": "tmdb", "providerId": "315"})),
+    )
 
     assert json.loads(bytes(detail_response.body))["item"]["selected_artwork"] == [
         {"kind": "poster", "artwork_id": 8}
     ]
     assert json.loads(bytes(detail_response.body))["audit"][0]["actor"] == "tester"
+    assert json.loads(bytes(detail_response.body))["metadataBinding"] == {
+        "provider": "tmdb",
+        "provider_id": "314",
+        "title": "Pan's Labyrinth",
+        "year": 2006,
+        "kind": "movie",
+        "matched_at": None,
+    }
     assert json.loads(bytes(detail_response.body))["collectionChoices"] == [
         {"id": 4, "name": "Stargate", "revision": 8}
     ]
     assert json.loads(bytes(detail_response.body))["parentChoices"] == []
     assert json.loads(bytes(parent_choices_response.body))["parentChoices"] == []
+    assert json.loads(bytes(metadata_search_response.body))["results"] == [
+        {
+            "provider": "tmdb",
+            "provider_id": "315",
+            "title": "Correct record",
+            "year": 2006,
+            "kind": "movie",
+            "confidence": 0.98,
+        }
+    ]
     assert json.loads(bytes(detail_response.body))["collectionRelationships"] == [
         "primary",
         "sequel",
@@ -2587,6 +2738,49 @@ async def test_item_edit_endpoints_report_data_and_validation(
     ]
     assert json.loads(bytes(action_response.body))["audit"]["changed_fields"] == ["title", "tags"]
     assert invalid_action_response.status_code == 422
+    assert json.loads(bytes(artwork_fetch_response.body)) == {
+        "artwork": [fetched_artwork[0].model_dump(mode="json")]
+    }
+    assert json.loads(bytes(metadata_match_response.body)) == {"itemId": 7, "action": "reassigned"}
+    assert unconfirmed_match_response.status_code == 422
+    assert reassigned == [(7, "tmdb", "315")]
+
+
+def test_item_edit_error_preserves_safe_katalog_validation_detail() -> None:
+    response = dashboard._item_edit_error(  # pyright: ignore[reportPrivateUsage]
+        KatalogClientError(
+            KatalogClientErrorKind.VALIDATION,
+            "Artwork 418 does not belong to item 7688.",
+            request_id="request-1",
+        )
+    )
+
+    assert response.status_code == 422
+    assert json.loads(bytes(response.body)) == {
+        "error": "Artwork 418 does not belong to item 7688.",
+        "requestId": "request-1",
+    }
+
+
+def test_item_edit_payload_omits_null_non_nullable_playback_flags() -> None:
+    payload = dashboard._library_item_update_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "title": "Future Diary",
+            "selectedArtwork": [{"kind": "poster", "artworkId": 419}],
+            "forceDefaultAudioStream": None,
+            "forceDefaultSubtitleTrack": None,
+            "forceDefaultSubtitleFontScale": None,
+        },
+        actor="tester",
+    )
+
+    assert payload == {
+        "actor": "tester",
+        "title": "Future Diary",
+        "selected_artwork": ({"kind": "poster", "artwork_id": 419},),
+    }
+    update = LibraryItemUpdate.model_validate(payload)
+    assert update.model_fields_set == {"actor", "title", "selected_artwork"}
 
 
 async def test_administration_error_states_and_local_section_routes(
@@ -2972,6 +3166,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         assert _element_props(item_editors[0])["action-source"] == "/kanvas/actions/items/7"
         assert _element_props(item_editors[0])["parent-choices-source"] == (
             "/kanvas/data/items/7/parent-choices"
+        )
+        assert _element_props(item_editors[0])["artwork-fetch-source"] == (
+            "/kanvas/actions/items/7/artwork-fetch"
         )
 
 
@@ -3440,11 +3637,13 @@ def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -
     kanvas_main.console_main()
 
     monkeypatch.setenv("KASANA_KANVAS_AUTO_BROWSER_OPEN", "true")
+    monkeypatch.setenv("KASANA_LOG_LEVEL", "DEBUG")
     kanvas_main.console_main()
 
     assert [options["show"] for options in run_options] == [False, True]
     assert all(options["host"] == "0.0.0.0" for options in run_options)
     assert all(options["log_config"] is None for options in run_options)
+    assert [options["uvicorn_logging_level"] for options in run_options] == ["info", "debug"]
     assert all(options["timeout_graceful_shutdown"] == 5 for options in run_options)
 
 
@@ -3605,6 +3804,9 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert ".k-profile-form [data-profile-panel][hidden] { display: none; }" in css
     assert ".k-item-editor__playback-option" in css
     assert ".k-item-editor__field-label" in css
+    assert ".k-item-editor__tabs" in css
+    assert ".k-item-editor__match-workflow" in css
+    assert ".k-item-editor__match-confirmation[hidden] { display: none; }" in css
     assert ".k-item-editor__form > .k-action-row:last-child { position: sticky;" in css
     assert ".k-check input:focus-visible { outline: none; }" in css
     assert ".k-check-menu__summary" in css
@@ -3632,6 +3834,17 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "kanvas-item-picker" in javascript
     assert "kanvas-watch-order-list" in javascript
     assert "k-item-editor__playback-option" in javascript
+    assert "renderTabNavigation" in javascript
+    assert "data-item-editor-tab-panel" in javascript
+    assert "metadata-search-source" in javascript
+    assert "artwork-fetch-source" in javascript
+    assert "Fetch poster from current match" in javascript
+    assert "data-item-artwork-fetch" in javascript
+    assert "Apply selected match" in javascript
+    assert "tmdbEntryReferenceFromUrl" in javascript
+    assert "selectMetadataMatchResult" in javascript
+    assert "Or paste a TMDB link" in javascript
+    assert "Save local edits does not change the metadata association." in javascript
     assert "parent-choices-source" in javascript
     assert "confirmDiscard" in javascript
     assert 'data-profile-language="audio"' in javascript

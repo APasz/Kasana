@@ -60,6 +60,7 @@ from kasana.katalog.api.contracts import (
     ManualQueuePlaybackContext,
     MediaStreamSummary,
     MediaTechnicalSummary,
+    MetadataBindingReference,
     MetadataReviewCandidate,
     MovieItemDetail,
     OnDeckEntry,
@@ -798,6 +799,8 @@ class KatalogQueryService:
             if {
                 "default_audio_stream_index",
                 "default_subtitle_track_id",
+                "force_default_audio_stream",
+                "force_default_subtitle_track",
             } & fields:
                 _validate_item_playback_defaults(session, item)
             if not changes:
@@ -877,6 +880,32 @@ class KatalogQueryService:
         def load(session: Session) -> LibraryItemDetail:
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             return _detail(session, item)
+
+        return self._database.run_transaction(load)
+
+    def metadata_binding(self, item_id: int) -> MetadataBindingReference | None:
+        """Return the provider record currently used to refresh an item."""
+
+        def load(session: Session) -> MetadataBindingReference | None:
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
+            binding = session.scalar(
+                select(MetadataBinding)
+                .where(
+                    MetadataBinding.library_item_id == item.id,
+                    MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                )
+                .order_by(MetadataBinding.manual_decision.desc(), MetadataBinding.id.desc())
+            )
+            if binding is None:
+                return None
+            return MetadataBindingReference(
+                provider=binding.provider,
+                provider_id=binding.provider_id,
+                title=binding.provider_title,
+                year=binding.provider_release_year,
+                kind=LibraryItemKind(binding.provider_media_kind.value),
+                matched_at=binding.accepted_at,
+            )
 
         return self._database.run_transaction(load)
 

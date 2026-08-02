@@ -84,6 +84,23 @@ def accept_binding(
                 provider_external_ids=[],
             )
             session.add(binding)
+        for active_binding in session.scalars(
+            select(MetadataBinding).where(
+                MetadataBinding.library_item_id == item_id,
+                MetadataBinding.status == MetadataMatchStatus.MATCHED,
+            )
+        ):
+            if active_binding is binding:
+                continue
+            active_binding.status = MetadataMatchStatus.UNMATCHED
+            active_binding.manual_decision = False
+        for accepted_candidate in session.scalars(
+            select(MetadataCandidate).where(
+                MetadataCandidate.library_item_id == item_id,
+                MetadataCandidate.status == MetadataCandidateStatus.ACCEPTED,
+            )
+        ):
+            accepted_candidate.status = MetadataCandidateStatus.SUGGESTED
         binding.provider_id = reference.raw_id
         binding.provider_media_kind = library_kind(details.media_kind)
         binding.status = MetadataMatchStatus.MATCHED

@@ -48,9 +48,11 @@ from kasana.katalog.api.contracts import (
     LibraryRootSummary,
     LibraryRootUpdate,
     MediaTechnicalSummary,
+    MetadataBindingReference,
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    MetadataSearchResult,
     MutationResult,
     OnDeckEntry,
     PaginatedResponse,
@@ -107,6 +109,15 @@ _ITEM_EDIT_AUDIT_ADAPTER: TypeAdapter[tuple[LibraryItemEditAudit, ...]] = TypeAd
 )
 _ITEM_PARENT_CHOICES_ADAPTER: TypeAdapter[tuple[LibraryItemSummary, ...]] = TypeAdapter(
     tuple[LibraryItemSummary, ...]
+)
+_ARTWORK_SELECTIONS_ADAPTER: TypeAdapter[tuple[ArtworkSelection, ...]] = TypeAdapter(
+    tuple[ArtworkSelection, ...]
+)
+_METADATA_BINDING_ADAPTER: TypeAdapter[MetadataBindingReference | None] = TypeAdapter(
+    MetadataBindingReference | None
+)
+_METADATA_SEARCH_RESULTS_ADAPTER: TypeAdapter[tuple[MetadataSearchResult, ...]] = TypeAdapter(
+    tuple[MetadataSearchResult, ...]
 )
 _DUPLICATE_EPISODE_ISSUES_ADAPTER: TypeAdapter[tuple[DuplicateEpisodeIssue, ...]] = TypeAdapter(
     tuple[DuplicateEpisodeIssue, ...]
@@ -371,7 +382,11 @@ class KatalogClient:
         self, item_id: int, request: LibraryItemUpdate
     ) -> LibraryItemMutationResult:
         return await self._send_model(
-            "PATCH", f"/api/v1/library/items/{item_id}", request, LibraryItemMutationResult
+            "PATCH",
+            f"/api/v1/library/items/{item_id}",
+            request,
+            LibraryItemMutationResult,
+            exclude_unset=True,
         )
 
     async def list_library_item_edit_audit(
@@ -407,15 +422,11 @@ class KatalogClient:
 
     async def list_library_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
         response = await self._request("GET", f"/api/v1/library/items/{item_id}/artwork")
-        if not isinstance(response.payload, list):
-            raise _response_error("Artwork response must be a JSON array.", response.request_id)
-        artwork_payload = cast(list[object], response.payload)
-        try:
-            return tuple(ArtworkSelection.model_validate(value) for value in artwork_payload)
-        except ValidationError as error:
-            raise _response_error(
-                "Katalog returned invalid artwork data.", response.request_id
-            ) from error
+        return _artwork_selections(response)
+
+    async def fetch_library_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
+        response = await self._request("POST", f"/api/v1/library/items/{item_id}/artwork/fetch")
+        return _artwork_selections(response)
 
     async def get_artwork_content(
         self, artwork_url: str, *, etag: str | None = None
@@ -677,6 +688,30 @@ class KatalogClient:
             PaginatedResponse[MetadataReviewCandidate],
             params=_params(cursor=cursor, limit=limit),
         )
+
+    async def metadata_binding(self, item_id: int) -> MetadataBindingReference | None:
+        response = await self._request("GET", f"/api/v1/metadata/items/{item_id}/binding")
+        try:
+            return _METADATA_BINDING_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned an invalid metadata binding.", response.request_id
+            ) from error
+
+    async def search_metadata(
+        self, item_id: int, *, query: str
+    ) -> tuple[MetadataSearchResult, ...]:
+        response = await self._request(
+            "GET",
+            f"/api/v1/metadata/items/{item_id}/search",
+            params=_params(query=query),
+        )
+        try:
+            return _METADATA_SEARCH_RESULTS_ADAPTER.validate_python(response.payload)
+        except ValidationError as error:
+            raise _response_error(
+                "Katalog returned invalid metadata search results.", response.request_id
+            ) from error
 
     async def list_jobs(
         self, *, cursor: str | None = None, limit: int = 50
@@ -1147,6 +1182,19 @@ def _validate_response[ModelT: BaseModel](
         return model.model_validate(payload)
     except ValidationError as error:
         raise _response_error("Katalog returned an invalid response.", request_id) from error
+
+
+def _artwork_selections(response: _ClientResponse) -> tuple[ArtworkSelection, ...]:
+    """Validate the artwork list returned by either artwork endpoint."""
+
+    if not isinstance(response.payload, list):
+        raise _response_error("Artwork response must be a JSON array.", response.request_id)
+    try:
+        return _ARTWORK_SELECTIONS_ADAPTER.validate_python(cast(list[object], response.payload))
+    except ValidationError as error:
+        raise _response_error(
+            "Katalog returned invalid artwork data.", response.request_id
+        ) from error
 
 
 def _api_error(
