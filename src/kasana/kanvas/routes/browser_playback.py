@@ -38,7 +38,7 @@ def _render_playback_queue(session: PlaybackSessionResponse) -> None:
     if not queued_entries:
         return
     next_entry = queued_entries[0]
-    with ui.element("details").classes("k-playback-queue"):
+    with ui.element("details").classes("k-playback-queue").props("data-player-queue"):
         count_label = "item" if len(queued_entries) == 1 else "items"
         with ui.element("summary").classes("k-playback-queue__summary").props(
             'aria-label="Show playback queue"'
@@ -86,31 +86,35 @@ def _render_track_menus(entry: PlaybackPlanEntry) -> None:
         'data-player-audio-menu role="menu" hidden'
     ):
         ui.label("Audio").classes("k-player__menu-heading")
-        for index, _stream in enumerate(entry.audio_streams):
-            with ui.element("button").classes("k-player__track-option").props(
-                f'type="button" data-player-audio-stream="{index}" '
-                f'aria-pressed="{str(index == entry.selected_audio_stream_index).lower()}"'
-            ):
-                ui.label(_audio_track_label(entry, index))
+        with ui.element("div").props('data-player-audio-options'):
+            for index, _stream in enumerate(entry.audio_streams):
+                with ui.element("button").classes("k-player__track-option").props(
+                    f'type="button" data-player-audio-stream="{index}" '
+                    f'aria-pressed="{str(index == entry.selected_audio_stream_index).lower()}"'
+                ):
+                    ui.label(_audio_track_label(entry, index))
     with ui.element("div").classes("k-player__track-menu").props(
         'data-player-subtitle-menu role="menu" hidden'
     ):
         ui.label("Subtitles").classes("k-player__menu-heading")
-        with ui.element("button").classes("k-player__track-option").props(
-            f'type="button" data-player-subtitle-track="" '
-            f'aria-pressed="{str(entry.selected_subtitle_track_id is None).lower()}"'
-        ):
-            ui.label("Off")
-        for track in entry.subtitle_tracks:
-            unsupported = (
-                " data-player-subtitle-unsupported" if track.format.value == "unsupported" else ""
-            )
+        with ui.element("div").props('data-player-subtitle-options'):
             with ui.element("button").classes("k-player__track-option").props(
-                f'type="button" data-player-subtitle-track="{track.id}" '
-                f'data-player-subtitle-format="{track.format.value}"{unsupported} '
-                f'aria-pressed="{str(track.id == entry.selected_subtitle_track_id).lower()}"'
+                f'type="button" data-player-subtitle-track="" '
+                f'aria-pressed="{str(entry.selected_subtitle_track_id is None).lower()}"'
             ):
-                ui.label(_subtitle_track_label(track))
+                ui.label("Off")
+            for track in entry.subtitle_tracks:
+                unsupported = (
+                    " data-player-subtitle-unsupported"
+                    if track.format.value == "unsupported"
+                    else ""
+                )
+                with ui.element("button").classes("k-player__track-option").props(
+                    f'type="button" data-player-subtitle-track="{track.id}" '
+                    f'data-player-subtitle-format="{track.format.value}"{unsupported} '
+                    f'aria-pressed="{str(track.id == entry.selected_subtitle_track_id).lower()}"'
+                ):
+                    ui.label(_subtitle_track_label(track))
         with ui.element("div").classes("k-player__subtitle-timing").props(
             'role="group" aria-label="Subtitle timing"'
         ):
@@ -223,8 +227,9 @@ def render_browser_playback_card(
         ui.element("video").classes("k-player__video").props(
             'playsinline preload="metadata"'
         )
-        for font in entry.subtitle_font_attachments:
-            ui.element("span").props(f'data-player-ass-font="{font.id}" hidden')
+        with ui.element("span").props('data-player-ass-fonts hidden'):
+            for font in entry.subtitle_font_attachments:
+                ui.element("span").props(f'data-player-ass-font="{font.id}"')
         with ui.element("div").classes("k-player__progress"):
             ui.label("0:00").classes("k-player__time k-player__bar-label").props(
                 'data-player-current-time aria-live="off"'

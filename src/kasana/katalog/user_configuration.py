@@ -30,6 +30,12 @@ class UserConfigurationState(StrEnum):
     DISABLED = "disabled"
 
 
+class SubtitlePreference(StrEnum):
+    """Reserved profile subtitle preference values."""
+
+    NONE = "none"
+
+
 class UserConfiguration(BaseModel):
     """The complete, non-library configuration for one numeric user directory."""
 

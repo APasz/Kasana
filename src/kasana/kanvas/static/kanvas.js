@@ -140,7 +140,7 @@
             </label>
             <label class="k-control-shell k-select-wrap">
               <span class="k-sr-only">Preferred subtitle language</span>
-              <select class="k-select" name="preferredSubtitleLanguage" aria-label="Preferred subtitle language" data-profile-language="subtitles"><option value="">Automatic subtitles</option></select>
+              <select class="k-select" name="preferredSubtitleLanguage" aria-label="Preferred subtitle language" data-profile-language="subtitles"><option value="">Automatic subtitles</option><option value="none"${preferredSubtitleLanguage === 'none' ? ' selected' : ''}>No subtitles</option></select>
             </label>
             <h3 class="k-profile-section-heading">Subtitle defaults</h3>
             <label class="k-control-shell k-select-wrap">
@@ -241,14 +241,16 @@
       const select = this.querySelector(`select[name="${fieldName}"]`);
       if (!(select instanceof HTMLSelectElement)) return;
       const selected = this.profileLanguagePreference(kind);
+      const subtitlesDisabled = kind === 'subtitles' && selected === 'none';
       const tags = this.languageOptions[kind]
         .map(normaliseLanguageTag)
         .filter(Boolean);
-      if (selected) tags.push(selected);
+      if (selected && !subtitlesDisabled) tags.push(selected);
       const choices = [...new Set(tags)].sort((left, right) => (
         languageDisplayName(left).localeCompare(languageDisplayName(right), navigator.language)
       ));
-      select.innerHTML = `<option value="">${escapeHtml(automaticLabel)}</option>${choices.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(languageDisplayName(tag))}</option>`).join('')}`;
+      const disabledOption = kind === 'subtitles' ? '<option value="none">No subtitles</option>' : '';
+      select.innerHTML = `<option value="">${escapeHtml(automaticLabel)}</option>${disabledOption}${choices.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(languageDisplayName(tag))}</option>`).join('')}`;
       select.value = selected || '';
     }
 
@@ -2792,6 +2794,9 @@
       const subtitleAppearance = subtitleMenu?.querySelector('[data-player-subtitle-appearance]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
       const kestrelLink = this.querySelector('[data-player-kestrel]');
+      const audioOptions = audioMenu?.querySelector('[data-player-audio-options]');
+      const subtitleOptions = subtitleMenu?.querySelector('[data-player-subtitle-options]');
+      const subtitleFonts = this.querySelector('[data-player-ass-fonts]');
       const sessionId = this.getAttribute('session-id');
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
@@ -2845,6 +2850,150 @@
       };
       const clearSelectPlayStatus = () => {
         if (status.textContent === selectPlayStatus) status.textContent = '';
+      };
+      const isOptionalString = (value) => value === null || typeof value === 'string';
+      const subtitleTrackLabel = (track) => {
+        const label = [track.language, track.title, track.codec].filter(Boolean).join(' · ') || 'Subtitle';
+        const flags = [track.default ? 'Default' : '', track.forced ? 'Forced' : ''].filter(Boolean).join(' ');
+        return flags ? `${label} · ${flags}` : label;
+      };
+      const audioTrackLabel = (track, index) => (
+        [track.language, track.title, track.codec].filter(Boolean).join(' · ') || `Audio ${index + 1}`
+      );
+      const parseNextEntry = (candidate) => {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+          throw new Error('Playback queue entry is invalid');
+        }
+        const entry = candidate;
+        const validFormat = (value) => ['webvtt', 'ass', 'unsupported'].includes(value);
+        if (
+          !Number.isSafeInteger(entry.position) || entry.position < 0
+          || !Number.isSafeInteger(entry.itemId) || entry.itemId < 1
+          || typeof entry.displayTitle !== 'string' || entry.displayTitle.length === 0
+          || (entry.durationSeconds !== null && (!Number.isFinite(entry.durationSeconds) || entry.durationSeconds < 0))
+          || !Number.isFinite(entry.savedResumePositionSeconds) || entry.savedResumePositionSeconds < 0
+          || !Array.isArray(entry.audioStreams) || !Array.isArray(entry.subtitleTracks)
+          || !Array.isArray(entry.subtitleFontIds)
+          || !Number.isSafeInteger(entry.selectedAudioStream) || entry.selectedAudioStream < 0
+          || !isOptionalString(entry.selectedSubtitleTrack)
+          || !Number.isSafeInteger(entry.subtitleTimingOffsetMilliseconds) || Math.abs(entry.subtitleTimingOffsetMilliseconds) > 30000
+          || !Number.isSafeInteger(entry.subtitleFontScalePercent) || entry.subtitleFontScalePercent < 75 || entry.subtitleFontScalePercent > 200 || entry.subtitleFontScalePercent % 25 !== 0
+          || typeof entry.subtitleBackground !== 'boolean' || typeof entry.subtitleShadow !== 'boolean'
+          || !['author', 'top', 'middle', 'bottom'].includes(entry.subtitleVerticalPosition)
+        ) {
+          throw new Error('Playback queue entry is invalid');
+        }
+        const audioStreams = entry.audioStreams.map((track) => {
+          if (!track || typeof track !== 'object' || Array.isArray(track) || !isOptionalString(track.codec) || !isOptionalString(track.language) || !isOptionalString(track.title)) {
+            throw new Error('Playback audio track is invalid');
+          }
+          return {codec: track.codec, language: track.language, title: track.title};
+        });
+        const subtitleTracks = entry.subtitleTracks.map((track) => {
+          if (
+            !track || typeof track !== 'object' || Array.isArray(track)
+            || typeof track.id !== 'string' || !/^(?:embedded|sidecar)-\d+$/.test(track.id)
+            || !isOptionalString(track.codec) || !isOptionalString(track.language) || !isOptionalString(track.title)
+            || typeof track.default !== 'boolean' || typeof track.forced !== 'boolean'
+            || !validFormat(track.format)
+          ) {
+            throw new Error('Playback subtitle track is invalid');
+          }
+          return {
+            codec: track.codec,
+            default: track.default,
+            forced: track.forced,
+            format: track.format,
+            id: track.id,
+            language: track.language,
+            title: track.title
+          };
+        });
+        if (
+          entry.selectedAudioStream >= audioStreams.length && audioStreams.length > 0
+          || (entry.selectedSubtitleTrack !== null && !subtitleTracks.some((track) => track.id === entry.selectedSubtitleTrack))
+          || entry.subtitleFontIds.some((fontId) => typeof fontId !== 'string' || !/^embedded-font-\d+$/.test(fontId))
+        ) {
+          throw new Error('Playback queue selection is invalid');
+        }
+        return {
+          audioStreams,
+          displayTitle: entry.displayTitle,
+          durationSeconds: entry.durationSeconds,
+          itemId: entry.itemId,
+          position: entry.position,
+          savedResumePositionSeconds: entry.savedResumePositionSeconds,
+          selectedAudioStream: entry.selectedAudioStream,
+          selectedSubtitleTrack: entry.selectedSubtitleTrack,
+          subtitleBackground: entry.subtitleBackground,
+          subtitleFontIds: entry.subtitleFontIds,
+          subtitleFontScalePercent: entry.subtitleFontScalePercent,
+          subtitleShadow: entry.subtitleShadow,
+          subtitleTimingOffsetMilliseconds: entry.subtitleTimingOffsetMilliseconds,
+          subtitleTracks,
+          subtitleVerticalPosition: entry.subtitleVerticalPosition
+        };
+      };
+      const applyEntryTrackOptions = (entry) => {
+        selectedAudioStream = entry.selectedAudioStream;
+        selectedSubtitleTrack = entry.selectedSubtitleTrack;
+        subtitleTimingOffsetMilliseconds = entry.subtitleTimingOffsetMilliseconds;
+        subtitleFontScalePercent = entry.subtitleFontScalePercent;
+        subtitleBackground = entry.subtitleBackground;
+        subtitleShadow = entry.subtitleShadow;
+        subtitleVerticalPosition = entry.subtitleVerticalPosition;
+        this.setAttribute('subtitle-timing-offset-milliseconds', String(subtitleTimingOffsetMilliseconds));
+        this.setAttribute('subtitle-font-scale-percent', String(subtitleFontScalePercent));
+        this.setAttribute('subtitle-background', String(subtitleBackground));
+        this.setAttribute('subtitle-shadow', String(subtitleShadow));
+        this.setAttribute('subtitle-vertical-position', subtitleVerticalPosition);
+        if (audioOptions instanceof Element) {
+          audioOptions.innerHTML = entry.audioStreams.map((track, index) => (
+            `<button class="k-player__track-option" type="button" data-player-audio-stream="${index}" aria-pressed="${String(index === selectedAudioStream)}">${escapeHtml(audioTrackLabel(track, index))}</button>`
+          )).join('');
+        }
+        if (subtitleOptions instanceof Element) {
+          const offOption = `<button class="k-player__track-option" type="button" data-player-subtitle-track="" aria-pressed="${String(selectedSubtitleTrack === null)}">Off</button>`;
+          const trackOptions = entry.subtitleTracks.map((track) => {
+            const unsupported = track.format === 'unsupported' ? ' data-player-subtitle-unsupported' : '';
+            return `<button class="k-player__track-option" type="button" data-player-subtitle-track="${track.id}" data-player-subtitle-format="${track.format}"${unsupported} aria-pressed="${String(track.id === selectedSubtitleTrack)}">${escapeHtml(subtitleTrackLabel(track))}</button>`;
+          }).join('');
+          subtitleOptions.innerHTML = offOption + trackOptions;
+        }
+        if (subtitleFonts instanceof Element) {
+          subtitleFonts.innerHTML = entry.subtitleFontIds.map((fontId) => (
+            `<span data-player-ass-font="${fontId}"></span>`
+          )).join('');
+        }
+        updateTrackOptions();
+      };
+      const updatePlaybackQueue = () => {
+        if (typeof document.querySelector !== 'function') return;
+        const queue = document.querySelector('[data-player-queue]');
+        if (!(queue instanceof Element)) return;
+        const queueEntries = Array.from(queue.querySelectorAll('.k-playback-queue__entry'));
+        queueEntries[0]?.remove();
+        const remainingEntries = Array.from(queue.querySelectorAll('.k-playback-queue__entry'));
+        if (remainingEntries.length === 0) {
+          queue.remove();
+          return;
+        }
+        const countLabel = remainingEntries.length === 1 ? 'item' : 'items';
+        const heading = queue.querySelector('.k-playback-queue__heading');
+        if (heading) heading.textContent = `Queue · ${remainingEntries.length} ${countLabel}`;
+        const nextEntry = remainingEntries[0];
+        const nextTitle = nextEntry.querySelector('.k-playback-queue__title');
+        const nextContext = nextEntry.querySelector('.k-playback-queue__context');
+        const summaryTitle = queue.querySelector('.k-playback-queue__next .k-playback-queue__title');
+        const summaryContext = queue.querySelector('.k-playback-queue__next .k-playback-queue__context');
+        if (summaryTitle && nextTitle) summaryTitle.textContent = nextTitle.textContent;
+        if (summaryContext) summaryContext.textContent = nextContext?.textContent || '';
+      };
+      const replaceLocationForEntry = (nextUrl) => {
+        if (typeof nextUrl !== 'string' || !/^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(nextUrl)) return;
+        if (window.history && typeof window.history.replaceState === 'function') {
+          window.history.replaceState(null, '', nextUrl);
+        }
       };
       const preserveVideoHeight = () => {
         const height = video.getBoundingClientRect().height;
@@ -3290,14 +3439,14 @@
         subtitleTextShadow: subtitleShadow,
         subtitleTrack: selectedSubtitleTrack
       });
-      const persistTrackSelection = async (selection) => {
+      const persistTrackSelection = async (selection, selectionEntryPosition) => {
         const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/tracks`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
           credentials: 'same-origin',
           body: JSON.stringify({
             audioStream: selection.audioStream,
-            entryPosition,
+            entryPosition: selectionEntryPosition,
             subtitleBackground: selection.subtitleBackdrop,
             subtitleFontScalePercent: selection.subtitleFontScale,
             subtitleOffsetMilliseconds: selection.subtitleOffsetMilliseconds,
@@ -3319,7 +3468,7 @@
         pendingTrackSelectionSave = null;
         const save = async () => {
           try {
-            await persistTrackSelection(pending.selection);
+            await persistTrackSelection(pending.selection, pending.entryPosition);
             pending.resolve();
           } catch (_) {
             if (pending.version === latestTrackSelectionSaveVersion) {
@@ -3333,7 +3482,8 @@
       const queueTrackSelectionSave = (failureMessage, immediate = false) => new Promise((resolve, reject) => {
         const version = ++latestTrackSelectionSaveVersion;
         const selection = currentTrackSelection();
-        if (pendingTrackSelectionSave) {
+        const selectionEntryPosition = entryPosition;
+        if (pendingTrackSelectionSave && pendingTrackSelectionSave.entryPosition === selectionEntryPosition) {
           pendingTrackSelectionSave.selection = selection;
           pendingTrackSelectionSave.failureMessage = failureMessage;
           pendingTrackSelectionSave.version = version;
@@ -3348,7 +3498,15 @@
             reject(error);
           };
         } else {
-          pendingTrackSelectionSave = {failureMessage, reject, resolve, selection, version};
+          if (pendingTrackSelectionSave) flushTrackSelectionSave();
+          pendingTrackSelectionSave = {
+            entryPosition: selectionEntryPosition,
+            failureMessage,
+            reject,
+            resolve,
+            selection,
+            version
+          };
         }
         if (immediate) {
           flushTrackSelectionSave();
@@ -3627,8 +3785,18 @@
           });
           const payload = await response.json();
           if (!response.ok) throw new Error('Completion failed');
-          if (typeof payload.nextUrl === 'string' && /^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(payload.nextUrl)) {
-            window.location.assign(payload.nextUrl);
+          if (payload.nextEntry !== null && payload.nextEntry !== undefined) {
+            const nextEntry = parseNextEntry(payload.nextEntry);
+            applyEntryTrackOptions(nextEntry);
+            updatePlaybackQueue();
+            replaceLocationForEntry(payload.nextUrl);
+            await loadEntry(
+              nextEntry.position,
+              nextEntry.savedResumePositionSeconds,
+              nextEntry.durationSeconds,
+              true
+            );
+            completing = false;
           } else status.textContent = 'Playback complete.';
         } catch (_) {
           completing = false;

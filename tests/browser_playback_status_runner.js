@@ -79,6 +79,7 @@ class FakeVideo extends FakeElement {
     this.volume = 1;
     this.buffered = new FakeTimeRanges();
     this.children = [];
+    this.playCalls = 0;
   }
 
   canPlayType() {
@@ -88,6 +89,7 @@ class FakeVideo extends FakeElement {
   load() {}
 
   play() {
+    this.playCalls += 1;
     return Promise.resolve();
   }
 
@@ -174,6 +176,7 @@ global.document = {
     return new FakeElement();
   },
   removeEventListener() {},
+  querySelector() { return null; },
   fullscreenElement: null
 };
 global.navigator = {getGamepads() { return []; }};
@@ -183,6 +186,7 @@ let nextTimeoutId = 1;
 global.window = {
   addEventListener() {},
   clearTimeout(id) { scheduledTimeouts.delete(id); },
+  history: {replaceState() {}},
   location: {origin: 'http://kanvas.test'},
   removeEventListener() {},
   setTimeout(callback) {
@@ -193,8 +197,12 @@ global.window = {
   }
 };
 const fetchCalls = [];
+let completionPayload = null;
 global.fetch = async (url, options = {}) => {
   fetchCalls.push({options, url});
+  if (String(url).includes('/complete')) {
+    return {ok: true, json: async () => completionPayload || {nextEntry: null, nextUrl: null}};
+  }
   if (String(url).includes('/tracks')) {
     return {
       ok: true,
@@ -405,11 +413,52 @@ async function testSubtitleSettingsSavesCollapseToTheLatestState() {
   assert.equal(payload.subtitleBackground, false);
 }
 
+async function testQueueAdvanceAutoplaysWithoutLeavingFullscreen() {
+  const {player, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  completionPayload = {
+    nextEntry: {
+      position: 1,
+      itemId: 2,
+      displayTitle: 'Next episode',
+      durationSeconds: 120,
+      savedResumePositionSeconds: 0,
+      audioStreams: [{codec: 'aac', language: 'en', title: null}],
+      subtitleTracks: [],
+      subtitleFontIds: [],
+      selectedAudioStream: 0,
+      selectedSubtitleTrack: null,
+      subtitleTimingOffsetMilliseconds: 0,
+      subtitleFontScalePercent: 100,
+      subtitleBackground: false,
+      subtitleShadow: false,
+      subtitleVerticalPosition: 'author'
+    },
+    nextUrl: `/item/2?playbackSession=${'s'.repeat(32)}`
+  };
+  document.fullscreenElement = player;
+  video.paused = false;
+  video.emit('ended');
+  await nextTick();
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(player.getAttribute('entry-position'), '1');
+  assert.equal(video.playCalls, 1);
+  assert.equal(document.fullscreenElement, player);
+  completionPayload = null;
+}
+
 (async () => {
   await testBufferedRangeMarksTheTimelineEdges();
   await testSelectPlayStatusClearsWhenPlaybackStarts();
   await testWebVttSettingsApplyWithoutReloadingTheTrack();
   await testSubtitleSettingsSavesCollapseToTheLatestState();
+  await testQueueAdvanceAutoplaysWithoutLeavingFullscreen();
 })()
   .then(() => process.stdout.write('browser playback status checks passed\n'))
   .catch((error) => {

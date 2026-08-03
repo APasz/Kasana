@@ -64,8 +64,10 @@ def _navigation(
                         f"data-user-id={profile.user.id!r}",
                         f"data-name={profile_display_name(profile.user)!r}",
                         f"data-accent-colour={profile.user.accent_colour!r}",
-                        f"data-preferred-audio-language={profile.user.preferred_audio_language!r}",
-                        f"data-preferred-subtitle-language={profile.user.preferred_subtitle_language!r}",
+                        "data-preferred-audio-language="
+                        f"{(profile.user.preferred_audio_language or '')!r}",
+                        "data-preferred-subtitle-language="
+                        f"{(profile.user.preferred_subtitle_language or '')!r}",
                         "data-default-subtitle-font-scale-percent="
                         f"{profile.user.default_subtitle_font_scale_percent!r}",
                         f"data-default-subtitle-background={str(profile.user.default_subtitle_background).lower()!r}",

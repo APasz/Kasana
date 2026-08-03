@@ -77,6 +77,10 @@ from kasana.kanvas.viewmodels.library import (
     PosterState,
     PosterView,
 )
+from kasana.kanvas.viewmodels.playback import (
+    BrowserPlaybackCompletionView,
+    BrowserPlaybackEntryView,
+)
 from kasana.katalog.public import (
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
     ArtworkFetchRequest,
@@ -1507,7 +1511,7 @@ async def playback_progress(session_id: str, request: Request) -> Response:
 
 @app.post("/kanvas/playback/sessions/{session_id}/complete", include_in_schema=False)
 async def complete_playback(session_id: str, request: Request) -> JSONResponse:
-    """Complete the current browser entry and return its next item page when available."""
+    """Complete the current browser entry and return its next active entry when available."""
 
     profile = await _require_profile(request)
     try:
@@ -1526,7 +1530,16 @@ async def complete_playback(session_id: str, request: Request) -> JSONResponse:
     next_url = (
         f"/item/{next_item.item_id}?playbackSession={session_id}" if next_item is not None else None
     )
-    return JSONResponse({"nextUrl": next_url})
+    return JSONResponse(
+        BrowserPlaybackCompletionView(
+            nextEntry=(
+                BrowserPlaybackEntryView.from_entry(next_item)
+                if next_item is not None
+                else None
+            ),
+            nextUrl=next_url,
+        ).model_dump(by_alias=True, mode="json")
+    )
 
 
 @app.post("/kanvas/actions/collections", include_in_schema=False)

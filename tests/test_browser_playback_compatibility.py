@@ -391,13 +391,16 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
         )
 
 
-def test_next_episode_navigates_to_its_item_page_and_pagehide_flushes_progress() -> None:
+def test_next_episode_reuses_the_active_player_and_pagehide_flushes_progress() -> None:
     script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
         encoding="utf-8"
     )
 
     assert "nextUrl" in script
-    assert "window.location.assign(payload.nextUrl)" in script
+    assert "payload.nextEntry" in script
+    assert "await loadEntry(" in script
+    assert "replaceLocationForEntry(payload.nextUrl)" in script
+    assert "window.location.assign(payload.nextUrl)" not in script
     assert "video.loop = false;" in script
     assert "body: JSON.stringify({entryPosition})" in script
     assert "entryPosition})," in script
@@ -492,9 +495,28 @@ async def test_browser_completion_returns_the_next_item_playback_page(
     )
 
     assert calls == [("s" * 32, 0)]
-    assert json.loads(bytes(response.body)) == {
-        "nextUrl": f"/item/{next_entry.item_id}?playbackSession={'s' * 32}",
+    payload = json.loads(bytes(response.body))
+    assert payload["nextUrl"] == f"/item/{next_entry.item_id}?playbackSession={'s' * 32}"
+    assert payload["nextEntry"] == {
+        "position": 1,
+        "itemId": next_entry.item_id,
+        "displayTitle": next_entry.display_title,
+        "durationSeconds": next_entry.duration_seconds,
+        "savedResumePositionSeconds": next_entry.saved_resume_position_seconds,
+        "audioStreams": [
+            {"codec": "aac", "language": "en", "title": None},
+        ],
+        "subtitleTracks": [],
+        "subtitleFontIds": [],
+        "selectedAudioStream": 0,
+        "selectedSubtitleTrack": None,
+        "subtitleTimingOffsetMilliseconds": 0,
+        "subtitleFontScalePercent": 100,
+        "subtitleBackground": False,
+        "subtitleShadow": False,
+        "subtitleVerticalPosition": "author",
     }
+    assert "stream_url" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio

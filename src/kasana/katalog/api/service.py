@@ -176,6 +176,7 @@ from kasana.katalog.services import (
     validate_library_item_parent,
 )
 from kasana.katalog.user_configuration import (
+    SubtitlePreference,
     UserConfiguration,
     UserConfigurationState,
     UserConfigurationStore,
@@ -3927,11 +3928,19 @@ def _selected_subtitle_track_id(
     )
     if item.force_default_subtitle_track and item_default is not None:
         return item_default
+    if _subtitle_preference_is_none(profile_language):
+        return None
     if profile_language is not None:
         return _preferred_subtitle_track_id(tracks, profile_language)
     if item_default is not None:
         return item_default
     return _preferred_subtitle_track_id(tracks, root_language)
+
+
+def _subtitle_preference_is_none(value: str | None) -> bool:
+    """Return whether a profile explicitly disables subtitles for new sessions."""
+
+    return value is not None and value.strip().casefold() == SubtitlePreference.NONE
 
 
 def _selected_subtitle_font_scale_percent(item: Zaisan, profile_default: int) -> int:

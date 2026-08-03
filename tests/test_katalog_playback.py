@@ -570,6 +570,33 @@ async def test_profile_defaults_override_item_defaults_unless_individually_force
     assert profile_entry["subtitle_shadow"] is True
 
 
+async def test_profile_can_disable_subtitles_for_new_playback_sessions(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    updated_profile = await client.patch(
+        f"/api/v1/users/{ids['user']}",
+        json={"preferred_subtitle_language": "none"},
+    )
+    assert updated_profile.status_code == 200
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, ids["movie"])
+        assert movie is not None
+        media_file = session.scalar(select(MediaFile).where(MediaFile.library_item_id == movie.id))
+        assert media_file is not None
+        media_file.subtitle_streams = [
+            {"codec": "subrip", "language": "en", "default": True},
+        ]
+
+    launch = await _create_plan(
+        playback_fixture, {"kind": "standalone", "item_id": ids["movie"]}
+    )
+    entry = (await client.get(f"/api/v1/playback/plans/{launch}")).json()["current_item"]
+
+    assert entry["selected_subtitle_track_id"] is None
+
+
 async def test_queue_completion_transitions_collection_playback_atomically(
     playback_fixture: PlaybackFixture,
 ) -> None:
