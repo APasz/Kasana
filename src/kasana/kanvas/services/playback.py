@@ -11,8 +11,10 @@ from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemDetail,
+    LibraryItemKind,
     ManualQueuePlaybackContext,
     PlaybackPlanRequest,
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -160,15 +162,15 @@ class KanvasPlaybackService:
             )
         return self._owned_session(transitioned)
 
-    async def close_playback_session(self, session_id: str) -> None:
-        """Close one owned browser session when its inline player is stopped."""
+    async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
+        """Close an owned browser session and return its final current entry."""
 
         async with KatalogClient(
             str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
         ) as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
-            await client.close_playback_session(session_id)
+            return await client.close_playback_session(session_id)
 
     async def create_kestrel_fallback_uri(self, session: PlaybackSessionResponse) -> str:
         """Create a Kestrel launch for the unplayed tail of an owned browser queue."""
@@ -238,6 +240,8 @@ def playback_context(
 ) -> StandalonePlaybackContext | SeriesPlaybackContext:
     """Choose the valid public Katalog context for a Kanvas item action."""
 
+    if item.kind is LibraryItemKind.EPISODE:
+        return SeriesPlaybackContext(episode_id=item.id)
     if not is_series_like(item.kind):
         return StandalonePlaybackContext(item_id=item.id)
     series_id = item.id if item.kind.value == "series" else item.parent_id

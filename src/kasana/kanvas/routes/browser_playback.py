@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from kasana.katalog.public import PlaybackPlanEntry, PlaybackSessionResponse, PlaybackSubtitleTrack
+from kasana.kanvas.viewmodels.playback import BrowserPlaybackEntryView
+from kasana.katalog.public import (
+    PlaybackPlanEntry,
+    PlaybackSessionResponse,
+    PlaybackSubtitleTrack,
+)
 
 _PLAYBACK_RATES: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
@@ -51,6 +56,10 @@ def _render_playback_queue(session: PlaybackSessionResponse) -> None:
                 context = _queue_entry_context(next_entry)
                 if context is not None:
                     ui.label(context).classes("k-playback-queue__context")
+            with ui.element("button").classes("k-button k-playback-queue__advance").props(
+                'type="button" data-player-next aria-label="Play the next queue item"'
+            ):
+                ui.label("Play next").classes("k-button__label")
         with ui.element("ol").classes("k-playback-queue__entries"):
             for index, queued_entry in enumerate(queued_entries, start=1):
                 with ui.element("li").classes("k-playback-queue__entry"):
@@ -195,6 +204,7 @@ def render_browser_playback_card(
     entry = session.current_item
     if entry is None:
         raise ValueError("Playback sessions must contain a current media item.")
+    browser_entry = BrowserPlaybackEntryView.from_entry(entry)
     duration_attribute = (
         f' duration-seconds="{entry.duration_seconds:g}"'
         if entry.duration_seconds is not None and entry.duration_seconds > 0
@@ -227,6 +237,16 @@ def render_browser_playback_card(
         ui.element("video").classes("k-player__video").props(
             'playsinline preload="metadata"'
         )
+        with ui.element("div").classes("k-player__fullscreen-info"):
+            ui.label(browser_entry.fullscreen_title).classes("k-player__fullscreen-title").props(
+                'data-player-fullscreen-title'
+            )
+            ui.label(browser_entry.special_info or "").classes(
+                "k-player__fullscreen-special-info"
+            ).props(
+                "data-player-fullscreen-special-info"
+                + (" hidden" if browser_entry.special_info is None else "")
+            )
         with ui.element("span").props('data-player-ass-fonts hidden'):
             for font in entry.subtitle_font_attachments:
                 ui.element("span").props(f'data-player-ass-font="{font.id}"')

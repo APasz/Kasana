@@ -60,12 +60,16 @@ def _srt_cues(lines: list[str]) -> list[str]:
     return converted
 
 
-def _shift_cues(lines: list[str], stream_offset_seconds: float, timing_offset_seconds: float) -> list[str]:
+def _shift_cues(
+    lines: list[str], stream_offset_seconds: float, timing_offset_seconds: float
+) -> list[str]:
     if stream_offset_seconds == 0 and timing_offset_seconds == 0:
         return lines
     shifted: list[str] = []
     for block in _vtt_blocks(lines):
-        timing_index = next((index for index, line in enumerate(block) if _TIMING_LINE.match(line)), None)
+        timing_index = next(
+            (index for index, line in enumerate(block) if _TIMING_LINE.match(line)), None
+        )
         if timing_index is None:
             shifted.extend(block)
             continue
@@ -74,12 +78,21 @@ def _shift_cues(lines: list[str], stream_offset_seconds: float, timing_offset_se
             raise RuntimeError("A VTT timing line changed while being parsed.")
         start = max(
             0.0,
-            _timestamp_seconds(timing.group("start")) - stream_offset_seconds + timing_offset_seconds,
+            _timestamp_seconds(timing.group("start"))
+            - stream_offset_seconds
+            + timing_offset_seconds,
         )
-        end = _timestamp_seconds(timing.group("end")) - stream_offset_seconds + timing_offset_seconds
+        end = (
+            _timestamp_seconds(timing.group("end"))
+            - stream_offset_seconds
+            + timing_offset_seconds
+        )
         if end <= 0:
             continue
-        block[timing_index] = f"{_vtt_timestamp(start)} --> {_vtt_timestamp(max(start, end))}{timing.group('settings')}"
+        block[timing_index] = (
+            f"{_vtt_timestamp(start)} --> {_vtt_timestamp(max(start, end))}"
+            f"{timing.group('settings')}"
+        )
         shifted.extend(block)
     return shifted
 

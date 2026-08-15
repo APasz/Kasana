@@ -80,4 +80,5 @@ def page_shell(
     with ui.element("div").classes("k-app"):
         primary_navigation(active_route, profile, settings)
         with ui.element("main").classes("k-main").props(f'aria-label="{title}"'):
-            yield
+            with ui.element("div").classes("k-page-content"):
+                yield

@@ -29,6 +29,7 @@ from kasana.katalog.public import (
     PlaybackPlanEntry,
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -98,8 +99,14 @@ class _FakeClient:
         self._state.transitions.append((session_id, request))
         return self._state.session
 
-    async def close_playback_session(self, session_id: str) -> None:
+    async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
         self._state.closed_session_ids.append(session_id)
+        current_item = self._state.session.current_item
+        assert current_item is not None
+        return PlaybackSessionCloseResult(
+            current_entry_position=self._state.session.current_entry_position,
+            current_item_id=current_item.item_id,
+        )
 
 
 def _settings() -> Kanvas_Settings:
@@ -197,6 +204,27 @@ async def test_playback_service_builds_and_consumes_typed_item_and_order_plans(
     assert watch_order_context.skip_unavailable is True
 
 
+async def test_episode_playback_starts_a_series_queue_at_the_selected_episode(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    state = _ClientState(
+        item=_item(kind=LibraryItemKind.EPISODE),
+        session=_session(),
+        launch=_launch(),
+    )
+    _install_fake_client(monkeypatch, state)
+
+    await KanvasPlaybackService(_settings(), _USER_ID).create_item_playback_session(
+        7, resume=True
+    )
+
+    context = state.plan_requests[0].context
+    assert isinstance(context, SeriesPlaybackContext)
+    assert context.series_id is None
+    assert context.episode_id == 7
+    assert context.resume is False
+
+
 async def test_playback_service_requires_owned_sessions_for_mutations_and_fallbacks(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -221,7 +249,10 @@ async def test_playback_service_requires_owned_sessions_for_mutations_and_fallba
     await service.report_playback_progress(_SESSION_ID, progress)
     assert await service.select_playback_tracks(_SESSION_ID, selection) == state.session
     assert await service.complete_playback_entry(_SESSION_ID, 1) == state.session
-    await service.close_playback_session(_SESSION_ID)
+    assert await service.close_playback_session(_SESSION_ID) == PlaybackSessionCloseResult(
+        current_entry_position=1,
+        current_item_id=8,
+    )
     fallback_uri = await service.create_kestrel_fallback_uri(state.session)
 
     assert state.progress_updates == [(_SESSION_ID, progress)]

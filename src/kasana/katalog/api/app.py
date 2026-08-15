@@ -66,6 +66,7 @@ from kasana.katalog.api.contracts import (
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackProgressResult,
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -1044,16 +1045,15 @@ def create_app(
 
     @app.delete(
         "/api/v1/playback/sessions/{session_id}",
-        status_code=status.HTTP_204_NO_CONTENT,
+        response_model=PlaybackSessionCloseResult,
         operation_id="v1_close_playback_session",
         responses=_ERROR_RESPONSES,
     )
     async def close_playback_session(
         session_id: Annotated[str, Path(min_length=32, max_length=128)],
         runtime: KatalogApiRuntime = Depends(_runtime),
-    ) -> Response:
-        await run_blocking(runtime.queries.close_playback_session, session_id)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    ) -> PlaybackSessionCloseResult:
+        return await run_blocking(runtime.queries.close_playback_session, session_id)
 
     async def transfer_media(
         request: Request,

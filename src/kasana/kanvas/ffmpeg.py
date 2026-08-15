@@ -68,12 +68,11 @@ async def start_fragmented_mp4(
         "error",
         "-nostdin",
     ]
+    command.extend(("-i", input_url))
     if start_seconds > 0:
         command.extend(("-ss", f"{start_seconds:.3f}"))
     command.extend(
         (
-            "-i",
-            input_url,
             "-map",
             "0:v:0",
             "-map",

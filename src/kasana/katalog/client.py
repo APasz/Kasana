@@ -61,6 +61,7 @@ from kasana.katalog.api.contracts import (
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackProgressResult,
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -812,9 +813,14 @@ class KatalogClient:
             PlaybackSessionResponse,
         )
 
-    async def close_playback_session(self, session_id: str) -> None:
+    async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
         _validate_opaque_token(session_id, "session_id")
-        await self._request("DELETE", f"/api/v1/playback/sessions/{session_id}")
+        return await self._send_model(
+            "DELETE",
+            f"/api/v1/playback/sessions/{session_id}",
+            None,
+            PlaybackSessionCloseResult,
+        )
 
     async def update_playback_session_tracks(
         self, session_id: str, selection: PlaybackSessionTrackSelection

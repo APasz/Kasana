@@ -75,6 +75,7 @@ from kasana.katalog.api.contracts import (
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackProgressResult,
+    PlaybackSessionCloseResult,
     PlaybackSessionEvent,
     PlaybackSessionEventKind,
     PlaybackSessionResponse,
@@ -2286,17 +2287,19 @@ class KatalogQueryService:
             existing_state: PlaybackState | None = _playback_state(
                 session, playback_session.user_id, entry.library_item_id
             )
+            duration = _progress_duration(media_file, existing_state, update.position_seconds)
+            if update.position_seconds > duration:
+                raise CatalogueValidationError("Playback position exceeds the media duration.")
             if (
                 not update.seek
                 and existing_state is not None
+                and not existing_state.completed
                 and update.position_seconds < existing_state.position_seconds
+                and existing_state.position_seconds <= duration
             ):
                 raise CatalogueValidationError(
                     "Playback progress must be monotonic unless seek is true."
                 )
-            duration = _progress_duration(media_file, existing_state, update.position_seconds)
-            if update.position_seconds > duration:
-                raise CatalogueValidationError("Playback position exceeds the media duration.")
             try:
                 record_playback_progress(
                     session,
@@ -2490,16 +2493,23 @@ class KatalogQueryService:
         )
         return next_entry
 
-    def close_playback_session(self, session_id: str) -> None:
-        def close(session: Session) -> None:
+    def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
+        """Close a session and return the entry active at the moment of closure."""
+
+        def close(session: Session) -> PlaybackSessionCloseResult:
             now: datetime = datetime.now(UTC)
             playback_session: PlaybackSession = _require(
                 session, ModelPlaybackSession, session_id, "Playback session"
             )
             _require_active_session(playback_session, now)
+            current_entry = _current_session_entry(session, playback_session)
             playback_session.closed_at = now
+            return PlaybackSessionCloseResult(
+                current_entry_position=current_entry.position,
+                current_item_id=current_entry.library_item_id,
+            )
 
-        self._database.run_transaction(close)
+        return self._database.run_transaction(close)
 
     def resolve_media_access_token(
         self, access_token: str, operation: MediaAccessOperation
@@ -2800,7 +2810,11 @@ class KatalogQueryService:
                     item=item,
                     media_file=media_file,
                     position=entry.position,
-                    saved_position=saved_state.position_seconds if saved_state is not None else 0.0,
+                    saved_position=(
+                        saved_state.position_seconds
+                        if saved_state is not None and not saved_state.completed
+                        else 0.0
+                    ),
                     stream_token=stream_token,
                     download_token=download_token,
                     sidecar_urls=sidecar_urls,
@@ -3125,6 +3139,7 @@ def _playback_plan_entry(
         item_id=item.id,
         display_title=item.title,
         series_title=series_title,
+        context_label=_context_label_for_summary(item, Path(media_file.absolute_path)),
         season_number=item.season_number,
         episode_number=item.episode_number,
         episode_end_season_number=item.episode_end_season_number,

@@ -233,7 +233,9 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
     assert isinstance(result, FragmentedMp4Stream)
     assert ["-c:v", "copy"] == launched[launched.index("-c:v") : launched.index("-c:v") + 2]
     assert ["-c:a", "aac"] == launched[launched.index("-c:a") : launched.index("-c:a") + 2]
-    assert ["-ss", "42.500", "-i"] == launched[launched.index("-ss") : launched.index("-i") + 1]
+    assert ["-i", "http://katalog.test/api/v1/media/token", "-ss", "42.500"] == launched[
+        launched.index("-i") : launched.index("-ss") + 2
+    ]
     assert "pipe:1" in launched
 
     subtitle_command_start = len(launched)
@@ -391,7 +393,7 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
         )
 
 
-def test_next_episode_reuses_the_active_player_and_pagehide_flushes_progress() -> None:
+def test_next_episode_preserves_fullscreen_then_transitions_its_item_page() -> None:
     script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
         encoding="utf-8"
     )
@@ -399,8 +401,12 @@ def test_next_episode_reuses_the_active_player_and_pagehide_flushes_progress() -
     assert "nextUrl" in script
     assert "payload.nextEntry" in script
     assert "await loadEntry(" in script
-    assert "replaceLocationForEntry(payload.nextUrl)" in script
-    assert "window.location.assign(payload.nextUrl)" not in script
+    assert "pendingItemPageUrl" in script
+    assert "navigateToPendingItemPage" in script
+    assert "window.location.assign(itemPageAutoplayUrl(nextUrl))" in script
+    assert "subtitlesDisabledByProfile" in script
+    assert "reconnectPlaybackStream" in script
+    assert "Playback stream stopped. Reload this page to retry." in script
     assert "video.loop = false;" in script
     assert "body: JSON.stringify({entryPosition})" in script
     assert "entryPosition})," in script
@@ -466,7 +472,14 @@ def test_webvtt_appearance_explicitly_overrides_native_caption_defaults() -> Non
 async def test_browser_completion_returns_the_next_item_playback_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    next_entry = _entry(container="isobmff").model_copy(update={"position": 1})
+    next_entry = _entry(container="isobmff").model_copy(
+        update={
+            "position": 1,
+            "display_title": "Pilot",
+            "series_title": "Example Show",
+            "context_label": "S01 E02",
+        }
+    )
     profile = SimpleNamespace(user=SimpleNamespace(id=1))
     calls: list[tuple[str, int]] = []
 
@@ -501,6 +514,8 @@ async def test_browser_completion_returns_the_next_item_playback_page(
         "position": 1,
         "itemId": next_entry.item_id,
         "displayTitle": next_entry.display_title,
+        "fullscreenTitle": "Example Show · Pilot",
+        "specialInfo": "S01 E02",
         "durationSeconds": next_entry.duration_seconds,
         "savedResumePositionSeconds": next_entry.saved_resume_position_seconds,
         "audioStreams": [
@@ -552,6 +567,42 @@ async def test_explicit_start_is_retained_when_playback_redirects_to_its_current
 
     assert response is not None
     assert response.headers["location"] == f"/item/2?playbackSession={'s' * 32}&start=true"
+
+
+@pytest.mark.asyncio
+async def test_expired_playback_session_returns_to_the_requested_item_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def playback_session(self, _session_id: str) -> object:
+            raise KatalogClientError(
+                KatalogClientErrorKind.NOT_FOUND, "Playback session is unavailable."
+            )
+
+    async def page_profile(_request: Request) -> object:
+        return profile
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+
+    response = await dashboard.item_page(
+        2,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"playbackSession=" + b"s" * 32 + b"&start=true",
+                "headers": [],
+            }
+        ),
+    )
+
+    assert response is not None
+    assert response.headers["location"] == "/item/2"
 
 
 @pytest.mark.asyncio
@@ -607,7 +658,13 @@ def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_sk
 
 
 def test_browser_playback_card_contains_a_source_less_compatibility_player() -> None:
-    entry = _entry(container="isobmff")
+    entry = _entry(container="isobmff").model_copy(
+        update={
+            "display_title": "Pilot",
+            "series_title": "Example Show",
+            "context_label": "S01 E02",
+        }
+    )
     now = datetime.now(UTC)
     session = PlaybackSessionResponse(
         id="s" * 32,
@@ -639,6 +696,16 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "k-playback-queue" in element._classes  # pyright: ignore[reportPrivateUsage]
         ]
+        fullscreen_title = next(
+            element
+            for element in client.elements.values()
+            if "k-player__fullscreen-title" in element._classes  # pyright: ignore[reportPrivateUsage]
+        )
+        fullscreen_special_info = next(
+            element
+            for element in client.elements.values()
+            if "k-player__fullscreen-special-info" in element._classes  # pyright: ignore[reportPrivateUsage]
+        )
 
     assert len(video_elements) == 1
     assert "src" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
@@ -649,6 +716,8 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert player_elements[0]._props["play-on-load"] == "false"  # pyright: ignore[reportPrivateUsage]
     assert len(fallback_links) == 1
     assert queues == []
+    assert fullscreen_title._text == "Example Show · Pilot"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+    assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
 
     with Client(page("")) as client:
         render_browser_playback_card(session, play_on_load=True)
@@ -731,6 +800,11 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
             for element in client.elements.values()
             if "k-playback-queue__entry" in element._classes  # pyright: ignore[reportPrivateUsage]
         ]
+        queue_actions = [
+            element
+            for element in client.elements.values()
+            if "k-playback-queue__advance" in element._classes  # pyright: ignore[reportPrivateUsage]
+        ]
         queue_titles: list[str] = [
             cast(str, element._text)  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
             for element in client.elements.values()
@@ -740,6 +814,8 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
     assert queue.tag == "details"
     assert "open" not in queue._props  # pyright: ignore[reportPrivateUsage]
     assert len(queue_entries) == 1
+    assert len(queue_actions) == 1
+    assert "data-player-next" in queue_actions[0]._props  # pyright: ignore[reportPrivateUsage]
     assert queue_titles == ["Next episode", "Next episode"]
 
 

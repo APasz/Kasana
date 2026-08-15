@@ -129,13 +129,13 @@ def _item_actions(
             return
         status.set_text("Stopping playback…")
         try:
-            await KanvasPlaybackService(
+            stopped_session = await KanvasPlaybackService(
                 settings, profile.user.id
             ).close_playback_session(playback_session_id)
         except KatalogClientError:
             status.set_text("Could not stop playback.")
             return
-        ui.navigate.to(f"/item/{item_id}")
+        ui.navigate.to(f"/item/{stopped_session.current_item_id}")
 
     async def toggle_watched() -> None:
         watched = watched_state.toggle()

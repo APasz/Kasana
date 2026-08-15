@@ -1021,6 +1021,7 @@ class PlaybackPlanEntry(APIModel):
     item_id: int = Field(gt=0)
     display_title: str = Field(min_length=1, max_length=1_000)
     series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
+    context_label: str | None = Field(default=None, min_length=1, max_length=80)
     season_number: int | None = Field(default=None, ge=0)
     episode_number: int | None = Field(default=None, ge=0)
     episode_end_season_number: int | None = Field(default=None, ge=0)
@@ -1077,6 +1078,13 @@ class PlaybackSessionResponse(APIModel):
     skipped_unavailable_titles: tuple[str, ...] = Field(
         default=(), max_length=MAX_PLAYBACK_QUEUE_SIZE
     )
+
+
+class PlaybackSessionCloseResult(APIModel):
+    """The queue entry that was current when a playback session was closed."""
+
+    current_entry_position: int = Field(ge=0)
+    current_item_id: int = Field(gt=0)
 
 
 type PlaybackSession = PlaybackSessionResponse

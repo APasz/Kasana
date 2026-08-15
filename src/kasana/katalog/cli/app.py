@@ -75,7 +75,12 @@ def configure(
         typer.echo(f"Configuration error: {error}", err=True)
         raise typer.Exit(2) from error
     shared_settings = SharedSettings()
-    configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
+    configure_logging(
+        shared_settings.log_level,
+        LogDomain.KATALOG,
+        shared_settings.log_directory,
+        console=not json_output,
+    )
     context.obj = CLIContext(settings=settings, json_output=json_output, debug=debug)
     if context.invoked_subcommand is None:
         LOGGER.info("Katalog CLI configured; run with --help to list commands.")

@@ -2797,7 +2797,10 @@
       const audioOptions = audioMenu?.querySelector('[data-player-audio-options]');
       const subtitleOptions = subtitleMenu?.querySelector('[data-player-subtitle-options]');
       const subtitleFonts = this.querySelector('[data-player-ass-fonts]');
+      const fullscreenTitle = this.querySelector('[data-player-fullscreen-title]');
+      const fullscreenSpecialInfo = this.querySelector('[data-player-fullscreen-special-info]');
       const sessionId = this.getAttribute('session-id');
+      const queueNext = document.querySelector('[data-player-next]');
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
       const autoplayOnResume = this.getAttribute('autoplay-on-resume') === 'true';
@@ -2808,7 +2811,7 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !fullscreenTitle || !fullscreenSpecialInfo || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -2816,11 +2819,17 @@
       let seeking = false;
       let completing = false;
       let reporting = false;
+      let activeProgress = null;
+      let pendingProgress = null;
+      let progressReportPromise = null;
       let fullscreenHideTimer = null;
       let deliveryMode = 'direct';
       let streamStartSeconds = 0;
       let generatedStreamSeekPending = false;
       let pendingDirectSeek = null;
+      let streamRecoveryAttemptCount = 0;
+      let activeStreamRecoveryId = null;
+      let nextStreamRecoveryId = 0;
       let assRenderer = null;
       let nativeSubtitleTrack = null;
       let nativeSubtitleTrackLoaded = false;
@@ -2832,14 +2841,28 @@
       let latestTrackSelectionSaveVersion = 0;
       let audioSelectionVersion = 0;
       let playbackAttemptVersion = 0;
+      let deliveryRequestVersion = 0;
+      let pendingItemPageUrl = null;
+      let entryPlaybackReady = false;
+      let mediaEntryPosition = null;
+      let webkitFullscreenActive = false;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
       let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
+      const profileSubtitlePreference = typeof document.querySelector === 'function'
+        ? document.querySelector('kanvas-profile-menu')?.getAttribute('data-preferred-subtitle-language')
+        : null;
+      const subtitlesDisabledByProfile = profileSubtitlePreference?.trim().toLowerCase() === 'none';
+      if (subtitlesDisabledByProfile) selectedSubtitleTrack = null;
       const maxSubtitleTimingOffsetMilliseconds = 30000;
       const minSubtitleFontScalePercent = 75;
       const maxSubtitleFontScalePercent = 200;
       const selectPlayStatus = 'Select Play to start this video.';
       const invalidatePlaybackAttempts = () => {
         playbackAttemptVersion += 1;
+      };
+      const invalidateDeliveryRequests = () => {
+        deliveryRequestVersion += 1;
+        invalidatePlaybackAttempts();
       };
       const requestPlayback = () => {
         const attemptVersion = ++playbackAttemptVersion;
@@ -2870,6 +2893,8 @@
           !Number.isSafeInteger(entry.position) || entry.position < 0
           || !Number.isSafeInteger(entry.itemId) || entry.itemId < 1
           || typeof entry.displayTitle !== 'string' || entry.displayTitle.length === 0
+          || typeof entry.fullscreenTitle !== 'string' || entry.fullscreenTitle.length === 0
+          || !isOptionalString(entry.specialInfo)
           || (entry.durationSeconds !== null && (!Number.isFinite(entry.durationSeconds) || entry.durationSeconds < 0))
           || !Number.isFinite(entry.savedResumePositionSeconds) || entry.savedResumePositionSeconds < 0
           || !Array.isArray(entry.audioStreams) || !Array.isArray(entry.subtitleTracks)
@@ -2920,11 +2945,13 @@
           audioStreams,
           displayTitle: entry.displayTitle,
           durationSeconds: entry.durationSeconds,
+          fullscreenTitle: entry.fullscreenTitle,
           itemId: entry.itemId,
           position: entry.position,
           savedResumePositionSeconds: entry.savedResumePositionSeconds,
           selectedAudioStream: entry.selectedAudioStream,
           selectedSubtitleTrack: entry.selectedSubtitleTrack,
+          specialInfo: entry.specialInfo,
           subtitleBackground: entry.subtitleBackground,
           subtitleFontIds: entry.subtitleFontIds,
           subtitleFontScalePercent: entry.subtitleFontScalePercent,
@@ -2934,9 +2961,14 @@
           subtitleVerticalPosition: entry.subtitleVerticalPosition
         };
       };
+      const updateFullscreenInfo = (entry) => {
+        fullscreenTitle.textContent = entry.fullscreenTitle;
+        fullscreenSpecialInfo.textContent = entry.specialInfo || '';
+        fullscreenSpecialInfo.hidden = entry.specialInfo === null;
+      };
       const applyEntryTrackOptions = (entry) => {
         selectedAudioStream = entry.selectedAudioStream;
-        selectedSubtitleTrack = entry.selectedSubtitleTrack;
+        selectedSubtitleTrack = subtitlesDisabledByProfile ? null : entry.selectedSubtitleTrack;
         subtitleTimingOffsetMilliseconds = entry.subtitleTimingOffsetMilliseconds;
         subtitleFontScalePercent = entry.subtitleFontScalePercent;
         subtitleBackground = entry.subtitleBackground;
@@ -2989,11 +3021,20 @@
         if (summaryTitle && nextTitle) summaryTitle.textContent = nextTitle.textContent;
         if (summaryContext) summaryContext.textContent = nextContext?.textContent || '';
       };
-      const replaceLocationForEntry = (nextUrl) => {
-        if (typeof nextUrl !== 'string' || !/^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(nextUrl)) return;
-        if (window.history && typeof window.history.replaceState === 'function') {
-          window.history.replaceState(null, '', nextUrl);
-        }
+      const setQueueNextBusy = (busy) => {
+        if (!(queueNext instanceof Element)) return;
+        queueNext.toggleAttribute('disabled', busy);
+        queueNext.setAttribute('aria-disabled', String(busy));
+      };
+      const itemPageUrl = (nextUrl) => (
+        typeof nextUrl === 'string' && /^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(nextUrl)
+          ? nextUrl
+          : null
+      );
+      const itemPageAutoplayUrl = (nextUrl) => `${nextUrl}&start=true`;
+      const synchroniseItemPageUrl = (nextUrl) => {
+        if (nextUrl === null || typeof window.history?.replaceState !== 'function') return;
+        window.history.replaceState(null, '', itemPageAutoplayUrl(nextUrl));
       };
       const preserveVideoHeight = () => {
         const height = video.getBoundingClientRect().height;
@@ -3211,15 +3252,20 @@
         track.track.mode = 'showing';
       };
       const selectDelivery = async (autoplay, startSeconds = 0) => {
+        const requestVersion = ++deliveryRequestVersion;
+        const requestEntryPosition = entryPosition;
         invalidatePlaybackAttempts();
         status.textContent = 'Preparing playback…';
-        const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${entryPosition}/compatibility`, {
+        const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/entries/${requestEntryPosition}/compatibility`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
           credentials: 'same-origin',
           body: JSON.stringify({media: await browserCapabilities()})
         });
         const payload = await response.json().catch(() => ({}));
+        if (requestVersion !== deliveryRequestVersion || requestEntryPosition !== entryPosition) {
+          return false;
+        }
         if (!response.ok || typeof payload.mode !== 'string') throw new Error('Playback compatibility failed');
         if (payload.mode === 'unsupported' || typeof payload.mediaUrl !== 'string') {
           releaseVideoHeight();
@@ -3242,8 +3288,10 @@
         const mediaUrl = new URL(payload.mediaUrl, window.location.origin);
         if (streamStartSeconds > 0) mediaUrl.searchParams.set('startSeconds', String(streamStartSeconds));
         preserveVideoHeight();
+        mediaEntryPosition = requestEntryPosition;
         video.src = mediaUrl.href;
         video.load();
+        entryPlaybackReady = requestEntryPosition === entryPosition;
         reloadSubtitles();
         if (autoplay) requestPlayback();
         return true;
@@ -3252,6 +3300,15 @@
         if (!Number.isSafeInteger(nextPosition) || nextPosition < 0 || !Number.isFinite(nextResumePosition) || (nextDuration !== null && (!Number.isFinite(nextDuration) || nextDuration < 0))) {
           throw new Error('Playback queue entry is invalid');
         }
+        invalidateDeliveryRequests();
+        audioSelectionVersion += 1;
+        latestTrackSelectionSaveVersion += 1;
+        streamRecoveryAttemptCount = 0;
+        activeStreamRecoveryId = null;
+        generatedStreamSeekPending = false;
+        pendingDirectSeek = null;
+        entryPlaybackReady = false;
+        mediaEntryPosition = null;
         entryPosition = nextPosition;
         resumePosition = nextResumePosition;
         catalogueDuration = nextDuration === null ? 0 : nextDuration;
@@ -3274,7 +3331,11 @@
       const actionButton = (action) => controls.querySelector(`[data-player-action="${action}"]`);
       const playbackDuration = () => {
         const mediaDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-        return deliveryMode !== 'direct' && catalogueDuration > 0 ? catalogueDuration : mediaDuration;
+        if (deliveryMode !== 'direct' && catalogueDuration > 0) return catalogueDuration;
+        if (catalogueDuration > 0) {
+          return mediaDuration > 0 ? Math.min(mediaDuration, catalogueDuration) : catalogueDuration;
+        }
+        return mediaDuration;
       };
       const playbackPosition = () => {
         const duration = playbackDuration();
@@ -3340,6 +3401,9 @@
         updateTrackOptions();
       };
       const isCardFullscreen = () => document.fullscreenElement === this;
+      const isPlayerFullscreen = () => (
+        webkitFullscreenActive || document.fullscreenElement === this || document.fullscreenElement === video
+      );
       const clearFullscreenHideTimer = () => {
         if (fullscreenHideTimer !== null) window.clearTimeout(fullscreenHideTimer);
         fullscreenHideTimer = null;
@@ -3387,47 +3451,124 @@
           updateControls();
         }
       };
-      const reportProgress = async (force, seek) => {
-        const position = playbackPosition();
-        if (!Number.isFinite(position)) return;
-        if (resumePosition > 0 && !resumeApplied) return;
-        if (reporting) return;
-        if (!force && position - lastReportedPosition < 10) return;
-        reporting = true;
+      const saveProgress = async (report) => {
         try {
           const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
             credentials: 'same-origin',
-            body: JSON.stringify({positionSeconds: position, seek, entryPosition}),
+            body: JSON.stringify({
+              positionSeconds: report.position,
+              seek: report.seek,
+              entryPosition: report.entryPosition,
+            }),
           });
           if (!response.ok) throw new Error('Progress failed');
-          lastReportedPosition = position;
+          if (report.entryPosition === entryPosition) lastReportedPosition = report.position;
         } catch (_) {
-          status.textContent = 'Playback progress could not be saved.';
-        } finally {
-          reporting = false;
+          if (report.entryPosition === entryPosition) {
+            status.textContent = 'Playback progress could not be saved.';
+          }
         }
       };
+      const runProgressReports = async (initialReport) => {
+        let report = initialReport;
+        while (report !== null) {
+          activeProgress = report;
+          await saveProgress(report);
+          activeProgress = null;
+          report = pendingProgress;
+          pendingProgress = null;
+        }
+      };
+      const reportProgress = (force, seek) => {
+        if (!entryPlaybackReady) return Promise.resolve();
+        const position = playbackPosition();
+        if (!Number.isFinite(position)) return Promise.resolve();
+        if (resumePosition > 0 && !resumeApplied) return Promise.resolve();
+        if (!force && position - lastReportedPosition < 10) return Promise.resolve();
+        const report = {entryPosition, position, seek};
+        if (reporting) {
+          if (
+            activeProgress !== null
+            && activeProgress.entryPosition === report.entryPosition
+            && activeProgress.position === report.position
+            && (activeProgress.seek || !report.seek)
+          ) {
+            return progressReportPromise || Promise.resolve();
+          }
+          if (pendingProgress !== null && pendingProgress.entryPosition === report.entryPosition) {
+            pendingProgress.position = report.position;
+            pendingProgress.seek = pendingProgress.seek || report.seek;
+          } else {
+            pendingProgress = report;
+          }
+          return progressReportPromise || Promise.resolve();
+        }
+        reporting = true;
+        progressReportPromise = runProgressReports(report).finally(() => {
+          reporting = false;
+          progressReportPromise = null;
+        });
+        return progressReportPromise;
+      };
+      const navigateToPendingItemPage = async () => {
+        const nextUrl = pendingItemPageUrl;
+        if (nextUrl === null) return;
+        pendingItemPageUrl = null;
+        window.location.assign(itemPageAutoplayUrl(nextUrl));
+      };
       const flushProgressOnPageHide = () => {
+        if (!entryPlaybackReady) return;
         const position = playbackPosition();
         if (!Number.isFinite(position)) return;
+        if (resumePosition > 0 && !resumeApplied) return;
         void fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress`, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
           credentials: 'same-origin',
           keepalive: true,
-          body: JSON.stringify({positionSeconds: position, seek: false, entryPosition})
+          body: JSON.stringify({
+            positionSeconds: position,
+            seek: seeking || generatedStreamSeekPending,
+            entryPosition,
+          })
         });
       };
       const restartGeneratedStream = async (position) => {
+        const seekEntryPosition = entryPosition;
         generatedStreamSeekPending = true;
         const autoplay = !video.paused;
         try {
           await selectDelivery(autoplay, position);
         } catch (_) {
-          generatedStreamSeekPending = false;
-          status.textContent = 'Could not seek this video.';
+          if (seekEntryPosition === entryPosition) {
+            generatedStreamSeekPending = false;
+            status.textContent = 'Could not seek this video.';
+          }
+        }
+      };
+      const reconnectPlaybackStream = async () => {
+        if (activeStreamRecoveryId !== null) return;
+        if (streamRecoveryAttemptCount >= 1) {
+          status.textContent = 'Playback stream stopped. Reload this page to retry.';
+          return;
+        }
+        const recoveryId = ++nextStreamRecoveryId;
+        activeStreamRecoveryId = recoveryId;
+        streamRecoveryAttemptCount += 1;
+        const recoveryEntryPosition = entryPosition;
+        try {
+          const available = await selectDelivery(true, playbackPosition());
+          if (available && recoveryEntryPosition === entryPosition) {
+            status.textContent = 'Reconnecting playback…';
+          }
+        } catch (_) {
+          if (recoveryEntryPosition === entryPosition) {
+            status.textContent = 'Playback stream stopped. Reload this page to retry.';
+          }
+        } finally {
+          if (activeStreamRecoveryId === recoveryId) activeStreamRecoveryId = null;
         }
       };
       const currentTrackSelection = () => ({
@@ -3466,12 +3607,19 @@
         const pending = pendingTrackSelectionSave;
         if (!pending) return;
         pendingTrackSelectionSave = null;
+        if (pending.entryPosition !== entryPosition) {
+          pending.resolve();
+          return;
+        }
         const save = async () => {
           try {
             await persistTrackSelection(pending.selection, pending.entryPosition);
             pending.resolve();
           } catch (_) {
-            if (pending.version === latestTrackSelectionSaveVersion) {
+            if (
+              pending.entryPosition === entryPosition
+              && pending.version === latestTrackSelectionSaveVersion
+            ) {
               status.textContent = pending.failureMessage;
             }
             pending.reject(new Error(pending.failureMessage));
@@ -3574,15 +3722,22 @@
         const autoplay = !video.paused;
         closeTrackMenus();
         selectedAudioStream = audioStream;
+        invalidateDeliveryRequests();
         updateTrackOptions();
         const selectionVersion = ++audioSelectionVersion;
+        const selectionEntryPosition = entryPosition;
         void (async () => {
           try {
             await queueTrackSelectionSave('Audio track could not be changed.', true);
-            if (selectionVersion !== audioSelectionVersion) return;
+            if (
+              selectionVersion !== audioSelectionVersion
+              || selectionEntryPosition !== entryPosition
+            ) return;
             await selectDelivery(autoplay, position);
           } catch (_) {
-            status.textContent = 'Audio track could not be changed.';
+            if (selectionEntryPosition === entryPosition) {
+              status.textContent = 'Audio track could not be changed.';
+            }
           }
         })();
       });
@@ -3709,11 +3864,16 @@
         clearFullscreenHideTimer();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        video.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
+        video.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen);
+        if (queueNext instanceof Element) queueNext.removeEventListener('click', onQueueNext);
         window.removeEventListener('pagehide', flushProgressOnPageHide);
         clearNativeSubtitle();
         disposeAssRenderer();
       };
       video.addEventListener('loadedmetadata', () => {
+        if (mediaEntryPosition !== entryPosition) return;
+        entryPlaybackReady = true;
         if (pendingDirectSeek !== null && deliveryMode === 'direct' && Number.isFinite(video.duration)) {
           resumeApplied = true;
           video.currentTime = Math.min(pendingDirectSeek, video.duration);
@@ -3739,6 +3899,7 @@
         updateControls();
         showFullscreenControls();
       });
+      video.addEventListener('playing', () => { streamRecoveryAttemptCount = 0; });
       video.addEventListener('pause', () => {
         updateControls();
         showFullscreenControls();
@@ -3752,10 +3913,20 @@
           clearFullscreenHideTimer();
           this.classList.remove('k-player--controls-hidden');
         }
+        if (!isPlayerFullscreen()) void navigateToPendingItemPage();
       };
       document.addEventListener('fullscreenchange', onFullscreenChange);
-      video.addEventListener('webkitbeginfullscreen', updateControls);
-      video.addEventListener('webkitendfullscreen', updateControls);
+      const onWebkitBeginFullscreen = () => {
+        webkitFullscreenActive = true;
+        updateControls();
+      };
+      const onWebkitEndFullscreen = () => {
+        webkitFullscreenActive = false;
+        updateControls();
+        void navigateToPendingItemPage();
+      };
+      video.addEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
+      video.addEventListener('webkitendfullscreen', onWebkitEndFullscreen);
       video.addEventListener('timeupdate', () => {
         updateControls();
         void reportProgress(false, false);
@@ -3766,15 +3937,17 @@
         void reportProgress(true, seeking);
         seeking = false;
       });
-      video.addEventListener('pause', () => { void reportProgress(true, false); });
+      video.addEventListener('pause', () => { void reportProgress(true, seeking); });
       video.addEventListener('error', () => {
+        if (activeStreamRecoveryId !== null) return;
         invalidatePlaybackAttempts();
         releaseVideoHeight();
-        status.textContent = 'This video format is not supported by this browser.';
+        void reconnectPlaybackStream();
       });
-      video.addEventListener('ended', async () => {
+      const completeAndAdvancePlayback = async () => {
         if (completing) return;
         completing = true;
+        setQueueNextBusy(true);
         status.textContent = 'Completing playback…';
         try {
           const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/complete`, {
@@ -3785,11 +3958,19 @@
           });
           const payload = await response.json();
           if (!response.ok) throw new Error('Completion failed');
+          const nextUrl = itemPageUrl(payload.nextUrl);
+          if (nextUrl !== null && !isPlayerFullscreen()) {
+            window.location.assign(itemPageAutoplayUrl(nextUrl));
+            return;
+          }
           if (payload.nextEntry !== null && payload.nextEntry !== undefined) {
             const nextEntry = parseNextEntry(payload.nextEntry);
+            if (nextUrl === null) throw new Error('Playback item page is unavailable');
+            updateFullscreenInfo(nextEntry);
             applyEntryTrackOptions(nextEntry);
             updatePlaybackQueue();
-            replaceLocationForEntry(payload.nextUrl);
+            pendingItemPageUrl = nextUrl;
+            synchroniseItemPageUrl(nextUrl);
             await loadEntry(
               nextEntry.position,
               nextEntry.savedResumePositionSeconds,
@@ -3797,11 +3978,22 @@
               true
             );
             completing = false;
+            setQueueNextBusy(false);
           } else status.textContent = 'Playback complete.';
         } catch (_) {
           completing = false;
+          setQueueNextBusy(false);
           status.textContent = 'Playback completion could not be saved.';
         }
+      };
+      const onQueueNext = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void completeAndAdvancePlayback();
+      };
+      if (queueNext instanceof Element) queueNext.addEventListener('click', onQueueNext);
+      video.addEventListener('ended', () => {
+        void completeAndAdvancePlayback();
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();

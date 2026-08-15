@@ -2585,18 +2585,10 @@ async def item_page(item_id: int, request: Request) -> Response | None:
                 _settings, profile.user.id
             ).playback_session(session_id)
         except KatalogClientError, ValueError:
-            with page_shell(_settings, "/library", "Playback", profile):
-                feedback_state(
-                    "Playback unavailable", "This playback session is no longer available."
-                )
-            return
+            return RedirectResponse(f"/item/{item_id}", status_code=303)
         current_item = playback_session.current_item
         if current_item is None:
-            with page_shell(_settings, "/library", "Playback", profile):
-                feedback_state(
-                    "Playback unavailable", "This playback session has no current media item."
-                )
-            return
+            return RedirectResponse(f"/item/{item_id}", status_code=303)
         if current_item.item_id != item_id:
             start_query = "&start=true" if play_on_load else ""
             return RedirectResponse(

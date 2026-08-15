@@ -19,6 +19,7 @@ from kasana.katalog.public import (
     PlaybackContext,
     PlaybackContextKind,
     PlaybackPlanEntry,
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     SessionProgressUpdate,
 )
@@ -26,6 +27,7 @@ from kasana.kestrel.player import (
     KestrelPlaybackError,
     MpvPlayerAgent,
     PlaybackOutcome,
+    _MpvPlaybackState,  # pyright: ignore[reportPrivateUsage]
 )
 from kasana.kestrel.settings import KestrelSettings
 from kasana.kestrel.uri import KestrelUriError
@@ -72,9 +74,15 @@ class FakeKatalogClient:
         self.completed_positions.append(self.session.current_entry_position)
         return object()
 
-    async def close_playback_session(self, session_id: str) -> None:
+    async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
         assert session_id == self.session.id
         self.closed_session_ids.append(session_id)
+        current_item = self.session.current_item
+        assert current_item is not None
+        return PlaybackSessionCloseResult(
+            current_entry_position=self.session.current_entry_position,
+            current_item_id=current_item.item_id,
+        )
 
 
 class FakeMpvProcess:
@@ -373,6 +381,20 @@ async def test_player_reports_pause_and_explicit_backward_seek(
     assert catalogue.completed_positions == []
     assert server.process.terminated
     assert list((tmp_path / "runtime").iterdir()) == []
+
+
+async def test_player_clamps_progress_to_the_catalogue_duration(tmp_path: Path) -> None:
+    catalogue = FakeKatalogClient(_session((_entry(0),)))
+    state = _MpvPlaybackState(
+        session=catalogue.session,
+        position_seconds=100.5,
+        duration_seconds=100.5,
+    )
+    await MpvPlayerAgent(_settings(tmp_path), catalogue)._report_progress(  # pyright: ignore[reportPrivateUsage]
+        state, force=True, reason="pause"
+    )
+
+    assert catalogue.progress_updates[-1][1].position_seconds == 100.0
 
 
 async def test_player_does_not_mark_watched_after_an_mpv_crash(

@@ -192,7 +192,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             title="Special",
         )
         paths = {
-            "movie": library_path / "movie.mkv",
+            "movie": library_path / "movie [Extended].mkv",
             "episode_one": library_path / "episode-one.mkv",
             "episode_two": library_path / "episode-two.mkv",
             "episode_three": library_path / "episode-three.mkv",
@@ -280,6 +280,7 @@ async def test_standalone_launch_is_one_use_and_media_has_ranges(
     session = response.json()
     entry = session["current_item"]
     assert entry["display_title"] == "Kasana Movie"
+    assert entry["context_label"] == "Extended"
     assert entry["audio_streams"][0]["codec"] == "aac"
     assert entry["subtitle_streams"][0]["language"] == "en"
     assert str(tmp_path) not in json.dumps(session)
@@ -326,6 +327,7 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
         "Episode Three",
     ]
     assert series["entries"][0]["series_title"] == "Kasana Series"
+    assert series["entries"][0]["context_label"] == "S01 E02"
     assert all(entry["display_title"] != "Special" for entry in series["entries"])
 
     resume_launch = await _create_plan(
@@ -646,6 +648,44 @@ async def test_queue_completion_transitions_collection_playback_atomically(
     assert current_session["current_item"]["saved_resume_position_seconds"] == 0
 
 
+async def test_stopping_an_advanced_queue_then_marking_its_current_item_updates_on_deck(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    """The post-stop item must be the queue's current entry, not the launch entry."""
+
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    launch = await _create_plan(
+        playback_fixture,
+        {"kind": "watch_order", "watch_order_id": ids["watch_order"]},
+    )
+    session = (await client.get(f"/api/v1/playback/plans/{launch}")).json()
+
+    advanced = await client.post(
+        f"/api/v1/playback/sessions/{session['id']}/complete-and-advance",
+        json={"expected_entry_position": 0},
+    )
+
+    assert advanced.status_code == 200
+    current_item_id = advanced.json()["current_item"]["item_id"]
+    assert current_item_id == ids["episode_one"]
+    stopped = await client.delete(f"/api/v1/playback/sessions/{session['id']}")
+    assert stopped.status_code == 200
+    assert stopped.json() == {"current_entry_position": 1, "current_item_id": current_item_id}
+
+    marked = await client.post(f"/api/v1/users/{ids['user']}/items/{current_item_id}/watched")
+    assert marked.status_code == 200
+
+    on_deck = await client.get(f"/api/v1/users/{ids['user']}/on-deck")
+    assert on_deck.status_code == 200
+    assert on_deck.json()["items"][0]["item"]["id"] == ids["episode_two"]
+    continue_watching = await client.get(f"/api/v1/users/{ids['user']}/continue-watching")
+    assert all(
+        entry["item"]["id"] != ids["episode_two"]
+        for entry in continue_watching.json()["items"]
+    )
+
+
 async def test_progress_seek_completion_expiry_and_unavailable_items(
     playback_fixture: PlaybackFixture,
 ) -> None:
@@ -673,6 +713,27 @@ async def test_progress_seek_completion_expiry_and_unavailable_items(
     )
     assert seek.status_code == 200
     assert seek.json()["event"]["kind"] == "progress"
+
+    with playback_fixture.database.transaction() as database_session:
+        media_file = database_session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == playback_fixture.ids["movie"])
+        )
+        assert media_file is not None
+        media_file.duration_seconds = 8.0
+    corrected_duration = await playback_fixture.client.put(
+        progress_path, json={"position_seconds": 8},
+    )
+    assert corrected_duration.status_code == 200
+    with playback_fixture.database.transaction() as database_session:
+        state = database_session.scalar(
+            select(PlaybackState).where(
+                PlaybackState.user_id == playback_fixture.ids["user"],
+                PlaybackState.library_item_id == playback_fixture.ids["movie"],
+            )
+        )
+        assert state is not None
+        assert state.position_seconds == 8
+        assert state.duration_seconds == 8
     completed = await playback_fixture.client.post(
         f"/api/v1/playback/sessions/{session['id']}/complete"
     )
@@ -686,6 +747,28 @@ async def test_progress_seek_completion_expiry_and_unavailable_items(
             )
         )
         assert state is not None and state.completed is True
+
+    replay_launch = await _create_plan(
+        playback_fixture,
+        {"kind": "standalone", "item_id": playback_fixture.ids["movie"]},
+    )
+    replay = (await playback_fixture.client.get(f"/api/v1/playback/plans/{replay_launch}")).json()
+    assert replay["current_item"]["saved_resume_position_seconds"] == 0
+    replayed = await playback_fixture.client.put(
+        f"/api/v1/playback/sessions/{replay['id']}/progress",
+        json={"position_seconds": 5},
+    )
+    assert replayed.status_code == 200
+    with playback_fixture.database.transaction() as database_session:
+        state = database_session.scalar(
+            select(PlaybackState).where(
+                PlaybackState.user_id == playback_fixture.ids["user"],
+                PlaybackState.library_item_id == playback_fixture.ids["movie"],
+            )
+        )
+        assert state is not None
+        assert state.completed is False
+        assert state.position_seconds == 5
 
     expired_launch = await _create_plan(
         playback_fixture,

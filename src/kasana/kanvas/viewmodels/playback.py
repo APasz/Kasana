@@ -44,6 +44,8 @@ class BrowserPlaybackEntryView(BaseModel):
     position: int = Field(ge=0)
     item_id: int = Field(gt=0, alias="itemId")
     display_title: str = Field(min_length=1, max_length=1_000, alias="displayTitle")
+    fullscreen_title: str = Field(min_length=1, max_length=2_003, alias="fullscreenTitle")
+    special_info: str | None = Field(default=None, min_length=1, max_length=80, alias="specialInfo")
     duration_seconds: float | None = Field(default=None, ge=0, alias="durationSeconds")
     saved_resume_position_seconds: float = Field(
         ge=0, alias="savedResumePositionSeconds"
@@ -83,6 +85,8 @@ class BrowserPlaybackEntryView(BaseModel):
             position=entry.position,
             itemId=entry.item_id,
             displayTitle=entry.display_title,
+            fullscreenTitle=_fullscreen_title(entry),
+            specialInfo=entry.context_label,
             durationSeconds=entry.duration_seconds,
             savedResumePositionSeconds=entry.saved_resume_position_seconds,
             audioStreams=tuple(
@@ -114,6 +118,14 @@ class BrowserPlaybackEntryView(BaseModel):
             subtitleShadow=entry.subtitle_shadow,
             subtitleVerticalPosition=entry.subtitle_vertical_position,
         )
+
+
+def _fullscreen_title(entry: PlaybackPlanEntry) -> str:
+    """Return the concise title shown at the top of the fullscreen player."""
+
+    if entry.series_title is None:
+        return entry.display_title
+    return f"{entry.series_title} · {entry.display_title}"
 
 
 class BrowserPlaybackCompletionView(BaseModel):

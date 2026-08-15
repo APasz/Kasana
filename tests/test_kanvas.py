@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from nicegui import app
 from nicegui.client import Client
 from nicegui.element import Element
+from nicegui.elements.label import Label
 from nicegui.page import page
 from pydantic import TypeAdapter
 from starlette.datastructures import FormData
@@ -2992,6 +2993,27 @@ def test_shell_does_not_mount_search_overlay() -> None:
     assert overlays == []
 
 
+def test_shell_centres_page_content_with_a_wide_screen_limit() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    with Client(page("")) as client:
+        with page_shell(Kanvas_Settings(), "/library", "Library", _selected_profile()):
+            pass
+        page_content = [
+            element
+            for element in client.elements.values()
+            if "k-page-content" in _element_classes(element)
+        ]
+
+    assert len(page_content) == 1
+    assert "--k-content-max-width: 1440px;" in stylesheet
+    assert ".k-page-content {" in stylesheet
+    assert "width: min(100%, var(--k-content-max-width));" in stylesheet
+    assert "margin-inline: auto;" in stylesheet
+
+
 def test_administration_sections_mount_distinct_browser_states_and_active_tabs() -> None:
     sections = ("overview", "metadata", "libraries", "jobs", "artwork", "hierarchy", "duplicates")
 
@@ -3578,6 +3600,56 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
         for profile_menu in owner_profile_menus
     } == {"false"}
     assert member_shortcuts == []
+
+
+async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    profile = SessionProfile(UserSummary(id=1, username="viewer", role=UserRole.USER))
+    stop_handler: object | None = None
+    destinations: list[str] = []
+
+    class Action:
+        def set_text(self, _text: str) -> None:
+            return None
+
+    class PlaybackService:
+        def __init__(self, *_arguments: object) -> None:
+            pass
+
+        async def close_playback_session(self, _session_id: str) -> object:
+            return SimpleNamespace(current_item_id=8)
+
+    def action(
+        label: str,
+        handler: object | None = None,
+        **_arguments: object,
+    ) -> Action:
+        nonlocal stop_handler
+        if label == "Stop":
+            stop_handler = handler
+        return Action()
+
+    monkeypatch.setattr(item_route, "KanvasPlaybackService", PlaybackService)
+    monkeypatch.setattr(item_route, "action_button", action)
+    monkeypatch.setattr(item_route.ui.navigate, "to", destinations.append)
+
+    with Client(page("")):
+        item_route._item_actions(  # pyright: ignore[reportPrivateUsage]
+            Kanvas_Settings(),
+            profile,
+            cast(KanvasKatalogService, object()),
+            item_id=7,
+            initially_watched=False,
+            available=True,
+            status=cast(Label, Action()),
+            playback_session_id="s" * 32,
+        )
+
+    assert stop_handler is not None
+    assert callable(stop_handler)
+    await stop_handler()
+    assert destinations == ["/item/8"]
 
 
 def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> None:

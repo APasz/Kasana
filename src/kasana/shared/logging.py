@@ -32,8 +32,10 @@ def log_file_path(log_directory: Path, domain: LogDomain) -> Path:
     return log_directory / f"{domain.value}.log"
 
 
-def configure_logging(level: LogLevel, domain: LogDomain, log_directory: Path) -> None:
-    """Configure console logging and a fresh domain-specific log file.
+def configure_logging(
+    level: LogLevel, domain: LogDomain, log_directory: Path, *, console: bool = True
+) -> None:
+    """Configure file logging and, optionally, console logging for one domain.
 
     The previous session's log for this domain is retained in ``logs.old``
     (or the configured directory's ``.old`` sibling).
@@ -45,10 +47,9 @@ def configure_logging(level: LogLevel, domain: LogDomain, log_directory: Path) -
     expanded_log_directory.mkdir(parents=True, exist_ok=True)
     _archive_log_file(expanded_log_file)
 
-    handlers: list[logging.Handler] = [
-        logging.StreamHandler(),
-        logging.FileHandler(expanded_log_file, encoding="utf-8"),
-    ]
+    handlers: list[logging.Handler] = [logging.FileHandler(expanded_log_file, encoding="utf-8")]
+    if console:
+        handlers.insert(0, logging.StreamHandler())
     logging.basicConfig(
         level=level.value,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

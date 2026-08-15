@@ -14,6 +14,7 @@ from typing import Protocol
 from urllib.parse import urljoin
 
 from kasana.katalog.public import (
+    PlaybackSessionCloseResult,
     PlaybackSessionResponse,
     SessionProgressUpdate,
 )
@@ -43,7 +44,7 @@ class PlaybackCatalogueClient(Protocol):
 
     async def complete_playback_session(self, session_id: str) -> object: ...
 
-    async def close_playback_session(self, session_id: str) -> None: ...
+    async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult: ...
 
 
 class MpvProcess(Protocol):
@@ -354,6 +355,11 @@ class MpvPlayerAgent:
         if state.seeking and not seek:
             return
         position = state.position_seconds
+        current_item = state.session.current_item
+        if current_item is None:
+            raise KestrelPlaybackError("Katalog session has no current playback item.")
+        if current_item.duration_seconds is not None:
+            position = min(position, current_item.duration_seconds)
         if not force and (state.paused or state.last_reported_position is None):
             if state.paused:
                 return
