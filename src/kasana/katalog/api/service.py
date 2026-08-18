@@ -170,10 +170,12 @@ from kasana.katalog.models import (
 )
 from kasana.katalog.numerals import natural_sort_key
 from kasana.katalog.services import (
+    EPISODIC_ITEM_KINDS,
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
     normalise_library_item_tags,
     record_playback_progress,
+    synchronise_parent_completion,
     validate_library_item_parent,
 )
 from kasana.katalog.user_configuration import (
@@ -264,6 +266,24 @@ class _GeneratedWatchOrderItems:
     unavailable_items: tuple[Zaisan, ...]
     duplicate_items: tuple[Zaisan, ...]
     non_playable_items: tuple[Zaisan, ...]
+
+
+class _OnDeckCandidateSource(StrEnum):
+    WATCH_ORDER = "watch_order"
+    IN_PROGRESS_SERIES = "in_progress_series"
+
+
+@dataclass(frozen=True)
+class _OnDeckCandidate:
+    source: _OnDeckCandidateSource
+    item: Zaisan
+    partially_watched: bool = False
+    source_collection_id: int | None = None
+    source_watch_order_id: int | None = None
+    source_watch_order_name: str | None = None
+    source_collection_name: str | None = None
+    watch_order_position: int | None = None
+    watch_order_entry_id: int | None = None
 
 
 class KatalogQueryService:
@@ -1911,48 +1931,52 @@ class KatalogQueryService:
                 .order_by(KeiroEntry.watch_order_id, KeiroEntry.position, KeiroEntry.id)
             )
             rows = tuple(session.execute(statement))
-            next_by_order: list[Row[tuple[KeiroEntry, Zaisan, Keiro, Collection]]] = []
+            candidates: list[_OnDeckCandidate] = []
             seen_order_ids: set[int] = set()
-            for row in rows:
-                _, _, order, _ = row
+            for entry, item, order, collection in rows:
                 if order.id in seen_order_ids:
                     continue
                 seen_order_ids.add(order.id)
-                next_by_order.append(row)
-            if cursor_value is not None:
-                cursor_key = (
-                    _cursor_int(cursor_value, "watch_order_id"),
-                    _cursor_int(cursor_value, "position"),
-                    _cursor_int(cursor_value, "id"),
+                candidates.append(
+                    _OnDeckCandidate(
+                        source=_OnDeckCandidateSource.WATCH_ORDER,
+                        item=item,
+                        source_collection_id=collection.id,
+                        source_watch_order_id=entry.watch_order_id,
+                        source_watch_order_name=order.name,
+                        source_collection_name=collection.name,
+                        watch_order_position=entry.position,
+                        watch_order_entry_id=entry.id,
+                    )
                 )
-                next_by_order = [
-                    row
-                    for row in next_by_order
-                    if (row[0].watch_order_id, row[0].position, row[0].id) > cursor_key
-                ]
-            page, has_next = _split_page(tuple(next_by_order), normalised_limit)
+            candidates.extend(
+                _OnDeckCandidate(
+                    source=_OnDeckCandidateSource.IN_PROGRESS_SERIES,
+                    item=series,
+                    partially_watched=True,
+                )
+                for series in _in_progress_series(session, user_id)
+            )
+            if cursor_value is not None:
+                candidates = _on_deck_candidates_after_cursor(candidates, cursor_value)
+            page, has_next = _split_page(tuple(candidates), normalised_limit)
             summaries: dict[int, LibraryItemSummary] = _summaries_for(
-                session, tuple(item for _, item, _, _ in page)
+                session, tuple(candidate.item for candidate in page)
             )
             return PaginatedResponse[OnDeckEntry](
                 items=tuple[OnDeckEntry, ...](
                     OnDeckEntry(
-                        item=summaries[item.id],
-                        source_watch_order_id=entry.watch_order_id,
-                        source_watch_order_name=order.name,
-                        source_collection_name=collection.name,
+                        item=summaries[candidate.item.id],
+                        source_collection_id=candidate.source_collection_id,
+                        source_watch_order_id=candidate.source_watch_order_id,
+                        source_watch_order_name=candidate.source_watch_order_name,
+                        source_collection_name=candidate.source_collection_name,
+                        partially_watched=candidate.partially_watched,
                     )
-                    for entry, item, order, collection in page
+                    for candidate in page
                 ),
                 next_cursor=(
-                    _encode_cursor(
-                        "on-deck",
-                        {
-                            "watch_order_id": page[-1][0].watch_order_id,
-                            "position": page[-1][0].position,
-                            "id": page[-1][0].id,
-                        },
-                    )
+                    _encode_cursor("on-deck", _on_deck_cursor_values(page[-1]))
                     if has_next
                     else None
                 ),
@@ -2077,7 +2101,12 @@ class KatalogQueryService:
                     .order_by(PlaybackState.library_item_id)
                 )
             )
-            return PlaybackStatesResponse(states=tuple(_playback(state) for state in states))
+            return PlaybackStatesResponse(
+                states=tuple(_playback(state) for state in states),
+                partially_watched_item_ids=_partially_watched_item_ids(
+                    session, user_id, item_ids
+                ),
+            )
 
         return self._database.run_transaction(load)
 
@@ -2112,7 +2141,7 @@ class KatalogQueryService:
     def clear_watched(self, user_id: int, item_id: int) -> None:
         def clear(session: Session) -> None:
             self._configured_user(session, user_id)
-            _require(session, Zaisan, item_id, "Library item")
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
             state: PlaybackState | None = session.scalar(
                 select(PlaybackState).where(
                     PlaybackState.user_id == user_id,
@@ -2121,6 +2150,7 @@ class KatalogQueryService:
             )
             if state is not None:
                 session.delete(state)
+            synchronise_parent_completion(session, user_id=user_id, item=item)
 
         self._database.run_transaction(clear)
 
@@ -2667,10 +2697,10 @@ class KatalogQueryService:
     def _series_entries(
         self, session: Session, user_id: int, context: SeriesPlaybackContext
     ) -> tuple[tuple[_PlannedPlaybackEntry, ...], int]:
-        series, episodes = _series_and_episodes(session, context)
-        start_index = _series_start_index(session, user_id, episodes, context)
+        series, episodic_items = _series_and_episodic_items(session, context)
+        start_index = _series_start_index(session, user_id, episodic_items, context)
         return (
-            tuple(self._planned_entry(session, item) for item in episodes[start_index:]),
+            tuple(self._planned_entry(session, item) for item in episodic_items[start_index:]),
             series.id,
         )
 
@@ -2962,6 +2992,232 @@ def _playback_state(session: Session, user_id: int, item_id: int) -> PlaybackSta
     )
 
 
+def _in_progress_series(
+    session: Session, user_id: int, *, series_ids: tuple[int, ...] | None = None
+) -> tuple[Zaisan, ...]:
+    completed_season = aliased(Zaisan)
+    completed_episode = aliased(Zaisan)
+    completed_state = aliased(PlaybackState)
+    unwatched_season = aliased(Zaisan)
+    unwatched_episode = aliased(Zaisan)
+    unwatched_state = aliased(PlaybackState)
+    has_completed_season_episode = (
+        select(completed_episode.id)
+        .join(completed_season, completed_episode.parent_id == completed_season.id)
+        .join(
+            completed_state,
+            and_(
+                completed_state.library_item_id == completed_episode.id,
+                completed_state.user_id == user_id,
+            ),
+        )
+        .where(
+            completed_season.parent_id == Zaisan.id,
+            completed_season.item_kind == ZaisanKind.SEASON,
+            completed_episode.item_kind.in_(EPISODIC_ITEM_KINDS),
+            completed_state.completed.is_(True),
+        )
+        .exists()
+    )
+    has_completed_direct_special = (
+        select(completed_episode.id)
+        .join(
+            completed_state,
+            and_(
+                completed_state.library_item_id == completed_episode.id,
+                completed_state.user_id == user_id,
+            ),
+        )
+        .where(
+            completed_episode.parent_id == Zaisan.id,
+            completed_episode.item_kind == ZaisanKind.SPECIAL,
+            completed_state.completed.is_(True),
+        )
+        .exists()
+    )
+    has_unwatched_season_episode = (
+        select(unwatched_episode.id)
+        .join(unwatched_season, unwatched_episode.parent_id == unwatched_season.id)
+        .outerjoin(
+            unwatched_state,
+            and_(
+                unwatched_state.library_item_id == unwatched_episode.id,
+                unwatched_state.user_id == user_id,
+            ),
+        )
+        .where(
+            unwatched_season.parent_id == Zaisan.id,
+            unwatched_season.item_kind == ZaisanKind.SEASON,
+            unwatched_episode.item_kind.in_(EPISODIC_ITEM_KINDS),
+            or_(unwatched_state.id.is_(None), unwatched_state.completed.is_(False)),
+        )
+        .exists()
+    )
+    has_unwatched_direct_special = (
+        select(unwatched_episode.id)
+        .outerjoin(
+            unwatched_state,
+            and_(
+                unwatched_state.library_item_id == unwatched_episode.id,
+                unwatched_state.user_id == user_id,
+            ),
+        )
+        .where(
+            unwatched_episode.parent_id == Zaisan.id,
+            unwatched_episode.item_kind == ZaisanKind.SPECIAL,
+            or_(unwatched_state.id.is_(None), unwatched_state.completed.is_(False)),
+        )
+        .exists()
+    )
+    has_completed_episode = or_(has_completed_season_episode, has_completed_direct_special)
+    has_unwatched_episode = or_(has_unwatched_season_episode, has_unwatched_direct_special)
+    statement = select(Zaisan).where(
+        Zaisan.item_kind == ZaisanKind.SERIES,
+        has_completed_episode,
+        has_unwatched_episode,
+    )
+    if series_ids is not None:
+        statement = statement.where(Zaisan.id.in_(series_ids))
+    return tuple(session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id)))
+
+
+def _partially_watched_item_ids(
+    session: Session, user_id: int, item_ids: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Return requested seasons and series with both watched and unwatched episodes."""
+
+    partial_season_ids = set(_in_progress_season_ids(session, user_id, season_ids=item_ids))
+    partial_series_ids = {
+        series.id for series in _in_progress_series(session, user_id, series_ids=item_ids)
+    }
+    return tuple(
+        item_id
+        for item_id in item_ids
+        if item_id in partial_season_ids or item_id in partial_series_ids
+    )
+
+
+def _in_progress_season_ids(
+    session: Session, user_id: int, *, season_ids: tuple[int, ...]
+) -> tuple[int, ...]:
+    completed_episode = aliased(Zaisan)
+    completed_state = aliased(PlaybackState)
+    unwatched_episode = aliased(Zaisan)
+    unwatched_state = aliased(PlaybackState)
+    has_completed_episode = (
+        select(completed_episode.id)
+        .join(
+            completed_state,
+            and_(
+                completed_state.library_item_id == completed_episode.id,
+                completed_state.user_id == user_id,
+            ),
+        )
+        .where(
+            completed_episode.parent_id == Zaisan.id,
+            completed_episode.item_kind.in_(EPISODIC_ITEM_KINDS),
+            completed_state.completed.is_(True),
+        )
+        .exists()
+    )
+    has_unwatched_episode = (
+        select(unwatched_episode.id)
+        .outerjoin(
+            unwatched_state,
+            and_(
+                unwatched_state.library_item_id == unwatched_episode.id,
+                unwatched_state.user_id == user_id,
+            ),
+        )
+        .where(
+            unwatched_episode.parent_id == Zaisan.id,
+            unwatched_episode.item_kind.in_(EPISODIC_ITEM_KINDS),
+            or_(unwatched_state.id.is_(None), unwatched_state.completed.is_(False)),
+        )
+        .exists()
+    )
+    return tuple(
+        session.scalars(
+            select(Zaisan.id)
+            .where(
+                Zaisan.id.in_(season_ids),
+                Zaisan.item_kind == ZaisanKind.SEASON,
+                has_completed_episode,
+                has_unwatched_episode,
+            )
+            .order_by(Zaisan.id)
+        )
+    )
+
+
+def _on_deck_candidates_after_cursor(
+    candidates: list[_OnDeckCandidate], cursor: dict[str, object]
+) -> list[_OnDeckCandidate]:
+    source = _on_deck_cursor_source(cursor)
+    if source is _OnDeckCandidateSource.WATCH_ORDER:
+        cursor_key = (
+            _cursor_int(cursor, "watch_order_id"),
+            _cursor_int(cursor, "position"),
+            _cursor_int(cursor, "id"),
+        )
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.source is _OnDeckCandidateSource.IN_PROGRESS_SERIES
+            or _watch_order_cursor_key(candidate) > cursor_key
+        ]
+    if source is _OnDeckCandidateSource.IN_PROGRESS_SERIES:
+        cursor_key = (_cursor_string(cursor, "sort_title"), _cursor_int(cursor, "id"))
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.source is _OnDeckCandidateSource.IN_PROGRESS_SERIES
+            and (candidate.item.sort_title, candidate.item.id) > cursor_key
+        ]
+    raise RuntimeError(f"Unsupported On Deck candidate source: {source}")
+
+
+def _on_deck_cursor_source(cursor: dict[str, object]) -> _OnDeckCandidateSource:
+    try:
+        return _OnDeckCandidateSource(
+            _cursor_string(cursor, "source", default=_OnDeckCandidateSource.WATCH_ORDER.value)
+        )
+    except ValueError as error:
+        raise CatalogueValidationError("The cursor is invalid.") from error
+
+
+def _on_deck_cursor_values(candidate: _OnDeckCandidate) -> dict[str, str | int | float]:
+    if candidate.source is _OnDeckCandidateSource.WATCH_ORDER:
+        watch_order_id, position, entry_id = _watch_order_cursor_key(candidate)
+        return {
+            "source": candidate.source.value,
+            "watch_order_id": watch_order_id,
+            "position": position,
+            "id": entry_id,
+        }
+    if candidate.source is _OnDeckCandidateSource.IN_PROGRESS_SERIES:
+        return {
+            "source": candidate.source.value,
+            "sort_title": candidate.item.sort_title,
+            "id": candidate.item.id,
+        }
+    raise RuntimeError(f"Unsupported On Deck candidate source: {candidate.source}")
+
+
+def _watch_order_cursor_key(candidate: _OnDeckCandidate) -> tuple[int, int, int]:
+    if (
+        candidate.source_watch_order_id is None
+        or candidate.watch_order_position is None
+        or candidate.watch_order_entry_id is None
+    ):
+        raise RuntimeError("A watch-order On Deck candidate requires an entry position and ID.")
+    return (
+        candidate.source_watch_order_id,
+        candidate.watch_order_position,
+        candidate.watch_order_entry_id,
+    )
+
+
 def _progress_duration(
     media_file: MediaFile, state: PlaybackState | None, position_seconds: float
 ) -> float:
@@ -3009,15 +3265,14 @@ def _playback_session_event(event: ModelPlaybackSessionEvent) -> PlaybackSession
     )
 
 
-def _series_and_episodes(
+def _series_and_episodic_items(
     session: Session, context: SeriesPlaybackContext
 ) -> tuple[Zaisan, tuple[Zaisan, ...]]:
     if context.episode_id is not None:
         episode = _require(session, Zaisan, context.episode_id, "Library item")
-        if episode.item_kind is not ZaisanKind.EPISODE:
-            raise CatalogueValidationError("A series episode_id must identify an episode.")
-        season = _require_parent(session, episode, ZaisanKind.SEASON)
-        series = _require_parent(session, season, ZaisanKind.SERIES)
+        if episode.item_kind not in EPISODIC_ITEM_KINDS:
+            raise CatalogueValidationError("A series episode_id must identify an episode or special.")
+        series = _series_parent_for_episodic_item(session, episode)
         if context.series_id is not None and context.series_id != series.id:
             raise CatalogueValidationError("The episode does not belong to the requested series.")
     else:
@@ -3027,52 +3282,101 @@ def _series_and_episodes(
         if series.item_kind is not ZaisanKind.SERIES:
             raise CatalogueValidationError("A series context must identify a series item.")
     season = aliased(Zaisan)
-    episodes = tuple(
+    episodic_items = tuple(
         session.scalars(
             select(Zaisan)
-            .join(season, Zaisan.parent_id == season.id)
-            .where(
-                season.parent_id == series.id,
-                Zaisan.item_kind == ZaisanKind.EPISODE,
+            .outerjoin(
+                season,
+                and_(
+                    Zaisan.parent_id == season.id,
+                    season.item_kind == ZaisanKind.SEASON,
+                ),
             )
-            .order_by(season.season_number, Zaisan.episode_number, Zaisan.id)
+            .where(
+                or_(
+                    and_(
+                        season.parent_id == series.id,
+                        Zaisan.item_kind.in_(EPISODIC_ITEM_KINDS),
+                    ),
+                    and_(
+                        Zaisan.parent_id == series.id,
+                        Zaisan.item_kind == ZaisanKind.SPECIAL,
+                    ),
+                )
+            )
+            .order_by(
+                case((season.id.is_(None), 1), else_=0),
+                season.season_number,
+                case((Zaisan.item_kind == ZaisanKind.EPISODE, 0), else_=1),
+                Zaisan.episode_number,
+                Zaisan.sort_title,
+                Zaisan.id,
+            )
         )
     )
-    if not episodes:
-        raise CatalogueValidationError("The requested series has no episodes.")
-    return series, episodes
+    if not episodic_items:
+        raise CatalogueValidationError("The requested series has no episodes or specials.")
+    return series, episodic_items
 
 
 def _series_start_index(
     session: Session,
     user_id: int,
-    episodes: tuple[Zaisan, ...],
+    episodic_items: tuple[Zaisan, ...],
     context: SeriesPlaybackContext,
 ) -> int:
-    episode_ids = tuple(episode.id for episode in episodes)
+    item_ids = tuple(item.id for item in episodic_items)
     if context.episode_id is not None:
         try:
-            return episode_ids.index(context.episode_id)
+            return item_ids.index(context.episode_id)
         except ValueError as error:
             raise CatalogueValidationError(
-                "The episode is not part of the requested series."
+                "The episode or special is not part of the requested series."
             ) from error
     if not context.resume:
         return 0
-    states = tuple(
+    resumable_states = tuple(
         session.scalars(
             select(PlaybackState)
             .where(
                 PlaybackState.user_id == user_id,
-                PlaybackState.library_item_id.in_(episode_ids),
+                PlaybackState.library_item_id.in_(item_ids),
                 PlaybackState.completed.is_(False),
+                PlaybackState.position_seconds > 0,
             )
             .order_by(PlaybackState.last_played_at.desc(), PlaybackState.id.desc())
         )
     )
-    if states:
-        return episode_ids.index(states[0].library_item_id)
-    return 0
+    if resumable_states:
+        return item_ids.index(resumable_states[0].library_item_id)
+    states_by_item_id = {
+        state.library_item_id: state
+        for state in session.scalars(
+            select(PlaybackState).where(
+                PlaybackState.user_id == user_id,
+                PlaybackState.library_item_id.in_(item_ids),
+            )
+        )
+    }
+    return next(
+        (
+            index
+            for index, item in enumerate(episodic_items)
+            if (state := states_by_item_id.get(item.id)) is None or not state.completed
+        ),
+        len(episodic_items),
+    )
+
+
+def _series_parent_for_episodic_item(session: Session, item: Zaisan) -> Zaisan:
+    if item.parent_id is None:
+        raise CatalogueValidationError(f"Library item {item.id} has no series parent.")
+    parent = _require(session, Zaisan, item.parent_id, "Library item")
+    if parent.item_kind is ZaisanKind.SERIES and item.item_kind is ZaisanKind.SPECIAL:
+        return parent
+    if parent.item_kind is ZaisanKind.SEASON:
+        return _require_parent(session, parent, ZaisanKind.SERIES)
+    raise CatalogueValidationError(f"Library item {item.id} has no series parent.")
 
 
 def _require_parent(session: Session, item: Zaisan, expected_kind: ZaisanKind) -> Zaisan:

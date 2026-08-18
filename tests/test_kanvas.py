@@ -388,6 +388,7 @@ def _item_detail_client(
     child_requests: list[int],
     playback: PlaybackStateResponse | None = None,
     child_playback: Mapping[int, PlaybackStateResponse | None] | None = None,
+    partially_watched_child_ids: frozenset[int] = frozenset(),
 ) -> type[object]:
     class FakeClient:
         def __init__(self, *_arguments: object, **_keywords: object) -> None:
@@ -450,7 +451,12 @@ def _item_detail_client(
                 )
                 is not None
             )
-            return SimpleNamespace(states=states)
+            return SimpleNamespace(
+                states=states,
+                partially_watched_item_ids=tuple(
+                    item_id for item_id in item_ids if item_id in partially_watched_child_ids
+                ),
+            )
 
     return FakeClient
 
@@ -695,7 +701,10 @@ def test_watched_posters_use_an_accessible_bottom_left_corner_marker() -> None:
     stylesheet = (static_root / "kanvas.css").read_text(encoding="utf-8")
 
     assert 'class="k-poster__watched" role="img" aria-label="Watched"' in javascript
+    assert 'class="k-poster__watched k-poster__watched--partial"' in javascript
+    assert 'aria-label="Partially watched"' in javascript
     assert ".k-poster__watched" in stylesheet
+    assert ".k-poster__watched--partial::after" in stylesheet
     assert "bottom: 0;" in stylesheet
     assert "left: 0;" in stylesheet
     assert "background: var(--k-watched-marker);" in stylesheet
@@ -779,7 +788,7 @@ def test_watch_order_playback_plan_preserves_the_order_context_for_play_from_her
     assert request.context.start_item_id == 9
 
 
-def test_poster_view_allows_only_item_detail_destinations() -> None:
+def test_poster_view_allows_only_safe_item_detail_and_resume_destinations() -> None:
     poster = PosterView(
         id=7,
         title="Stargateo · Chronological",
@@ -788,8 +797,23 @@ def test_poster_view_allows_only_item_detail_destinations() -> None:
     )
 
     assert poster.href == "/item/7"
+    assert (
+        PosterView(
+            id=7,
+            title="Resume",
+            href="/play/item/7?resume=true&onDeck=true",
+            available=True,
+        ).href
+        == "/play/item/7?resume=true&onDeck=true"
+    )
+    assert PosterView(
+        id=7,
+        title="Resume collection",
+        href="/play/watch-orders/11?resume=true&onDeck=true",
+        available=True,
+    ).href == "/play/watch-orders/11?resume=true&onDeck=true"
     with pytest.raises(ValueError):
-        PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?resume=true", available=True)
+        PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?itemId=7", available=True)
 
 
 def test_collection_mosaic_is_stable_and_never_returns_an_absolute_artwork_path() -> None:
@@ -980,14 +1004,45 @@ async def test_item_detail_keeps_multiple_series_seasons(monkeypatch: MonkeyPatc
     child_requests: list[int] = []
     monkeypatch.setattr(
         "kasana.kanvas.services.katalog.KatalogClient",
-        _item_detail_client(series, {7: seasons}, child_requests),
+        _item_detail_client(
+            series,
+            {7: seasons},
+            child_requests,
+            child_playback={8: _playback(completed=True)},
+        ),
     )
 
     detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
 
     assert detail.child_section_title == "Seasons"
     assert [child.title for child in detail.children] == ["Season 1", "Season 2"]
+    assert [child.watched for child in detail.children] == [True, False]
     assert child_requests == [7]
+
+
+async def test_item_detail_marks_partially_watched_season_children(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    series = _library_detail(item_id=7, title="Show", kind=LibraryItemKind.SERIES)
+    seasons = (
+        _library_summary(item_id=8, title="Season 1", kind=LibraryItemKind.SEASON, parent_id=7),
+        _library_summary(item_id=9, title="Season 2", kind=LibraryItemKind.SEASON, parent_id=7),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(
+            series,
+            {7: seasons},
+            child_requests,
+            partially_watched_child_ids=frozenset({8}),
+        ),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert [child.watched for child in detail.children] == [False, False]
+    assert [child.partially_watched for child in detail.children] == [True, False]
 
 
 async def test_item_detail_reads_completed_watched_state_directly(
@@ -3750,10 +3805,13 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
                 items=(
                     OnDeckEntry(
                         item=item,
+                        source_collection_id=12,
                         source_watch_order_id=11,
                         source_watch_order_name="Chronological",
                         source_collection_name="Stargateo",
+                        partially_watched=True,
                     ),
+                    OnDeckEntry(item=item, partially_watched=True),
                 ),
                 next_cursor=None,
                 limit=limit,
@@ -3779,7 +3837,15 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
 
     assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
-    assert rails[1].posters[0].href == "/item/7"
+    assert rails[1].posters[0].id == 12
+    assert rails[1].posters[0].title == "Stargateo"
+    assert rails[1].posters[0].subtitle == "Next: A title"
+    assert rails[1].posters[0].href == "/play/watch-orders/11?resume=true&onDeck=true"
+    assert rails[1].posters[0].poster_url is None
+    assert rails[1].posters[0].partially_watched is False
+    assert rails[1].posters[1].title == "A title"
+    assert rails[1].posters[1].href == "/play/item/7?resume=true&onDeck=true"
+    assert rails[1].posters[1].partially_watched is True
     assert posters[0].poster_url == "/kanvas/artwork/7/8"
     assert next_cursor == "next"
 

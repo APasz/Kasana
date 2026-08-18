@@ -606,10 +606,13 @@ async def test_expired_playback_session_returns_to_the_requested_item_page(
 
 
 @pytest.mark.asyncio
-async def test_play_route_starts_but_resume_route_uses_the_profile_autoplay_option(
+async def test_play_route_starts_new_on_deck_items_but_respects_true_resume_autoplay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = SimpleNamespace(id="s" * 32, current_item=SimpleNamespace(item_id=2))
+    session = SimpleNamespace(
+        id="s" * 32,
+        current_item=SimpleNamespace(item_id=2, saved_resume_position_seconds=0),
+    )
     profile = SimpleNamespace(user=SimpleNamespace(id=1))
 
     class FakePlaybackService:
@@ -633,11 +636,36 @@ async def test_play_route_starts_but_resume_route_uses_the_profile_autoplay_opti
     resumed = await dashboard.play_item_page(
         2, Request({"type": "http", "query_string": b"resume=true", "headers": []})
     )
+    on_deck_new = await dashboard.play_item_page(
+        2,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"resume=true&onDeck=true",
+                "headers": [],
+            }
+        ),
+    )
+    session.current_item.saved_resume_position_seconds = 37
+    on_deck_resume = await dashboard.play_item_page(
+        2,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"resume=true&onDeck=true",
+                "headers": [],
+            }
+        ),
+    )
 
     assert played is not None
     assert played.headers["location"] == f"/item/2?playbackSession={'s' * 32}&start=true"
     assert resumed is not None
     assert resumed.headers["location"] == f"/item/2?playbackSession={'s' * 32}"
+    assert on_deck_new is not None
+    assert on_deck_new.headers["location"] == f"/item/2?playbackSession={'s' * 32}&start=true"
+    assert on_deck_resume is not None
+    assert on_deck_resume.headers["location"] == f"/item/2?playbackSession={'s' * 32}"
 
 
 def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_skips() -> None:

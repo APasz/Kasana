@@ -184,7 +184,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             episode_number=3,
             title="Episode Three",
         )
-        create_library_item(
+        special = create_library_item(
             session,
             library_root_id=root.id,
             item_kind=ZaisanKind.SPECIAL,
@@ -196,6 +196,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             "episode_one": library_path / "episode-one.mkv",
             "episode_two": library_path / "episode-two.mkv",
             "episode_three": library_path / "episode-three.mkv",
+            "special": library_path / "special.mkv",
         }
         for name, path in paths.items():
             _write_sparse_media(path, prefix=b"Kasana" if name == "movie" else name.encode())
@@ -204,6 +205,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             (episode_one, paths["episode_one"]),
             (episode_two, paths["episode_two"]),
             (episode_three, paths["episode_three"]),
+            (special, paths["special"]),
         ):
             stat = path.stat()
             attach_media_file(
@@ -243,9 +245,11 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             "movie": movie.id,
             "unavailable": unavailable.id,
             "series": series.id,
+            "season": season.id,
             "episode_one": episode_one.id,
             "episode_two": episode_two.id,
             "episode_three": episode_three.id,
+            "special": special.id,
             "user": user.id,
             "collection": collection.id,
             "watch_order": watch_order.id,
@@ -265,6 +269,136 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
         yield PlaybackFixture(client=client, database=database, settings=settings, ids=ids)
     await runtime.close()
     database.close()
+
+
+async def test_completed_episodes_mark_their_season_and_series_watched(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    """Extras do not prevent episode and season completion from rolling up."""
+
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as session:
+        first_season = session.get(Zaisan, ids["season"])
+        assert first_season is not None
+        create_library_item(
+            session,
+            library_root_id=first_season.library_root_id,
+            item_kind=ZaisanKind.EXTRA,
+            parent_id=first_season.id,
+            title="Behind the scenes",
+        )
+        second_season = create_library_item(
+            session,
+            library_root_id=first_season.library_root_id,
+            item_kind=ZaisanKind.SEASON,
+            parent_id=ids["series"],
+            season_number=2,
+            title="Season Two",
+        )
+        second_season_episode = create_library_item(
+            session,
+            library_root_id=first_season.library_root_id,
+            item_kind=ZaisanKind.EPISODE,
+            parent_id=second_season.id,
+            season_number=2,
+            episode_number=1,
+            title="Season Two Premiere",
+        )
+
+    for episode_key in ("episode_one", "episode_two", "episode_three"):
+        marked = await playback_fixture.client.post(
+            f"/api/v1/users/{ids['user']}/items/{ids[episode_key]}/watched"
+        )
+        assert marked.status_code == 200
+
+    first_season_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['season']}/progress"
+    )
+    assert first_season_state.status_code == 200
+    assert first_season_state.json()["completed"] is True
+    series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/progress"
+    )
+    assert series_state.status_code == 200
+    assert series_state.json() is None
+
+    marked_second_season = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{second_season_episode.id}/watched"
+    )
+    assert marked_second_season.status_code == 200
+    completed_series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/progress"
+    )
+    assert completed_series_state.status_code == 200
+    assert completed_series_state.json()["completed"] is True
+
+
+async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+
+    initial_on_deck = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/on-deck"
+    )
+    assert initial_on_deck.status_code == 200
+    assert all(entry["item"]["id"] != ids["series"] for entry in initial_on_deck.json()["items"])
+
+    marked_first_episode = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['episode_one']}/watched"
+    )
+    assert marked_first_episode.status_code == 200
+    on_deck = await playback_fixture.client.get(f"/api/v1/users/{ids['user']}/on-deck")
+    assert on_deck.status_code == 200
+    series_entry = next(
+        entry for entry in on_deck.json()["items"] if entry["item"]["id"] == ids["series"]
+    )
+    assert series_entry["source_watch_order_id"] is None
+    assert series_entry["partially_watched"] is True
+
+    partial_states = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/playback-states",
+        json={"item_ids": [ids["season"], ids["series"]]},
+    )
+    assert partial_states.status_code == 200
+    assert partial_states.json()["partially_watched_item_ids"] == [ids["season"], ids["series"]]
+
+    first_page = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/on-deck", params={"limit": 1}
+    )
+    assert first_page.status_code == 200
+    next_cursor = first_page.json()["next_cursor"]
+    assert next_cursor is not None
+    series_page = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/on-deck", params={"cursor": next_cursor, "limit": 1}
+    )
+    assert series_page.status_code == 200
+    assert series_page.json()["items"][0]["item"]["id"] == ids["series"]
+
+    for episode_key in ("episode_two", "episode_three"):
+        marked = await playback_fixture.client.post(
+            f"/api/v1/users/{ids['user']}/items/{ids[episode_key]}/watched"
+        )
+        assert marked.status_code == 200
+    marked_special = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['special']}/watched"
+    )
+    assert marked_special.status_code == 200
+
+    completed_on_deck = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/on-deck"
+    )
+    assert completed_on_deck.status_code == 200
+    assert all(
+        entry["item"]["id"] != ids["series"] for entry in completed_on_deck.json()["items"]
+    )
+
+    completed_states = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/playback-states",
+        json={"item_ids": [ids["season"], ids["series"]]},
+    )
+    assert completed_states.status_code == 200
+    assert completed_states.json()["partially_watched_item_ids"] == []
 
 
 async def test_standalone_launch_is_one_use_and_media_has_ranges(
@@ -325,10 +459,11 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
     assert [entry["display_title"] for entry in series["entries"]] == [
         "Episode Two",
         "Episode Three",
+        "Special",
     ]
     assert series["entries"][0]["series_title"] == "Kasana Series"
     assert series["entries"][0]["context_label"] == "S01 E02"
-    assert all(entry["display_title"] != "Special" for entry in series["entries"])
+
 
     resume_launch = await _create_plan(
         playback_fixture,
@@ -371,6 +506,37 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
         playback_fixture.ids["episode_three"],
         playback_fixture.ids["movie"],
     ]
+
+
+async def test_series_resume_falls_back_to_the_first_unwatched_episode_or_special(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    for item_key in ("episode_one", "episode_two"):
+        marked = await playback_fixture.client.post(
+            f"/api/v1/users/{ids['user']}/items/{ids[item_key]}/watched"
+        )
+        assert marked.status_code == 200
+
+    episode_launch = await _create_plan(
+        playback_fixture,
+        {"kind": "series", "series_id": ids["series"], "resume": True},
+    )
+    episode_session = await playback_fixture.client.get(f"/api/v1/playback/plans/{episode_launch}")
+    assert episode_session.status_code == 200
+    assert episode_session.json()["current_item"]["item_id"] == ids["episode_three"]
+
+    marked_episode = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['episode_three']}/watched"
+    )
+    assert marked_episode.status_code == 200
+    special_launch = await _create_plan(
+        playback_fixture,
+        {"kind": "series", "series_id": ids["series"], "resume": True},
+    )
+    special_session = await playback_fixture.client.get(f"/api/v1/playback/plans/{special_launch}")
+    assert special_session.status_code == 200
+    assert special_session.json()["current_item"]["item_id"] == ids["special"]
 
 
 async def test_playback_tracks_use_root_languages_and_expose_sidecars(
@@ -903,6 +1069,7 @@ async def test_collection_order_workflow_preserves_default_resume_and_explicit_s
         entry for entry in on_deck.json()["items"] if entry["source_watch_order_id"] == order_id
     )
     assert active_order["item"]["id"] == ids["episode_one"]
+    assert active_order["source_collection_id"] == collection_id
     assert active_order["source_collection_name"] == "Stargate"
 
     continue_watching = await client.get(f"/api/v1/users/{ids['user']}/continue-watching")

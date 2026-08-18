@@ -783,9 +783,12 @@ class PlaybackStatesRequest(APIModel):
 
 
 class PlaybackStatesResponse(APIModel):
-    """Existing saved states from one bounded playback-state request."""
+    """Saved states and derived episodic progress for one bounded grid request."""
 
     states: tuple[PlaybackStateResponse, ...] = Field(
+        default=(), max_length=MAX_PLAYBACK_STATE_BATCH_SIZE
+    )
+    partially_watched_item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(
         default=(), max_length=MAX_PLAYBACK_STATE_BATCH_SIZE
     )
 
@@ -797,9 +800,11 @@ class ContinueWatchingEntry(APIModel):
 
 class OnDeckEntry(APIModel):
     item: LibraryItemSummary
+    source_collection_id: int | None = Field(default=None, gt=0)
     source_watch_order_id: int | None = Field(default=None, gt=0)
     source_watch_order_name: str | None = Field(default=None, min_length=1, max_length=1_000)
     source_collection_name: str | None = Field(default=None, min_length=1, max_length=1_000)
+    partially_watched: bool = False
 
 
 class MetadataReviewCandidate(APIModel):

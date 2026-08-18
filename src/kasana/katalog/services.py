@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import LiteralString
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.models import (
@@ -45,6 +45,12 @@ _PARENT_KINDS: dict[ZaisanKind, frozenset[ZaisanKind]] = {
 }
 PLAYABLE_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
     {ZaisanKind.MOVIE, ZaisanKind.EPISODE, ZaisanKind.SPECIAL, ZaisanKind.EXTRA}
+)
+EPISODIC_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[
+    ZaisanKind
+]({ZaisanKind.EPISODE, ZaisanKind.SPECIAL})
+_SERIES_COMPLETION_CHILD_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
+    {ZaisanKind.SEASON}
 )
 
 
@@ -287,7 +293,135 @@ def record_playback_progress(
         state.play_count += int(increment_play_count)
         state.last_played_at = timestamp
     session.flush()
+    synchronise_parent_completion(session, user_id=user_id, item=item, completed_at=timestamp)
     return state
+
+
+def synchronise_parent_completion(
+    session: Session,
+    *,
+    user_id: int,
+    item: Zaisan,
+    completed_at: datetime | None = None,
+) -> None:
+    """Keep season and series completion aligned with their watched children."""
+
+    if item.item_kind in EPISODIC_ITEM_KINDS:
+        season = item.parent
+        if season is None or season.item_kind is not ZaisanKind.SEASON:
+            return
+        _synchronise_completion_state(
+            session,
+            user_id=user_id,
+            item=season,
+            completed=_children_are_completed(
+                session,
+                user_id=user_id,
+                parent_id=season.id,
+                child_kinds=EPISODIC_ITEM_KINDS,
+            ),
+            completed_at=completed_at,
+        )
+        _synchronise_series_completion(
+            session, user_id=user_id, season=season, completed_at=completed_at
+        )
+        return
+
+    if item.item_kind is ZaisanKind.SEASON:
+        _synchronise_series_completion(
+            session, user_id=user_id, season=item, completed_at=completed_at
+        )
+
+
+def _synchronise_series_completion(
+    session: Session,
+    *,
+    user_id: int,
+    season: Zaisan,
+    completed_at: datetime | None,
+) -> None:
+    series = season.parent
+    if series is None or series.item_kind is not ZaisanKind.SERIES:
+        return
+    _synchronise_completion_state(
+        session,
+        user_id=user_id,
+        item=series,
+        completed=_children_are_completed(
+            session,
+            user_id=user_id,
+            parent_id=series.id,
+            child_kinds=_SERIES_COMPLETION_CHILD_KINDS,
+        ),
+        completed_at=completed_at,
+    )
+
+
+def _children_are_completed(
+    session: Session,
+    *,
+    user_id: int,
+    parent_id: int,
+    child_kinds: frozenset[ZaisanKind],
+) -> bool:
+    child_count = session.scalar(
+        select(func.count())
+        .select_from(Zaisan)
+        .where(Zaisan.parent_id == parent_id, Zaisan.item_kind.in_(child_kinds))
+    )
+    if child_count == 0:
+        return False
+    incomplete_child_count = session.scalar(
+        select(func.count())
+        .select_from(Zaisan)
+        .outerjoin(
+            PlaybackState,
+            and_(
+                PlaybackState.library_item_id == Zaisan.id,
+                PlaybackState.user_id == user_id,
+            ),
+        )
+        .where(
+            Zaisan.parent_id == parent_id,
+            Zaisan.item_kind.in_(child_kinds),
+            or_(PlaybackState.id.is_(None), PlaybackState.completed.is_(False)),
+        )
+    )
+    return incomplete_child_count == 0
+
+
+def _synchronise_completion_state(
+    session: Session,
+    *,
+    user_id: int,
+    item: Zaisan,
+    completed: bool,
+    completed_at: datetime | None,
+) -> None:
+    state: PlaybackState | None = session.scalar(
+        select(PlaybackState).where(
+            PlaybackState.user_id == user_id,
+            PlaybackState.library_item_id == item.id,
+        )
+    )
+    if not completed:
+        if state is not None:
+            session.delete(state)
+        return
+    if state is not None:
+        state.completed = True
+        return
+    session.add(
+        PlaybackState(
+            user_id=user_id,
+            library_item_id=item.id,
+            position_seconds=0.0,
+            duration_seconds=0.0,
+            completed=True,
+            play_count=0,
+            last_played_at=completed_at or datetime.now(UTC),
+        )
+    )
 
 
 def set_media_file_availability(

@@ -11,7 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
 
-_POSTER_HREF_PATTERN = r"^/item/\d+$"
+_POSTER_HREF_PATTERN = (
+    r"^/(?:item/\d+|play/item/\d+\?resume=true&onDeck=true|"
+    r"play/watch-orders/\d+\?resume=true&onDeck=true)$"
+)
 
 
 class PlaceholderArtView(BaseModel):
@@ -70,6 +73,7 @@ class PosterView(BaseModel):
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     state: PosterState = PosterState.NORMAL
     watched: bool = False
+    partially_watched: bool = Field(default=False, alias="partiallyWatched")
     available: bool
 
 

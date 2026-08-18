@@ -61,6 +61,8 @@ from kasana.kanvas.viewmodels.item import (
 )
 from kasana.kanvas.viewmodels.library import (
     LibraryFilters,
+    PlaceholderArtView,
+    PosterState,
     PosterView,
 )
 from kasana.katalog.public import (
@@ -1174,24 +1176,30 @@ async def _item_children_view(
 async def _child_posters(
     client: KatalogClient, user_id: int, children: tuple[LibraryItemSummary, ...]
 ) -> tuple[PosterView, ...]:
-    """Render children with each viewer's watched state when they are playable."""
+    """Render children with each viewer's saved watched state."""
 
-    playable_children = tuple(child for child in children if child.kind in PLAYABLE_KINDS)
+    child_ids = tuple(child.id for child in children)
+    playback_states = (
+        await client.playback_states(user_id, PlaybackStatesRequest(item_ids=child_ids))
+        if child_ids
+        else None
+    )
     playback_by_item_id = (
-        {
-            state.item_id: state
-            for state in (
-                await client.playback_states(
-                    user_id,
-                    PlaybackStatesRequest(item_ids=tuple(child.id for child in playable_children)),
-                )
-            ).states
-        }
-        if playable_children
+        {state.item_id: state for state in playback_states.states}
+        if playback_states is not None
         else {}
     )
+    partially_watched_item_ids: set[int] = (
+        {item_id for item_id in playback_states.partially_watched_item_ids}
+        if playback_states is not None
+        else set()
+    )
     return tuple(
-        poster_from_summary(child, playback=playback_by_item_id.get(child.id))
+        poster_from_summary(
+            child,
+            playback=playback_by_item_id.get(child.id),
+            partially_watched=child.id in partially_watched_item_ids,
+        )
         for child in children
     )
 
@@ -1234,16 +1242,22 @@ async def _playback_for_item(
 
 
 def _on_deck_poster(entry: OnDeckEntry) -> PosterView:
-    """Describe an active default order while linking to its next item detail."""
+    """Launch the next collection entry or resume an in-progress standalone series."""
 
-    poster = poster_from_summary(entry.item)
     if entry.source_watch_order_id is None:
-        return poster
+        return poster_from_summary(
+            entry.item,
+            partially_watched=entry.partially_watched,
+        ).model_copy(update={"href": f"/play/item/{entry.item.id}?resume=true&onDeck=true"})
+    if entry.source_collection_id is None:
+        raise RuntimeError("A collection-backed On Deck entry requires its collection ID.")
     collection_name = entry.source_collection_name or "Collection"
-    order_name = entry.source_watch_order_name or "Watch order"
-    return poster.model_copy(
-        update={
-            "title": f"{collection_name} · {order_name}",
-            "subtitle": f"Next: {entry.item.title}",
-        }
+    return PosterView(
+        id=entry.source_collection_id,
+        title=collection_name,
+        subtitle=f"Next: {entry.item.title}",
+        href=f"/play/watch-orders/{entry.source_watch_order_id}?resume=true&onDeck=true",
+        placeholder=PlaceholderArtView(lines=(collection_name,)),
+        state=PosterState.NORMAL,
+        available=True,
     )

@@ -2605,6 +2605,7 @@ async def play_item_page(item_id: int, request: Request) -> Response | None:
     if isinstance(profile, RedirectResponse):
         return profile
     resume = _query_boolean(request, "resume", default=False)
+    on_deck = _query_boolean(request, "onDeck", default=False)
     try:
         session = await KanvasPlaybackService(
             _settings, profile.user.id
@@ -2618,7 +2619,9 @@ async def play_item_page(item_id: int, request: Request) -> Response | None:
         with page_shell(_settings, "/library", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
-    start_query = "&start=true" if not resume else ""
+    start_query = _playback_start_query(
+        current_item.saved_resume_position_seconds, resume, on_deck
+    )
     return RedirectResponse(
         f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
@@ -2631,6 +2634,7 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
     if isinstance(profile, RedirectResponse):
         return profile
     resume = _query_boolean(request, "resume", default=False)
+    on_deck = _query_boolean(request, "onDeck", default=False)
     skip_unavailable = _query_boolean(request, "skipUnavailable", default=False)
     start_item_id = _query_positive_integer(request, "itemId")
     try:
@@ -2659,10 +2663,22 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
         with page_shell(_settings, "/collections", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
-    start_query = "&start=true" if not resume else ""
+    start_query = _playback_start_query(
+        current_item.saved_resume_position_seconds, resume, on_deck
+    )
     return RedirectResponse(
         f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
+
+
+def _playback_start_query(
+    saved_resume_position_seconds: float, resume: bool, on_deck: bool
+) -> str:
+    """Start a new On Deck item, while leaving true resumes to the profile preference."""
+
+    if not resume or (on_deck and saved_resume_position_seconds == 0):
+        return "&start=true"
+    return ""
 
 
 def _watch_order_playback_error_detail(error: KatalogClientError) -> str:

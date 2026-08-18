@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic import command
@@ -11,7 +12,9 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
-from kasana.katalog.models import Base
+from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.models import Base, PlaybackState, ZaisanKind
+from kasana.katalog.services import create_library_item, create_library_root, create_user
 
 
 def test_migration_head_matches_katalog_orm_metadata(tmp_path: Path) -> None:
@@ -51,3 +54,86 @@ def test_initial_migration_is_immutable_and_does_not_import_runtime_metadata() -
     assert "metadata.create_all" not in source
     assert "metadata.drop_all" not in source
     assert "op.create_table(" in source
+
+
+def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_path: Path) -> None:
+    database_path = tmp_path / "catalogue.sqlite3"
+    repository_root = Path(__file__).parents[1]
+    config = Config(str(repository_root / "alembic.ini"))
+    config.set_main_option("script_location", str(repository_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
+    command.upgrade(config, "20260728_0021")
+
+    database = KatalogDatabase(database_path)
+    try:
+        with database.transaction() as session:
+            root = create_library_root(
+                session,
+                path=tmp_path / "library",
+                expected_media_kind=ZaisanKind.SERIES,
+            )
+            user = create_user(session, username="viewer")
+            series = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SERIES,
+                title="Example Show",
+            )
+            season = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SEASON,
+                parent_id=series.id,
+                season_number=1,
+                title="Season 1",
+            )
+            episodes = tuple(
+                create_library_item(
+                    session,
+                    library_root_id=root.id,
+                    item_kind=ZaisanKind.EPISODE,
+                    parent_id=season.id,
+                    season_number=1,
+                    episode_number=episode_number,
+                    title=f"Episode {episode_number}",
+                )
+                for episode_number in (1, 2)
+            )
+            extra = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.EXTRA,
+                parent_id=season.id,
+                title="Interview",
+            )
+            for episode in episodes:
+                session.add(
+                    PlaybackState(
+                        user_id=user.id,
+                        library_item_id=episode.id,
+                        position_seconds=1.0,
+                        duration_seconds=1.0,
+                        completed=True,
+                        play_count=1,
+                        last_played_at=datetime.now(UTC),
+                    )
+                )
+            identifiers = (user.id, season.id, series.id, extra.id)
+    finally:
+        database.close()
+
+    command.upgrade(config, "head")
+
+    database = KatalogDatabase(database_path)
+    try:
+        with database.transaction() as session:
+            user_id, season_id, series_id, extra_id = identifiers
+            completed_item_ids = {
+                state.library_item_id
+                for state in session.query(PlaybackState).filter_by(user_id=user_id, completed=True)
+            }
+    finally:
+        database.close()
+
+    assert {season_id, series_id}.issubset(completed_item_ids)
+    assert extra_id not in completed_item_ids

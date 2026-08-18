@@ -225,6 +225,7 @@ def poster_from_summary(
     item: LibraryItemSummary,
     *,
     playback: PlaybackStateResponse | None = None,
+    partially_watched: bool = False,
     selected: bool = False,
     loading: bool = False,
 ) -> PosterView:
@@ -253,6 +254,7 @@ def poster_from_summary(
         progressPercent=progress_percent(playback),
         state=state,
         watched=playback.completed if playback is not None else False,
+        partiallyWatched=partially_watched and (playback is None or not playback.completed),
         available=item.availability is Availability.AVAILABLE,
     )
 

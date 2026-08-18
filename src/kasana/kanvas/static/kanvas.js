@@ -438,7 +438,7 @@
     const poster = value;
     if (typeof poster.id !== 'number' || !Number.isSafeInteger(poster.id) || poster.id <= 0) return null;
     if (typeof poster.title !== 'string' || !poster.title) return null;
-    if (typeof poster.href !== 'string' || !/^\/item\/\d+$/.test(poster.href)) return null;
+    if (typeof poster.href !== 'string' || !/^\/(?:item\/\d+|play\/item\/\d+\?resume=true&onDeck=true|play\/watch-orders\/\d+\?resume=true&onDeck=true)$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
@@ -447,6 +447,7 @@
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
     if (poster.watched != null && typeof poster.watched !== 'boolean') return null;
+    if (poster.partiallyWatched != null && typeof poster.partiallyWatched !== 'boolean') return null;
     return {
       id: poster.id,
       title: poster.title,
@@ -458,6 +459,7 @@
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
       watched: poster.watched === true,
+      partiallyWatched: poster.partiallyWatched === true,
       available: poster.available
     };
   };
@@ -474,7 +476,11 @@
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
       : `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
-    const watched = poster.watched ? '<span class="k-poster__watched" role="img" aria-label="Watched"></span>' : '';
+    const watched = poster.watched
+      ? '<span class="k-poster__watched" role="img" aria-label="Watched"></span>'
+      : poster.partiallyWatched
+        ? '<span class="k-poster__watched k-poster__watched--partial" role="img" aria-label="Partially watched"></span>'
+        : '';
     const header = poster.header ? `<span class="k-poster__header">${escapeHtml(poster.header)}</span>` : '';
     const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">

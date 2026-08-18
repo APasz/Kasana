@@ -243,19 +243,39 @@ function testPosterPlaceholderNormalisation() {
   );
 }
 
-function testPosterNormalisationAllowsOnlyItemDetailLinks() {
+function testPosterPartialWatchNormalisation() {
+  const poster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(16),
+    partiallyWatched: true
+  });
+  assert.equal(poster.partiallyWatched, true);
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(17), partiallyWatched: 'true'}),
+    null
+  );
+}
+
+function testPosterNormalisationAllowsOnlySafeItemAndResumeLinks() {
   assert.equal(
     globalThis.__libraryTest.normalisePoster({...validPoster(13), href: '/item/13'}).href,
     '/item/13'
   );
   assert.equal(
-    globalThis.__libraryTest.normalisePoster({...validPoster(14), href: '/play/watch-orders/4'}),
+    globalThis.__libraryTest.normalisePoster({...validPoster(14), href: '/play/watch-orders/4?resume=true&onDeck=true'}).href,
+    '/play/watch-orders/4?resume=true&onDeck=true'
+  );
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(15), href: '/play/item/15?resume=true&onDeck=true'}).href,
+    '/play/item/15?resume=true&onDeck=true'
+  );
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(16), href: '/play/watch-orders/4'}),
     null
   );
   assert.equal(
     globalThis.__libraryTest.normalisePoster({
-      ...validPoster(15),
-      href: '/play/watch-orders/4?resume=true'
+      ...validPoster(17),
+      href: '/play/watch-orders/4?itemId=17'
     }),
     null
   );
@@ -755,7 +775,8 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
 async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
-  testPosterNormalisationAllowsOnlyItemDetailLinks();
+  testPosterPartialWatchNormalisation();
+  testPosterNormalisationAllowsOnlySafeItemAndResumeLinks();
   testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();

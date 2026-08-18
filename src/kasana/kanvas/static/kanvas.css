@@ -328,6 +328,15 @@ kanvas-poster {
     background: var(--k-watched-marker);
     clip-path: polygon(0 0, 0 100%, 100% 100%);
 }
+.k-poster__watched--partial::after {
+    position: absolute;
+    right: 12%;
+    bottom: 18%;
+    left: 12%;
+    height: 3px;
+    content: "";
+    background: var(--k-bg);
+}
 .k-poster--unavailable { opacity: 0.48; }
 .k-poster--unavailable .k-poster__image { filter: grayscale(1); }
 .k-poster--missing_artwork .k-poster__title { display: none; }
