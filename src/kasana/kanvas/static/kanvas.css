@@ -619,6 +619,7 @@ kanvas-poster {
 .k-child-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 160px)); gap: 12px; }
 
 .k-player {
+    --k-player-progress-height: 34px;
     position: relative;
     display: grid;
     width: min(100%, 1100px);
@@ -634,7 +635,7 @@ kanvas-poster {
     display: grid;
     grid-template-columns: minmax(48px, auto) 1fr minmax(48px, auto);
     align-items: center;
-    min-height: 34px;
+    min-height: var(--k-player-progress-height);
     overflow: hidden;
     border-bottom: 1px solid var(--k-border-subtle);
     background: var(--k-surface-2);
@@ -657,6 +658,7 @@ kanvas-poster {
 }
 .k-player__control:hover, .k-player__control:focus-visible { color: var(--k-accent); background: var(--k-surface-2); outline: none; }
 .k-player__control-label { font-size: inherit; }
+.k-player__control--next { display: none; }
 .k-player__buffered {
     position: absolute;
     z-index: 1;
@@ -827,8 +829,10 @@ kanvas-poster {
     z-index: 2;
     transition: opacity 160ms ease, transform 160ms ease;
 }
-.k-player:fullscreen .k-player__progress { bottom: 52px; border-bottom: 0; background: rgba(16, 16, 16, 0.9); }
-.k-player:fullscreen .k-player__details { bottom: 0; box-sizing: border-box; min-height: 52px; padding-bottom: max(12px, env(safe-area-inset-bottom)); background: linear-gradient(to top, rgba(0, 0, 0, 0.96), rgba(0, 0, 0, 0.72)); }
+.k-player:fullscreen .k-player__progress { bottom: env(safe-area-inset-bottom); border-bottom: 0; background: rgba(16, 16, 16, 0.9); }
+.k-player:fullscreen .k-player__details { bottom: calc(var(--k-player-progress-height) + env(safe-area-inset-bottom)); box-sizing: border-box; min-height: 52px; padding-bottom: 12px; background: linear-gradient(to top, rgba(0, 0, 0, 0.96), rgba(0, 0, 0, 0.72)); }
+.k-player:fullscreen .k-player__control--next { display: grid; }
+.k-player:fullscreen .k-player__control--next[hidden] { display: none; }
 .k-player:fullscreen.k-player--controls-hidden .k-player__progress,
 .k-player:fullscreen.k-player--controls-hidden .k-player__details {
     opacity: 0;
@@ -842,6 +846,7 @@ kanvas-poster {
 @media (max-width: 560px) {
     .k-player__details { padding: 8px 10px 10px; }
     .k-player__controls { gap: 6px; }
+    .k-player:fullscreen .k-player__controls { flex-wrap: wrap; }
     .k-player__transport-controls, .k-player__audio-controls { gap: 2px; }
     .k-player__volume { width: min(18vw, 84px); }
     .k-player__control { min-width: 28px; padding: 4px 5px; }

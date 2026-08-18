@@ -14,13 +14,27 @@ from kasana.katalog.public import (
 _PLAYBACK_RATES: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
-def _player_control(label: str, action: str, accessible_name: str) -> None:
+def _player_control(
+    label: str,
+    action: str,
+    accessible_name: str,
+    *,
+    extra_classes: str = "",
+) -> None:
     """Render one semantic button handled by the browser player component."""
 
-    with ui.element("button").classes("k-player__control").props(
+    with ui.element("button").classes(f"k-player__control {extra_classes}").props(
         f'type="button" data-player-action="{action}" aria-label="{accessible_name}"'
     ):
         ui.html(label, tag="span").classes("k-player__control-label")
+
+
+def _queued_entries(session: PlaybackSessionResponse) -> tuple[PlaybackPlanEntry, ...]:
+    """Return entries scheduled after the session's current item."""
+
+    return tuple(
+        entry for entry in session.entries if entry.position > session.current_entry_position
+    )
 
 
 def _queue_entry_context(entry: PlaybackPlanEntry) -> str | None:
@@ -37,9 +51,7 @@ def _queue_entry_context(entry: PlaybackPlanEntry) -> str | None:
 def _render_playback_queue(session: PlaybackSessionResponse) -> None:
     """Render a compact disclosure for entries following the current item."""
 
-    queued_entries = tuple(
-        entry for entry in session.entries if entry.position > session.current_entry_position
-    )
+    queued_entries = _queued_entries(session)
     if not queued_entries:
         return
     next_entry = queued_entries[0]
@@ -205,6 +217,7 @@ def render_browser_playback_card(
     if entry is None:
         raise ValueError("Playback sessions must contain a current media item.")
     browser_entry = BrowserPlaybackEntryView.from_entry(entry)
+    has_queued_item = bool(_queued_entries(session))
     duration_attribute = (
         f' duration-seconds="{entry.duration_seconds:g}"'
         if entry.duration_seconds is not None and entry.duration_seconds > 0
@@ -275,10 +288,17 @@ def render_browser_playback_card(
                     _player_control("&#9654;", "toggle", "Play")
                     _player_control("&#8942;", "menu", "Playback settings")
                     _player_control("+10s", "forward", "Forward 10 seconds")
+                    if has_queued_item:
+                        _player_control(
+                            "Play next",
+                            "next",
+                            "Play the next queue item",
+                            extra_classes="k-player__control--next",
+                        )
                 with ui.element("div").classes("k-player__audio-controls"):
-                    _player_control("&#128266;", "mute", "Mute")
-                    _player_control("&#127911;", "audio", "Audio tracks")
                     _player_control("&#128172;", "subtitles", "Subtitle tracks")
+                    _player_control("&#127911;", "audio", "Audio tracks")
+                    _player_control("&#128266;", "mute", "Mute")
                     ui.element("input").classes("k-player__volume").props(
                         'type="range" min="0" max="1" value="1" step="0.05" '
                         'data-player-volume aria-label="Volume"'

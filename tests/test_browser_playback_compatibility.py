@@ -426,6 +426,7 @@ def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time
 
     assert '"audio", "Audio tracks"' in player
     assert '"subtitles", "Subtitle tracks"' in player
+    assert player.index('"subtitles", "Subtitle tracks"') < player.index('"mute", "Mute"')
     assert "data-player-subtitle-unsupported" in player
     assert "data-player-subtitle-timing-step" in player
     assert "data-player-subtitle-font-scale-step" in player
@@ -844,6 +845,13 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
     assert len(queue_entries) == 1
     assert len(queue_actions) == 1
     assert "data-player-next" in queue_actions[0]._props  # pyright: ignore[reportPrivateUsage]
+    fullscreen_next_controls = [
+        element
+        for element in client.elements.values()
+        if element._props.get("data-player-action") == "next"  # pyright: ignore[reportPrivateUsage]
+    ]
+    assert len(fullscreen_next_controls) == 1
+    assert "k-player__control--next" in fullscreen_next_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
     assert queue_titles == ["Next episode", "Next episode"]
 
 

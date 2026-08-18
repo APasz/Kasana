@@ -310,6 +310,7 @@ function runScheduledTimeouts() {
 
 function createPlayer({
   durationSeconds = 0,
+  hasFullscreenQueueNext = false,
   hasQueuedItem = false,
   resumePosition = 0,
   subtitlesDisabled = false
@@ -322,6 +323,16 @@ function createPlayer({
   const video = new FakeVideo();
   const status = new FakeElement();
   const controls = new FakeElement();
+  const fullscreenQueueNext = hasFullscreenQueueNext ? new FakeElement() : null;
+  if (fullscreenQueueNext) {
+    fullscreenQueueNext.setAttribute('data-player-action', 'next');
+    fullscreenQueueNext.closest = (selector) => (
+      selector === '[data-player-action]' ? fullscreenQueueNext : null
+    );
+  }
+  controls.querySelector = (selector) => (
+    selector === '[data-player-action="next"]' ? fullscreenQueueNext : null
+  );
   const timeline = new FakeElement();
   const bufferedIndicator = new FakeElement();
   const currentTime = new FakeElement();
@@ -406,6 +417,7 @@ function createPlayer({
     currentTime,
     fullscreenSpecialInfo,
     fullscreenTitle,
+    fullscreenQueueNext,
     player,
     queueNext: activeQueueNext,
     remainingTime,
@@ -846,6 +858,33 @@ async function testQueueControlAdvancesPlayback() {
   completionPayload = null;
 }
 
+async function testFullscreenQueueControlAdvancesPlayback() {
+  const {controls, fullscreenQueueNext, player} = createPlayer({
+    hasFullscreenQueueNext: true,
+    hasQueuedItem: true
+  });
+  assert.ok(fullscreenQueueNext);
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  completionPayload = {
+    nextEntry: queuedEntry(),
+    nextUrl: `/item/2?playbackSession=${'s'.repeat(32)}`
+  };
+  document.fullscreenElement = player;
+  controls.emit('click', {target: fullscreenQueueNext});
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(player.getAttribute('entry-position'), '1');
+  assert.equal(document.fullscreenElement, player);
+  assert.equal(assignedLocations.length, 0);
+  document.fullscreenElement = null;
+  completionPayload = null;
+}
+
 async function testQueueAdvanceAutoplaysWithoutLeavingFullscreen() {
   const {fullscreenSpecialInfo, fullscreenTitle, player, video} = createPlayer();
   player.connectedCallback();
@@ -952,6 +991,7 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testEachQueuedEntryGetsItsOwnStreamRecoveryAttempt();
   await testAudioSelectionCannotOutliveAQueueTransition();
   await testQueueControlAdvancesPlayback();
+  await testFullscreenQueueControlAdvancesPlayback();
   await testQueueAdvanceAutoplaysWithoutLeavingFullscreen();
   await testFullscreenExitNavigatesWithoutWaitingForProgress();
   await testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen();

@@ -2807,6 +2807,10 @@
       const fullscreenSpecialInfo = this.querySelector('[data-player-fullscreen-special-info]');
       const sessionId = this.getAttribute('session-id');
       const queueNext = document.querySelector('[data-player-next]');
+      const fullscreenQueueNext = controls?.querySelector('[data-player-action="next"]');
+      const queueNextControls = [queueNext, fullscreenQueueNext].filter(
+        (control) => control instanceof Element
+      );
       let entryPosition = Number(this.getAttribute('entry-position') || '0');
       let resumePosition = Number(this.getAttribute('resume-position') || '0');
       const autoplayOnResume = this.getAttribute('autoplay-on-resume') === 'true';
@@ -3008,12 +3012,16 @@
       const updatePlaybackQueue = () => {
         if (typeof document.querySelector !== 'function') return;
         const queue = document.querySelector('[data-player-queue]');
-        if (!(queue instanceof Element)) return;
+        if (!(queue instanceof Element)) {
+          if (fullscreenQueueNext instanceof Element) fullscreenQueueNext.hidden = true;
+          return;
+        }
         const queueEntries = Array.from(queue.querySelectorAll('.k-playback-queue__entry'));
         queueEntries[0]?.remove();
         const remainingEntries = Array.from(queue.querySelectorAll('.k-playback-queue__entry'));
         if (remainingEntries.length === 0) {
           queue.remove();
+          if (fullscreenQueueNext instanceof Element) fullscreenQueueNext.hidden = true;
           return;
         }
         const countLabel = remainingEntries.length === 1 ? 'item' : 'items';
@@ -3028,9 +3036,10 @@
         if (summaryContext) summaryContext.textContent = nextContext?.textContent || '';
       };
       const setQueueNextBusy = (busy) => {
-        if (!(queueNext instanceof Element)) return;
-        queueNext.toggleAttribute('disabled', busy);
-        queueNext.setAttribute('aria-disabled', String(busy));
+        queueNextControls.forEach((control) => {
+          control.toggleAttribute('disabled', busy);
+          control.setAttribute('aria-disabled', String(busy));
+        });
       };
       const itemPageUrl = (nextUrl) => (
         typeof nextUrl === 'string' && /^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(nextUrl)
@@ -3711,6 +3720,8 @@
           showTrackMenu(subtitleMenu, target);
         } else if (action === 'mute') {
           video.muted = !video.muted;
+        } else if (action === 'next') {
+          void completeAndAdvancePlayback();
         } else if (action === 'fullscreen') {
           void toggleFullscreen();
         }

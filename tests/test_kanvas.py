@@ -695,6 +695,37 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "kasana://play/" not in script
 
 
+def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--k-player-progress-height: 34px;" in stylesheet
+    assert (
+        ".k-player:fullscreen .k-player__progress { bottom: env(safe-area-inset-bottom);"
+        in stylesheet
+    )
+    assert (
+        ".k-player:fullscreen .k-player__details { bottom: calc("
+        "var(--k-player-progress-height) + env(safe-area-inset-bottom));" in stylesheet
+    )
+
+
+def test_fullscreen_player_shows_play_next_only_in_its_controls() -> None:
+    repository_root = Path(__file__).parents[1]
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"next",' in player
+    assert 'extra_classes="k-player__control--next"' in player
+    assert ".k-player__control--next { display: none; }" in stylesheet
+    assert ".k-player:fullscreen .k-player__control--next { display: grid; }" in stylesheet
+
+
 def test_watched_posters_use_an_accessible_bottom_left_corner_marker() -> None:
     static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
     javascript = (static_root / "kanvas.js").read_text(encoding="utf-8")
