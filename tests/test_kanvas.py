@@ -711,13 +711,14 @@ def test_watched_posters_use_an_accessible_bottom_left_corner_marker() -> None:
     assert "clip-path: polygon(0 0, 0 100%, 100% 100%);" in stylesheet
 
 
-def test_playback_proxy_preserves_the_validated_range_headers() -> None:
+def test_playback_proxy_preserves_range_headers_and_disables_media_caching() -> None:
     headers = dashboard._stream_response_headers(  # pyright: ignore[reportPrivateUsage]
         {
             "Accept-Ranges": "bytes",
             "Content-Length": "10",
             "Content-Range": "bytes 10-19/1048576",
             "Content-Type": "video/mp4",
+            "Cache-Control": "public, max-age=3600",
         }
     )
 
@@ -726,6 +727,7 @@ def test_playback_proxy_preserves_the_validated_range_headers() -> None:
         "Content-Length": "10",
         "Content-Range": "bytes 10-19/1048576",
         "Content-Type": "video/mp4",
+        "Cache-Control": "no-store",
     }
 
 

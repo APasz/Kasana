@@ -544,6 +544,7 @@ async function testBackwardSeekSavesAsASeekWhenPaused() {
   player.connectedCallback();
   await nextTick();
   await nextTick();
+  video.emit('loadedmetadata');
 
   const start = fetchCalls.length;
   recordedProgressPosition = 0;
@@ -575,6 +576,7 @@ async function testBackwardSeekIsQueuedUntilTheActiveSaveFinishes() {
   player.connectedCallback();
   await nextTick();
   await nextTick();
+  video.emit('loadedmetadata');
 
   const start = fetchCalls.length;
   recordedProgressPosition = 0;
@@ -611,6 +613,7 @@ async function testProgressUsesTheAuthoritativeCatalogueDuration() {
   player.connectedCallback();
   await nextTick();
   await nextTick();
+  video.emit('loadedmetadata');
 
   const start = fetchCalls.length;
   video.duration = 100.5;
@@ -660,6 +663,33 @@ async function testPageHideDoesNotSaveBeforeTheResumeSeekIsApplied() {
   await nextTick();
 
   assert.equal(progressCallsSince(start).length, 0);
+}
+
+async function testQueueTransitionDoesNotSaveThePreviousEntryPosition() {
+  const {player, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+  video.emit('loadedmetadata');
+  video.currentTime = 84;
+
+  completionPayload = {
+    nextEntry: queuedEntry(),
+    nextUrl: `/item/2?playbackSession=${'s'.repeat(32)}`
+  };
+  document.fullscreenElement = player;
+  video.emit('ended');
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  const start = fetchCalls.length;
+  window.emit('pagehide');
+  await nextTick();
+
+  assert.equal(progressCallsSince(start).length, 0);
+  completionPayload = null;
+  document.fullscreenElement = null;
 }
 
 async function testProfileSubtitlePreferenceDisablesTheInitialTrack() {
@@ -916,6 +946,7 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testProgressUsesTheAuthoritativeCatalogueDuration();
   await testGeneratedResumeKeepsTheFullEpisodeTimeline();
   await testPageHideDoesNotSaveBeforeTheResumeSeekIsApplied();
+  await testQueueTransitionDoesNotSaveThePreviousEntryPosition();
   await testProfileSubtitlePreferenceDisablesTheInitialTrack();
   await testPlaybackErrorReconnectsInsteadOfClaimingTheFormatIsUnsupported();
   await testEachQueuedEntryGetsItsOwnStreamRecoveryAttempt();

@@ -1763,9 +1763,13 @@ def _query_text(request: Request, name: str, *, maximum_length: int) -> str | No
 
 
 def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Preserve the validated media headers required for browser range playback."""
+    """Preserve range headers while preventing stale session-scoped media reuse."""
 
-    return dict(headers)
+    response_headers = {
+        name: value for name, value in headers.items() if name.casefold() != "cache-control"
+    }
+    response_headers["Cache-Control"] = "no-store"
+    return response_headers
 
 
 def _subtitle_cache_headers() -> dict[str, str]:

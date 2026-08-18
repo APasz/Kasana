@@ -3297,7 +3297,7 @@
         mediaEntryPosition = requestEntryPosition;
         video.src = mediaUrl.href;
         video.load();
-        entryPlaybackReady = requestEntryPosition === entryPosition;
+        entryPlaybackReady = false;
         reloadSubtitles();
         if (autoplay) requestPlayback();
         return true;
