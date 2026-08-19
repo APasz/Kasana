@@ -245,6 +245,15 @@ async def update_current_profile(request: Request) -> JSONResponse:
     if profile is None:
         return JSONResponse({"error": "Select a profile."}, status_code=401)
     payload = await _json_object(request)
+    try:
+        expected_user_id = _integer(payload, "expectedUserId")
+    except ValueError:
+        return _invalid_action("Profile selection could not be confirmed.")
+    if expected_user_id != profile.user.id:
+        return JSONResponse(
+            {"error": "Profile changed in another tab. Reload before saving settings."},
+            status_code=409,
+        )
     values: dict[str, object] = {}
     if "displayName" in payload:
         values["display_name"] = _optional_string(payload["displayName"], maximum_length=200)
@@ -2467,7 +2476,8 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
         app.add_middleware(
             SessionMiddleware,
             secret_key=_settings.session_secret,
-            session_cookie="kanvas_session",
+            session_cookie=_settings.effective_session_cookie_name,
+            max_age=_settings.session_max_age_seconds,
             same_site="lax",
             https_only=_settings.session_cookie_secure,
         )

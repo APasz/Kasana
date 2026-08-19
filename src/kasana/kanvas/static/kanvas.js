@@ -6,6 +6,60 @@
   const PROFILE_ACCENT_DEFAULT = '#e8e8e8';
   const PROFILE_PIN_MIN_LENGTH = 2;
   const PROFILE_PIN_MAX_LENGTH = 16;
+  const PROFILE_SESSION_CHANNEL = 'kasana-profile-session';
+  const profileSessionChannel = typeof window.BroadcastChannel === 'function'
+    ? new window.BroadcastChannel(PROFILE_SESSION_CHANNEL)
+    : null;
+
+  const changeProfileSession = (destination) => {
+    const message = {type: 'profile-session-changed', destination};
+    profileSessionChannel?.postMessage(message);
+    try {
+      const nonce = window.crypto?.randomUUID?.() || String(Date.now());
+      window.localStorage.setItem(PROFILE_SESSION_CHANNEL, JSON.stringify({...message, nonce}));
+    } catch (_) {
+      // BroadcastChannel remains available in browsers that restrict local storage.
+    }
+  };
+
+  const receiveProfileSessionChange = (message) => {
+    if (!message || message.type !== 'profile-session-changed') return;
+    const destination = message.destination === '/profiles' ? '/profiles' : '/';
+    window.location.replace(destination);
+  };
+
+  profileSessionChannel?.addEventListener('message', (event) => receiveProfileSessionChange(event.data));
+  window.addEventListener('storage', (event) => {
+    if (event.key !== PROFILE_SESSION_CHANNEL || !event.newValue) return;
+    try {
+      receiveProfileSessionChange(JSON.parse(event.newValue));
+    } catch (_) {
+      // Ignore unrelated malformed storage values.
+    }
+  });
+
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-kanvas-session-form')) return;
+    const submitter = event.submitter;
+    const submitterAction = submitter instanceof HTMLButtonElement ? submitter.getAttribute('formaction') : null;
+    const action = new URL(submitterAction || form.action, window.location.origin);
+    if (!['/profiles/select', '/profiles/bootstrap', '/profiles/sign-out'].includes(action.pathname)) return;
+    event.preventDefault();
+    const destination = action.pathname === '/profiles/sign-out' ? '/profiles' : '/';
+    void fetch(action, {
+      method: (submitter instanceof HTMLButtonElement && submitter.getAttribute('formmethod')) || form.method || 'POST',
+      body: new FormData(form),
+      credentials: 'same-origin',
+    }).then((response) => {
+      const finalUrl = new URL(response.url, window.location.origin);
+      const succeeded = action.pathname === '/profiles/sign-out'
+        ? finalUrl.pathname === '/profiles'
+        : finalUrl.pathname === '/';
+      if (succeeded) changeProfileSession(destination);
+      window.location.assign(finalUrl);
+    }).catch(() => HTMLFormElement.prototype.submit.call(form));
+  });
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
@@ -110,7 +164,7 @@
           <strong>Profile</strong>
           <button type="button" class="k-icon-action" data-profile-close aria-label="Close profile settings" title="Close">×</button>
         </div>
-        <form data-profile-form>
+        <form data-profile-form data-kanvas-session-form>
           <div class="k-profile-tabs" role="tablist" aria-label="Profile settings">
             <button type="button" class="k-profile-tab" data-profile-tab="profile" role="tab" aria-selected="true">Profile</button>
             <button type="button" class="k-profile-tab" data-profile-tab="settings" role="tab" aria-selected="false">Settings</button>
@@ -361,7 +415,11 @@
         this.setStatus(`PIN must be ${PROFILE_PIN_MIN_LENGTH}-${PROFILE_PIN_MAX_LENGTH} characters.`, true);
         return;
       }
-      const profilePayload = {displayName: String(data.get('displayName') || '').trim(), accent_colour: accentColour};
+      const profilePayload = {
+        expectedUserId: Number(this.getAttribute('data-user-id')),
+        displayName: String(data.get('displayName') || '').trim(),
+        accent_colour: accentColour,
+      };
       const preferredAudioLanguage = String(data.get('preferredAudioLanguage') || '').trim();
       const preferredSubtitleLanguage = String(data.get('preferredSubtitleLanguage') || '').trim();
       profilePayload.preferred_audio_language = preferredAudioLanguage || null;

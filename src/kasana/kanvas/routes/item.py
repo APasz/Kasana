@@ -12,7 +12,7 @@ from kasana.kanvas.components.poster import poster_card, poster_placeholder_art
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.components.typography import section_title
-from kasana.kanvas.profiles import SessionProfile
+from kasana.kanvas.profiles import ProfileSessions, SessionProfile
 from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
@@ -81,7 +81,6 @@ async def render_item(
                 _item_actions(
                     settings,
                     profile,
-                    catalogue,
                     item_id,
                     detail.watched,
                     detail.available,
@@ -102,7 +101,6 @@ async def render_item(
 def _item_actions(
     settings: Kanvas_Settings,
     profile: SessionProfile,
-    catalogue: KanvasKatalogService,
     item_id: int,
     initially_watched: bool,
     available: bool,
@@ -113,11 +111,29 @@ def _item_actions(
 
     watched_state = OptimisticWatchedState(initially_watched)
 
+    async def current_profile() -> SessionProfile | None:
+        """Reject a callback after another tab has selected a different profile."""
+
+        try:
+            current = await ProfileSessions(settings).current_for_page(
+                ui.context.client.request, expected_user_id=profile.user.id
+            )
+        except KatalogClientError:
+            status.set_text("Could not confirm the active profile.")
+            return None
+        if current is None:
+            status.set_text("Profile changed in another tab. Reloading…")
+            ui.navigate.to("/")
+        return current
+
     async def launch(resume: bool) -> None:
+        active_profile = await current_profile()
+        if active_profile is None:
+            return
         status.set_text("Starting playback…")
         try:
             session = await KanvasPlaybackService(
-                settings, profile.user.id
+                settings, active_profile.user.id
             ).create_item_playback_session(item_id, resume=resume)
         except KatalogClientError:
             status.set_text("Could not start playback.")
@@ -125,12 +141,15 @@ def _item_actions(
         ui.navigate.to(f"/item/{item_id}?playbackSession={session.id}&start=true")
 
     async def stop() -> None:
+        active_profile = await current_profile()
+        if active_profile is None:
+            return
         if playback_session_id is None:
             return
         status.set_text("Stopping playback…")
         try:
             stopped_session = await KanvasPlaybackService(
-                settings, profile.user.id
+                settings, active_profile.user.id
             ).close_playback_session(playback_session_id)
         except KatalogClientError:
             status.set_text("Could not stop playback.")
@@ -138,14 +157,17 @@ def _item_actions(
         ui.navigate.to(f"/item/{stopped_session.current_item_id}")
 
     async def toggle_watched() -> None:
+        active_profile = await current_profile()
+        if active_profile is None:
+            return
         watched = watched_state.toggle()
         watched_button.set_text("Mark unwatched" if watched else "Mark watched")
         status.set_text("Updating watched state…")
         try:
             if watched:
-                await catalogue.mark_watched(item_id)
+                await KanvasKatalogService(settings, active_profile.user.id).mark_watched(item_id)
             else:
-                await catalogue.clear_watched(item_id)
+                await KanvasKatalogService(settings, active_profile.user.id).clear_watched(item_id)
         except KatalogClientError:
             watched = watched_state.rollback()
             watched_button.set_text("Mark unwatched" if watched else "Mark watched")

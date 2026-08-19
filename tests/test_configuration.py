@@ -90,6 +90,34 @@ def test_kanvas_session_secret_can_be_supplied_by_managed_deployment(
     assert not (configuration_directory / "kanvas.session-secret").exists()
 
 
+def test_katalog_api_bearer_token_persists_in_an_owner_only_configuration_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration_directory = tmp_path / "configs"
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(configuration_directory))
+    monkeypatch.delenv("KASANA_KATALOG_API_BEARER_TOKEN", raising=False)
+
+    first = KatalogSettings().api_bearer_token.get_secret_value()
+    second = KatalogSettings().api_bearer_token.get_secret_value()
+    token_path = configuration_directory / "katalog.api-token"
+
+    assert first == second
+    assert token_path.read_text(encoding="utf-8").strip() == first
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+def test_katalog_api_bearer_token_can_be_supplied_by_managed_deployment(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration_directory = tmp_path / "configs"
+    configured_token = "managed-katalog-api-token-that-is-long-enough"
+    monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(configuration_directory))
+    monkeypatch.setenv("KASANA_KATALOG_API_BEARER_TOKEN", configured_token)
+
+    assert KatalogSettings().api_bearer_token.get_secret_value() == configured_token
+    assert not (configuration_directory / "katalog.api-token").exists()
+
+
 def test_kanvas_session_secret_uses_windows_acl_security_not_posix_mode_bits(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

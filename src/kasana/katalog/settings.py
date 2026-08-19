@@ -2,12 +2,13 @@
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 
 from kasana.configuration import (
     DEFAULT_KATALOG_API_HOST,
     DEFAULT_KATALOG_API_PORT,
+    katalog_api_bearer_token,
     katalog_api_url,
     user_configuration_directory,
 )
@@ -29,6 +30,9 @@ class KatalogSettings(KSettings):
     user_configuration_directory: Path = Field(default_factory=user_configuration_directory)
     api_host: str = DEFAULT_KATALOG_API_HOST
     api_port: int = Field(default=DEFAULT_KATALOG_API_PORT, ge=1, le=65535)
+    api_bearer_token: SecretStr = Field(
+        default_factory=lambda: SecretStr(katalog_api_bearer_token()), repr=False
+    )
     video_extensions: frozenset[str] = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
     probe_concurrency: int = Field(default=4, ge=1, le=16)
     ffprobe_executable: str = "ffprobe"

@@ -33,7 +33,7 @@ def _profile_form(user: UserSummary) -> None:
     with (
         ui.element("form")
         .classes("k-profile-card")
-        .props('method="post" action="/profiles/select"')
+        .props('method="post" action="/profiles/select" data-kanvas-session-form')
     ):
         ui.element("input").props(f'type="hidden" name="user_id" value="{user.id}"')
         ui.label(profile_display_name(user)).classes("k-profile-card__name")
@@ -54,7 +54,7 @@ def _bootstrap_form() -> None:
     with (
         ui.element("form")
         .classes("k-profile-bootstrap")
-        .props('method="post" action="/profiles/bootstrap"')
+        .props('method="post" action="/profiles/bootstrap" data-kanvas-session-form')
     ):
         ui.label("Create the first profile. It will be the owner.").classes(
             "k-profile-bootstrap__hint"

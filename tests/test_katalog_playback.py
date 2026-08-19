@@ -265,7 +265,11 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
     runtime = KatalogApiRuntime(settings, database)
     app.state.runtime = runtime
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://katalog.test") as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://katalog.test",
+        headers={"Authorization": f"Bearer {settings.api_bearer_token.get_secret_value()}"},
+    ) as client:
         yield PlaybackFixture(client=client, database=database, settings=settings, ids=ids)
     await runtime.close()
     database.close()
@@ -1154,7 +1158,10 @@ async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFi
     try:
         while not server.started:  # noqa: ASYNC110
             await asyncio.sleep(0.001)
-        async with KatalogClient(f"http://127.0.0.1:{socket_handle.getsockname()[1]}") as client:
+        async with KatalogClient(
+            f"http://127.0.0.1:{socket_handle.getsockname()[1]}",
+            bearer_token=playback_fixture.settings.api_bearer_token.get_secret_value(),
+        ) as client:
             launch = await client.create_playback_plan(
                 PlaybackPlanRequest(
                     user_id=playback_fixture.ids["user"],

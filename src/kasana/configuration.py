@@ -14,6 +14,8 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 _CONFIGURATION_DIRECTORY_ENVIRONMENT_VARIABLE = "KASANA_CONFIG_DIRECTORY"
 _APPLICATION_CONFIGURATION_PREFIX = "config."
 _APPLICATION_CONFIGURATION_SUFFIX = ".json"
+_KATALOG_API_BEARER_TOKEN_ENVIRONMENT_VARIABLE = "KASANA_KATALOG_API_BEARER_TOKEN"
+_KATALOG_API_BEARER_TOKEN_FILENAME = "katalog.api-token"
 DEFAULT_KATALOG_API_HOST = "127.0.0.1"
 DEFAULT_KATALOG_API_PORT = 5373
 
@@ -50,25 +52,45 @@ def kanvas_session_secret() -> str:
     """
 
     path = configuration_directory() / "kanvas.session-secret"
+    return _load_private_secret(path, f"Kanvas session secret at {path}")
+
+
+def katalog_api_bearer_token() -> str:
+    """Load Katalog's API credential, creating a private local value when needed."""
+
+    configured_token = os.environ.get(_KATALOG_API_BEARER_TOKEN_ENVIRONMENT_VARIABLE)
+    if configured_token is not None:
+        return _require_secret_length(
+            configured_token.strip(), _KATALOG_API_BEARER_TOKEN_ENVIRONMENT_VARIABLE
+        )
+    path = configuration_directory() / _KATALOG_API_BEARER_TOKEN_FILENAME
+    return _load_private_secret(path, f"Katalog API token at {path}")
+
+
+def _load_private_secret(path: Path, description: str) -> str:
     try:
         secret = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        return _create_kanvas_session_secret(path)
+        return _create_private_secret(path, description)
     _require_owner_only_file(path)
-    if len(secret) < 32:
-        raise ValueError(f"Kanvas session secret at {path} must be at least 32 characters.")
-    return secret
+    return _require_secret_length(secret, description)
 
 
-def _create_kanvas_session_secret(path: Path) -> str:
+def _create_private_secret(path: Path, description: str) -> str:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     secret = token_urlsafe(32)
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        return kanvas_session_secret()
+        return _load_private_secret(path, description)
     with os.fdopen(descriptor, "w", encoding="utf-8") as secret_file:
         secret_file.write(f"{secret}\n")
+    return secret
+
+
+def _require_secret_length(secret: str, description: str) -> str:
+    if len(secret) < 32:
+        raise ValueError(f"{description} must be at least 32 characters.")
     return secret
 
 

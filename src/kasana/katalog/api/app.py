@@ -7,10 +7,11 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from hmac import compare_digest
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Path, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -150,8 +151,9 @@ def create_app(
         docs_url="/api/v1/docs",
         redoc_url=None,
         lifespan=lifespan,
-        dependencies=[Depends(optional_bearer_token)],
+        dependencies=[Depends(require_bearer_token)],
     )
+    app.state.api_bearer_token = settings.api_bearer_token.get_secret_value()
     app.middleware("http")(_request_context)
     _install_exception_handlers(app)
 
@@ -1474,16 +1476,34 @@ async def _runtime(request: Request) -> KatalogApiRuntime:
     return cast("KatalogApiRuntime", request.app.state.runtime)
 
 
-async def optional_bearer_token(
+async def require_bearer_token(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> str | None:
-    """Parse a future bearer token once, without making authentication mandatory."""
-    if authorization is None:
+    """Require the local API credential except for opaque media capabilities."""
+
+    if _api_path_uses_opaque_capability(request.url.path):
         return None
+    if authorization is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required.")
     scheme, _, token = authorization.partition(" ")
     if scheme.casefold() != "bearer" or not token:
-        raise CatalogueValidationError("Authorization must use a bearer token.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization must use a bearer token.",
+        )
+    expected_token = cast(str, request.app.state.api_bearer_token)
+    if not compare_digest(token, expected_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token.")
     return token
+
+
+def _api_path_uses_opaque_capability(path: str) -> bool:
+    """Allow media URLs whose unguessable access token is their credential."""
+
+    return path == "/api/v1/health" or path.startswith(
+        ("/api/v1/media/", "/api/v1/subtitles/", "/api/v1/downloads/")
+    )
 
 
 async def _request_context(

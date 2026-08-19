@@ -10,11 +10,12 @@ import pytest
 from nicegui.client import Client
 from nicegui.element import Element
 from nicegui.page import page
+from pydantic import HttpUrl
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 
 from kasana.kanvas import dashboard
-from kasana.kanvas.profiles import ProfileSessions, SessionProfile
+from kasana.kanvas.profiles import ProfileSessionRegistry, ProfileSessions, SessionProfile
 from kasana.kanvas.routes.profiles import render_profile_selection
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.api.contracts import (
@@ -74,12 +75,13 @@ def test_session_cookie_configuration_is_signed_http_only_and_same_site() -> Non
     middleware = SessionMiddleware(
         app=_asgi_app,
         secret_key=settings.session_secret,
-        session_cookie="kanvas_session",
+        session_cookie=settings.effective_session_cookie_name,
+        max_age=settings.session_max_age_seconds,
         same_site="lax",
         https_only=settings.session_cookie_secure,
     )
 
-    assert middleware.session_cookie == "kanvas_session"
+    assert middleware.session_cookie == settings.effective_session_cookie_name
     assert middleware.security_flags.startswith("httponly; samesite=lax")
 
 
@@ -106,6 +108,34 @@ async def test_selected_profile_persists_and_switches_without_sharing_identity(
         (first.id, UserAuthentication(pin=None)),
         (second.id, UserAuthentication(pin="2468")),
     ]
+
+
+async def test_switching_profiles_revokes_stale_page_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _profile(3), _profile(8)
+    client = _ProfileClient((first, second))
+    sessions = ProfileSessions(Kanvas_Settings(), registry=ProfileSessionRegistry())
+    monkeypatch.setattr(sessions, "_client", lambda: client)
+    browser_session: dict[str, object] = {}
+
+    await sessions.start(_request(browser_session), user_id=first.id, pin=None)
+    stale_page_session = dict(browser_session)
+    await sessions.start(_request(browser_session), user_id=second.id, pin=None)
+
+    assert await sessions.current(_request(stale_page_session)) is None
+    current = await sessions.current(_request(browser_session))
+    assert current is not None
+    assert current.user.id == second.id
+
+
+def test_katalog_scoped_cookie_names_do_not_collide() -> None:
+    first = Kanvas_Settings(katalog_url=HttpUrl("http://127.0.0.1:5373"))
+    second = Kanvas_Settings(katalog_url=HttpUrl("http://127.0.0.1:5374"))
+    alternate_kanvas = Kanvas_Settings(port=5371)
+
+    assert first.effective_session_cookie_name != second.effective_session_cookie_name
+    assert first.effective_session_cookie_name != alternate_kanvas.effective_session_cookie_name
 
 
 async def test_disabled_profile_clears_a_previous_browser_session(
@@ -259,12 +289,17 @@ async def test_profile_dashboard_session_and_administration_actions(
             2, cast(Request, JsonRequest({"displayName": "Two", "role": "admin"}))
         )
     ).status_code == 200
+    switched_profile_response = await dashboard.update_current_profile(
+        cast(Request, JsonRequest({"expectedUserId": 2, "displayName": "Wrong profile"}))
+    )
+    assert switched_profile_response.status_code == 409
     assert (
         await dashboard.update_current_profile(
             cast(
                 Request,
                 JsonRequest(
                     {
+                        "expectedUserId": owner.user.id,
                         "displayName": "Owner",
                         "pin": "1357",
                         "accent_colour": "#336699",
@@ -282,7 +317,7 @@ async def test_profile_dashboard_session_and_administration_actions(
     assert current_profile_update.autoplay_on_resume is True
     assert (
         await dashboard.update_current_profile(
-            cast(Request, JsonRequest({"pin": None})),
+            cast(Request, JsonRequest({"expectedUserId": owner.user.id, "pin": None})),
         )
     ).status_code == 200
     cleared_pin_update = update_requests[-1][1]

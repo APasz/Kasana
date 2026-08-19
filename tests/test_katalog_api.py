@@ -243,10 +243,28 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
     runtime = KatalogApiRuntime(settings, database)
     app.state.runtime = runtime
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://katalog.test") as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://katalog.test",
+        headers={"Authorization": f"Bearer {settings.api_bearer_token.get_secret_value()}"},
+    ) as client:
         yield ApiFixture(client, runtime, settings, database)
     await runtime.close()
     database.close()
+
+
+async def test_api_rejects_invalid_bearer_tokens_but_keeps_health_public(
+    api_fixture: ApiFixture,
+) -> None:
+    rejected = await api_fixture.client.get(
+        "/api/v1/users", headers={"Authorization": "Bearer invalid-token"}
+    )
+    health = await api_fixture.client.get(
+        "/api/v1/health", headers={"Authorization": "Bearer invalid-token"}
+    )
+
+    assert rejected.status_code == 401
+    assert health.status_code == 200
 
 
 async def test_library_pagination_is_stable_and_filters_are_server_side(
@@ -1444,7 +1462,10 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
     try:
         while not server.started:  # noqa: ASYNC110
             await asyncio.sleep(0.001)
-        async with KatalogClient(f"http://127.0.0.1:{port}") as client:
+        async with KatalogClient(
+            f"http://127.0.0.1:{port}",
+            bearer_token=api_fixture.settings.api_bearer_token.get_secret_value(),
+        ) as client:
             assert (await client.health()).status == "ok"
             assert (await client.browse_library_directories()).path
             assert (await client.list_users())[0].username == "tester"

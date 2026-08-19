@@ -40,6 +40,10 @@ Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
 temporarily override non-secret preferences for deployment. Kanvas generates a persistent
 `configs/kanvas.session-secret` with mode `0600` on its first start (or accepts
 `KASANA_KANVAS_SESSION_SECRET` for managed deployments); preserve that secret across restarts.
+Katalog similarly generates `configs/katalog.api-token` with mode `0600`. Its clients use that
+credential automatically when they share the configuration directory. A remote Kestrel client
+must be given the same value through `KASANA_KATALOG_API_BEARER_TOKEN`; do not expose Katalog's
+API without this credential.
 
 Start the API with `uv run kasana-katalog-api`; its documentation is at
 <http://127.0.0.1:5373/api/v1/docs>. Change its bind address in

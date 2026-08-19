@@ -13,6 +13,7 @@ from typing import TypedDict, Unpack, cast
 import aiohttp
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from kasana.configuration import katalog_api_bearer_token
 from kasana.katalog.api.contracts import (
     APIError,
     ArtworkFetchRequest,
@@ -223,7 +224,9 @@ class KatalogClient:
             msg = "Katalog max_idempotent_retries must be between 0 and 5."
             raise ValueError(msg)
         self._base_url = base_url.rstrip("/")
-        self._bearer_token = bearer_token
+        self._bearer_token = (
+            bearer_token if bearer_token is not None else katalog_api_bearer_token()
+        )
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._media_timeout = aiohttp.ClientTimeout(
             total=None,
@@ -1035,8 +1038,7 @@ class KatalogClient:
     ) -> _ClientResponse:
         session = await self._get_session()
         request_headers = dict(headers or {})
-        if self._bearer_token is not None:
-            request_headers["Authorization"] = f"Bearer {self._bearer_token}"
+        request_headers["Authorization"] = f"Bearer {self._bearer_token}"
         attempts = self._max_idempotent_retries if method == "GET" and retry else 0
         for attempt in range(attempts + 1):
             try:
@@ -1094,8 +1096,7 @@ class KatalogClient:
         headers: dict[str, str] = {}
         if range_header is not None:
             headers["Range"] = range_header
-        if self._bearer_token is not None:
-            headers["Authorization"] = f"Bearer {self._bearer_token}"
+        headers["Authorization"] = f"Bearer {self._bearer_token}"
         try:
             async with session.get(
                 self._base_url + path, headers=headers, timeout=self._media_timeout
