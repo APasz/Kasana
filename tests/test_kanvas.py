@@ -3708,6 +3708,15 @@ async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
         async def close_playback_session(self, _session_id: str) -> object:
             return SimpleNamespace(current_item_id=8)
 
+    class PlaybackProfileSessions:
+        def __init__(self, *_arguments: object) -> None:
+            pass
+
+        async def current_for_page(
+            self, _request: object, *, expected_user_id: int
+        ) -> SessionProfile | None:
+            return profile if expected_user_id == profile.user.id else None
+
     def action(
         label: str,
         handler: object | None = None,
@@ -3719,24 +3728,26 @@ async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
         return Action()
 
     monkeypatch.setattr(item_route, "KanvasPlaybackService", PlaybackService)
+    monkeypatch.setattr(item_route, "ProfileSessions", PlaybackProfileSessions)
     monkeypatch.setattr(item_route, "action_button", action)
     monkeypatch.setattr(item_route.ui.navigate, "to", destinations.append)
 
-    with Client(page("")):
+    with Client(
+        page(""), request=Request({"type": "http", "path": "/item/7", "headers": []})
+    ):
         item_route._item_actions(  # pyright: ignore[reportPrivateUsage]
             Kanvas_Settings(),
             profile,
-            cast(KanvasKatalogService, object()),
             item_id=7,
             initially_watched=False,
             available=True,
             status=cast(Label, Action()),
             playback_session_id="s" * 32,
         )
+        assert stop_handler is not None
+        assert callable(stop_handler)
+        await stop_handler()
 
-    assert stop_handler is not None
-    assert callable(stop_handler)
-    await stop_handler()
     assert destinations == ["/item/8"]
 
 

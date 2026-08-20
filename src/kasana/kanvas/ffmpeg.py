@@ -68,9 +68,10 @@ async def start_fragmented_mp4(
         "error",
         "-nostdin",
     ]
-    command.extend(("-i", input_url))
+    # Input seeking lets FFmpeg use the media index instead of reading every prior packet.
     if start_seconds > 0:
         command.extend(("-ss", f"{start_seconds:.3f}"))
+    command.extend(("-i", input_url))
     command.extend(
         (
             "-map",

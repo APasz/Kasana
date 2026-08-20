@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 from fastapi import HTTPException
 from nicegui.client import Client
+from nicegui.element import Element
 from nicegui.page import page
 from starlette.requests import Request
 
@@ -59,6 +60,12 @@ def _entry(
             "audio_streams": [{"codec": audio_codec, "language": "en"}],
         }
     )
+
+
+def _element_props(element: Element) -> dict[str, object]:
+    """Expose NiceGUI's internal test-only rendered attributes."""
+
+    return cast(dict[str, object], element._props)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_h264_aac_mp4_direct_play_and_mkv_remux() -> None:
@@ -233,8 +240,8 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
     assert isinstance(result, FragmentedMp4Stream)
     assert ["-c:v", "copy"] == launched[launched.index("-c:v") : launched.index("-c:v") + 2]
     assert ["-c:a", "aac"] == launched[launched.index("-c:a") : launched.index("-c:a") + 2]
-    assert ["-i", "http://katalog.test/api/v1/media/token", "-ss", "42.500"] == launched[
-        launched.index("-i") : launched.index("-ss") + 2
+    assert ["-ss", "42.500", "-i", "http://katalog.test/api/v1/media/token"] == launched[
+        launched.index("-ss") : launched.index("-i") + 2
     ]
     assert "pipe:1" in launched
 
@@ -848,7 +855,7 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
     fullscreen_next_controls = [
         element
         for element in client.elements.values()
-        if element._props.get("data-player-action") == "next"  # pyright: ignore[reportPrivateUsage]
+        if _element_props(element).get("data-player-action") == "next"
     ]
     assert len(fullscreen_next_controls) == 1
     assert "k-player__control--next" in fullscreen_next_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
