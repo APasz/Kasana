@@ -15,6 +15,7 @@ from kasana.shared.metadata import (
     ArtworkReference,
     MovieDetails,
     ProviderCapability,
+    ProviderMediaKind,
     ProviderReference,
     SearchQuery,
     SearchResult,
@@ -52,6 +53,14 @@ class ArtworkStreamingProvider(MetadataProvider, Protocol):
         *,
         maximum_size_bytes: int,
     ) -> ArtworkDownload: ...
+
+
+class PosterArtworkProvider(MetadataProvider, Protocol):
+    """Optional provider capability for gallery-ready poster variants."""
+
+    async def list_posters(
+        self, reference: ProviderReference, media_kind: ProviderMediaKind
+    ) -> tuple[ArtworkReference, ...]: ...
 
 
 async def fetch_details(

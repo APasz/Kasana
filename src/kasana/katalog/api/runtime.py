@@ -133,12 +133,12 @@ class KatalogApiRuntime:
         return await self._with_provider(operation)
 
     async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
-        """Fetch the accepted metadata poster for one library item."""
+        """Fetch bounded poster choices for one matched library item."""
 
         async def operation(
             workflow: MetadataWorkflow, providers: tuple[MetadataProvider, ...]
         ) -> tuple[ArtworkSelection, ...]:
-            await workflow.fetch_posters(providers, item_id=item_id)
+            await workflow.fetch_posters(providers, item_id=item_id, include_variants=True)
             return await run_blocking(self.queries.list_artwork, item_id)
 
         return await self._with_provider(operation)

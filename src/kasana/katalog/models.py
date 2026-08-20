@@ -680,6 +680,17 @@ class CachedArtwork(Base):
     provider_revision: Mapped[str] = mapped_column(String, nullable=False)
     source_url: Mapped[str] = mapped_column(String, nullable=False)
     attribution: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String(32))
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    vote_average: Mapped[float | None] = mapped_column(Float)
+    vote_count: Mapped[int | None] = mapped_column(Integer)
+    is_primary: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=false()
+    )
+    display_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     cache_relative_path: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)

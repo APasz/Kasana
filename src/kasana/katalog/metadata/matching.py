@@ -242,9 +242,13 @@ class MetadataWorkflow:
         *,
         root_id: int | None = None,
         item_id: int | None = None,
+        include_variants: bool = False,
     ) -> tuple[ArtworkCacheView, ...]:
         return await self.artwork.fetch_posters(
-            tuple(providers), root_id=root_id, item_id=item_id
+            tuple(providers),
+            root_id=root_id,
+            item_id=item_id,
+            include_variants=include_variants,
         )
 
     async def prune_artwork(self) -> tuple[int, int]:

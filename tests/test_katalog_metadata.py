@@ -49,13 +49,16 @@ class _FakeProvider:
         results: tuple[SearchResult, ...],
         details: dict[str, MovieDetails | SeriesDetails],
         artwork: ArtworkContent | None = None,
+        posters: tuple[ArtworkReference, ...] = (),
     ) -> None:
         self.results = results
         self.details = details
         self.artwork = artwork
+        self.posters = posters
         self.search_calls = 0
         self.last_search_query: SearchQuery | None = None
         self.artwork_calls = 0
+        self.poster_list_calls = 0
 
     @property
     def capabilities(self) -> frozenset[ProviderCapability]:
@@ -89,6 +92,14 @@ class _FakeProvider:
         self.artwork_calls += 1
         assert self.artwork is not None
         return self.artwork
+
+    async def list_posters(
+        self, reference: ProviderReference, media_kind: ProviderMediaKind
+    ) -> tuple[ArtworkReference, ...]:
+        assert reference.provider == self.provider_name
+        assert media_kind is ProviderMediaKind.MOVIE
+        self.poster_list_calls += 1
+        return self.posters
 
 
 def _search_result(
@@ -478,6 +489,7 @@ async def test_artwork_cache_deduplicates_and_prunes_unmatched_records(
 
     assert len(first) == len(second) == 1
     assert provider.artwork_calls == 1
+    assert provider.poster_list_calls == 0
     cache_path = tmp_path / "cache" / first[0].cache_path
     assert cache_path.is_file()
 
@@ -487,6 +499,99 @@ async def test_artwork_cache_deduplicates_and_prunes_unmatched_records(
     assert (removed_files, removed_bytes) == (1, len(artwork_content.content))
     assert not cache_path.exists()
     assert database.run_transaction(lambda session: session.scalar(select(CachedArtwork))) is None
+
+
+async def test_artwork_cache_fetches_ordered_poster_variants_for_one_shared_picker(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    item_id = _create_movie(database, tmp_path / "Movies", title="Paprika", year=2006)
+    primary = _poster_reference("/primary.png")
+    obsolete = _poster_reference("/obsolete.png")
+    fresh = _poster_reference("/fresh.png")
+    japanese = ArtworkReference(
+        provider="fake",
+        kind=ArtworkKind.POSTER,
+        raw_path="/japanese.png",
+        source_url=AnyHttpUrl("https://images.example.test/japanese.png"),
+        language="ja",
+        width=1000,
+        height=1500,
+        vote_average=8.7,
+        vote_count=50,
+    )
+    english_primary = ArtworkReference(
+        provider="fake",
+        kind=ArtworkKind.POSTER,
+        raw_path="/primary.png",
+        source_url=AnyHttpUrl("https://images.example.test/primary.png"),
+        language="en",
+        width=2000,
+        height=3000,
+        vote_average=8.1,
+        vote_count=200,
+    )
+    artwork_content = ArtworkContent(
+        reference=primary,
+        content=b"\x89PNG\r\n\x1a\nminimal",
+        media_type="image/png",
+    )
+    provider = _FakeProvider(
+        (_search_result("51", "Paprika", year=2006, poster=primary),),
+        {"51": _movie_details("51", "Paprika", year=2006, poster=primary)},
+        artwork_content,
+        posters=(obsolete, japanese, english_primary),
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.search_item(item_id, (provider,))
+    cached = await workflow.fetch_posters((provider,), item_id=item_id, include_variants=True)
+
+    assert len(cached) == 3
+    assert provider.poster_list_calls == 1
+    assert provider.artwork_calls == 3
+
+    def records(session: Session) -> tuple[CachedArtwork, ...]:
+        return tuple(
+            session.scalars(
+                select(CachedArtwork)
+                .where(CachedArtwork.library_item_id == item_id)
+                .order_by(CachedArtwork.display_order)
+            )
+        )
+
+    primary_record, obsolete_record, japanese_record = database.run_transaction(records)
+    assert primary_record.is_primary is True
+    assert primary_record.display_order == 0
+    assert (primary_record.language, primary_record.width, primary_record.height) == (
+        "en",
+        2000,
+        3000,
+    )
+    assert (primary_record.vote_average, primary_record.vote_count) == (8.1, 200)
+    assert japanese_record.is_primary is False
+    assert japanese_record.display_order == 2
+    assert japanese_record.language == "ja"
+
+    def select_japanese(session: Session) -> None:
+        item = session.get(Zaisan, item_id)
+        assert item is not None
+        item.selected_artwork_ids = {"poster": japanese_record.id}
+
+    database.run_transaction(select_japanese)
+    obsolete_path = tmp_path / "cache" / obsolete_record.cache_relative_path
+    provider.posters = (english_primary, fresh)
+
+    await workflow.fetch_posters((provider,), item_id=item_id, include_variants=True)
+    await workflow.fetch_posters((provider,), item_id=item_id)
+
+    assert provider.poster_list_calls == 2
+    assert provider.artwork_calls == 4
+    records_by_revision = {
+        record.provider_revision: record for record in database.run_transaction(records)
+    }
+    assert set(records_by_revision) == {"/primary.png", "/japanese.png", "/fresh.png"}
+    assert records_by_revision["/japanese.png"].id == japanese_record.id
+    assert not obsolete_path.exists()
 
 
 async def test_artwork_cache_fetches_only_the_requested_item(

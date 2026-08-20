@@ -78,6 +78,27 @@ class TMDBSeriesSearchPage(BaseModel):
     results: tuple[TMDBSeriesSearchEntry, ...]
 
 
+class TMDBImagePayload(BaseModel):
+    """One image variant returned by TMDB's title artwork endpoints."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    file_path: str = Field(min_length=1)
+    language: str | None = Field(default=None, alias="iso_639_1", max_length=32)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    vote_average: float = Field(ge=0, le=10)
+    vote_count: int = Field(ge=0)
+
+
+class TMDBImagesPayload(BaseModel):
+    """Poster variants associated with one movie or series."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    posters: tuple[TMDBImagePayload, ...] = ()
+
+
 class TMDBMoviePayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

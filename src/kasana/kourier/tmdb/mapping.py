@@ -11,6 +11,7 @@ from kasana.kourier.tmdb.payloads import (
     TMDBEpisodePayload,
     TMDBExternalIDs,
     TMDBGenre,
+    TMDBImagePayload,
     TMDBMovieSearchEntry,
     TMDBSeriesSearchEntry,
 )
@@ -41,6 +42,27 @@ def artwork(
         kind=kind,
         raw_path=path,
         source_url=AnyHttpUrl(str(URL(str(image_base_url).rstrip("/")) / path.lstrip("/"))),
+    )
+
+
+def poster_artwork(
+    image: TMDBImagePayload, image_base_url: AnyHttpUrl, *, is_primary: bool = False
+) -> ArtworkReference:
+    """Map one TMDB poster variant while retaining useful picker details."""
+
+    return ArtworkReference(
+        provider=TMDB_PROVIDER,
+        kind=ArtworkKind.POSTER,
+        raw_path=image.file_path,
+        source_url=AnyHttpUrl(
+            str(URL(str(image_base_url).rstrip("/")) / image.file_path.lstrip("/"))
+        ),
+        language=image.language,
+        width=image.width,
+        height=image.height,
+        vote_average=image.vote_average,
+        vote_count=image.vote_count,
+        is_primary=is_primary,
     )
 
 

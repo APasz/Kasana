@@ -4009,8 +4009,10 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "data-item-editor-tab-panel" in javascript
     assert "metadata-search-source" in javascript
     assert "artwork-fetch-source" in javascript
-    assert "Fetch poster from current match" in javascript
+    assert "Load poster choices" in javascript
     assert "data-item-artwork-fetch" in javascript
+    assert "Provider default" in javascript
+    assert "k-item-editor__artwork-group" in css
     assert "Apply selected match" in javascript
     assert "tmdbEntryReferenceFromUrl" in javascript
     assert "selectMetadataMatchResult" in javascript

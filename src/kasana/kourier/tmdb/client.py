@@ -23,11 +23,13 @@ from kasana.kourier.tmdb.mapping import (
     external_ids,
     genres,
     movie_search_result,
+    poster_artwork,
     reference,
     series_search_result,
 )
 from kasana.kourier.tmdb.payloads import (
     TMDBEpisodePayload,
+    TMDBImagesPayload,
     TMDBMoviePayload,
     TMDBMovieSearchPage,
     TMDBSeasonPayload,
@@ -54,6 +56,7 @@ from kasana.shared.metadata import (
     MovieDetails,
     ProviderCapability,
     ProviderErrorCategory,
+    ProviderMediaKind,
     ProviderReference,
     SearchQuery,
     SearchResult,
@@ -98,6 +101,7 @@ class TMDBProvider:
                 ProviderCapability.GET_SEASON,
                 ProviderCapability.GET_EPISODE,
                 ProviderCapability.GET_ARTWORK,
+                ProviderCapability.LIST_POSTERS,
             }
         )
 
@@ -223,6 +227,36 @@ class TMDBProvider:
         )
         episode: TMDBEpisodePayload = self._parse_payload(TMDBEpisodePayload, payload)
         return episode_details(episode, reference(series_id), self.settings.image_base_url)
+
+    async def list_posters(
+        self, item_reference: ProviderReference, media_kind: ProviderMediaKind
+    ) -> tuple[ArtworkReference, ...]:
+        """Return TMDB poster variants in a stable preference order."""
+
+        raw_id = self._tmdb_id(item_reference)
+        if media_kind is ProviderMediaKind.MOVIE:
+            endpoint = "movie"
+        elif media_kind is ProviderMediaKind.SERIES:
+            endpoint = "tv"
+        else:
+            raise request_error("TMDB poster variants require a movie or series reference.")
+        payload = await self._request_json((endpoint, raw_id, "images"), self._common_params())
+        images: TMDBImagesPayload = self._parse_payload(TMDBImagesPayload, payload)
+        preferred_language = self.settings.language.partition("-")[0].lower()
+        variants = tuple(
+            poster_artwork(image, self.settings.image_base_url) for image in images.posters
+        )
+        return tuple(
+            sorted(
+                variants,
+                key=lambda artwork: (
+                    0 if artwork.language == preferred_language else 1,
+                    -(artwork.vote_count or 0),
+                    -(artwork.vote_average or 0),
+                    artwork.raw_path,
+                ),
+            )
+        )
 
     async def get_artwork(self, item_reference: ArtworkReference) -> ArtworkContent:
         self._validate_artwork_reference(item_reference)

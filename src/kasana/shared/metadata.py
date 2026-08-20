@@ -29,6 +29,7 @@ class ProviderCapability(StrEnum):
     GET_SEASON = "get_season"
     GET_EPISODE = "get_episode"
     GET_ARTWORK = "get_artwork"
+    LIST_POSTERS = "list_posters"
 
 
 class ProviderErrorCategory(StrEnum):
@@ -74,6 +75,11 @@ class ArtworkReference(BaseModel):
     raw_path: str = Field(min_length=1, max_length=500)
     source_url: AnyHttpUrl | None = None
     language: str | None = Field(default=None, max_length=32)
+    width: int | None = Field(default=None, ge=1, le=20_000)
+    height: int | None = Field(default=None, ge=1, le=20_000)
+    vote_average: float | None = Field(default=None, ge=0, le=10)
+    vote_count: int | None = Field(default=None, ge=0)
+    is_primary: bool = False
 
 
 class ArtworkContent(BaseModel):

@@ -9,6 +9,7 @@ from typing import Annotated, ClassVar, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kasana.katalog.limits import (
+    MAX_ARTWORK_PER_ITEM,
     MAX_PLAYBACK_QUEUE_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
@@ -294,6 +295,13 @@ class ArtworkSelection(APIModel):
     url: str = Field(pattern=r"^/api/v1/library/items/\d+/artwork/\d+$")
     content_type: str = Field(min_length=1, max_length=100)
     size_bytes: int = Field(ge=0)
+    language: str | None = Field(default=None, max_length=32)
+    width: int | None = Field(default=None, ge=1, le=20_000)
+    height: int | None = Field(default=None, ge=1, le=20_000)
+    vote_average: float | None = Field(default=None, ge=0, le=10)
+    vote_count: int | None = Field(default=None, ge=0)
+    is_primary: bool = False
+    display_order: int = Field(default=0, ge=0)
 
 
 class SelectedArtwork(APIModel):
@@ -317,7 +325,7 @@ class LibraryItemSummary(APIModel):
     context_label: str | None = Field(default=None, min_length=1, max_length=80)
     availability: Availability
     tags: tuple[str, ...] = Field(default=(), max_length=50)
-    artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=10)
+    artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=MAX_ARTWORK_PER_ITEM)
 
 
 class ItemCollectionReference(APIModel):

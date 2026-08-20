@@ -352,7 +352,7 @@ class KanvasKatalogService:
             return await client.search_metadata(item_id, query=query)
 
     async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
-        """Fetch the accepted metadata poster and return the item's cached artwork."""
+        """Fetch shared poster choices and return the item's cached artwork."""
 
         async with self._client() as client:
             return await client.fetch_library_item_artwork(item_id)

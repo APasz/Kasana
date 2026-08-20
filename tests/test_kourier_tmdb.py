@@ -250,6 +250,46 @@ async def test_successful_search_and_detail_mapping() -> None:
     assert session.calls[0][1]["year"] == "2001"
 
 
+async def test_poster_variants_prefer_the_configured_language_and_keep_picker_metadata() -> None:
+    provider, session = _provider(
+        [
+            _json_response(
+                {
+                    "posters": [
+                        {
+                            "file_path": "/japanese.jpg",
+                            "iso_639_1": "ja",
+                            "width": 1000,
+                            "height": 1500,
+                            "vote_average": 9.0,
+                            "vote_count": 500,
+                        },
+                        {
+                            "file_path": "/english.jpg",
+                            "iso_639_1": "en",
+                            "width": 2000,
+                            "height": 3000,
+                            "vote_average": 7.5,
+                            "vote_count": 20,
+                        },
+                    ]
+                }
+            )
+        ]
+    )
+
+    posters = await provider.list_posters(
+        ProviderReference(provider="tmdb", raw_id="11"), ProviderMediaKind.MOVIE
+    )
+
+    assert [poster.raw_path for poster in posters] == ["/english.jpg", "/japanese.jpg"]
+    assert posters[0].language == "en"
+    assert (posters[0].width, posters[0].height) == (2000, 3000)
+    assert (posters[0].vote_average, posters[0].vote_count) == (7.5, 20)
+    assert str(posters[0].source_url) == "https://images.tmdb.test/original/english.jpg"
+    assert session.calls[0][0].path == "/3/movie/11/images"
+
+
 async def test_malformed_payload_is_a_typed_error() -> None:
     provider, _ = _provider([_json_response({"results": [{"id": 1}]})])
 

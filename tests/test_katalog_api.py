@@ -740,6 +740,48 @@ async def test_item_etags_routes_and_no_filesystem_paths_leak(
     ).status_code == 304
 
 
+async def test_shared_poster_selection_precedes_automatic_artwork(
+    api_fixture: ApiFixture,
+) -> None:
+    def add_variant(session: Session) -> int:
+        item = session.get(Zaisan, 1)
+        assert item is not None
+        variant = CachedArtwork(
+            library_item_id=item.id,
+            provider="fixture",
+            provider_id="alpha",
+            artwork_kind=CachedArtworkKind.POSTER,
+            provider_revision="variant-ja",
+            source_url="https://example.test/poster-ja.jpg",
+            attribution="fixture",
+            language="ja",
+            width=1000,
+            height=1500,
+            vote_average=8.4,
+            vote_count=42,
+            is_primary=False,
+            display_order=1,
+            content_type="image/jpeg",
+            cache_relative_path="poster-ja.jpg",
+            size_bytes=7,
+            downloaded_at=datetime.now(UTC),
+        )
+        session.add(variant)
+        session.flush()
+        item.selected_artwork_ids = {"poster": variant.id}
+        return variant.id
+
+    selected_id = api_fixture.database.run_transaction(add_variant)
+
+    detail = (await api_fixture.client.get("/api/v1/library/items/1")).json()
+    choices = (await api_fixture.client.get("/api/v1/library/items/1/artwork")).json()
+
+    assert detail["artwork"][0]["id"] == selected_id
+    assert detail["artwork"][0]["language"] == "ja"
+    assert [choice["display_order"] for choice in choices] == [0, 1]
+    assert choices[1]["language"] == "ja"
+
+
 async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     expected_gets = (
         "/api/v1/health",
@@ -1079,8 +1121,10 @@ async def test_seeded_library_deployment_smoke_path(
             *,
             root_id: int | None = None,
             item_id: int | None = None,
+            include_variants: bool = False,
         ) -> tuple[object, ...]:
             assert (root_id, item_id) in {(1, None), (None, 1)}
+            assert include_variants is (item_id is not None)
             return (object(),)
 
     async def with_fake_provider(operation: Callable[..., Awaitable[object]]) -> object:

@@ -2376,9 +2376,9 @@
 
     renderArtworkTab(artworkRows, kind, binding) {
       const fetchControl = ITEM_EDITOR_MATCHABLE_KINDS.has(kind) && binding
-        ? `<div class="k-action-row"><button type="button" class="k-button" data-item-artwork-fetch>Fetch poster from current match</button></div><p class="k-item-editor__muted">Downloads the current poster for the selected database record, then lets you choose it below.</p><div class="k-picker__status" data-item-artwork-status aria-live="polite"></div>`
+        ? `<div class="k-action-row"><button type="button" class="k-button" data-item-artwork-fetch>Load poster choices</button></div><div class="k-picker__status" data-item-artwork-status aria-live="polite"></div>`
         : '';
-      return `<section class="k-item-editor__section">${fetchControl}<p class="k-item-editor__muted">Choose a cached image or let Kasana select artwork automatically.</p><div class="k-item-editor__artwork-grid" data-item-editor-artwork-grid>${artworkRows}</div></section>`;
+      return `<section class="k-item-editor__section">${fetchControl}<div class="k-item-editor__artwork-grid" data-item-editor-artwork-grid>${artworkRows}</div></section>`;
     }
 
     bindArtworkFetchControl(content) {
@@ -2391,7 +2391,7 @@
           return;
         }
         button.disabled = true;
-        status.textContent = 'Fetching poster from the current match…';
+        status.textContent = 'Loading poster choices from the current match…';
         try {
           const response = await fetch(source, {
             method: 'POST',
@@ -2411,8 +2411,8 @@
           const artworkKinds = [...new Set(payload.artwork.map((artwork) => artwork.kind))];
           grid.innerHTML = this.renderArtworkRows(payload.artwork, artworkKinds, selected);
           status.textContent = payload.artwork.length
-            ? 'Poster fetch complete. Choose an image below, then save local edits.'
-            : 'No poster was available for the current metadata match.';
+            ? `${payload.artwork.length} poster choice${payload.artwork.length === 1 ? '' : 's'} loaded. Choose one below, then save local edits.`
+            : 'No posters were available for the current metadata match.';
         } catch (error) {
           status.textContent = error?.message || 'Artwork could not be fetched.';
         } finally {
@@ -2629,15 +2629,27 @@
     renderArtworkRows(artworks, artworkKinds, selected) {
       if (!artworks.length) return '<p class="k-quiet-copy">No cached artwork is available to select.</p>';
       return artworkKinds.map((kind) => {
-        const automatic = `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(kind)}" value="" data-artwork-kind="${escapeHtml(kind)}"${selected.has(kind) ? '' : ' checked'}><span>Automatic ${escapeHtml(kind)}</span></label>`;
-        const choices = artworks.filter((artwork) => artwork.kind === kind).map((artwork) => {
-          const artworkUrl = typeof artwork.url === 'string'
-            ? artwork.url.replace(/^\/api\/v1\/library\/items\/(\d+)\/artwork\/(\d+)$/, '/kanvas/artwork/$1/$2')
-            : null;
-          const image = artworkUrl && localArtworkUrl(artworkUrl) ? `<img src="${escapeHtml(artworkUrl)}" alt="">` : '';
-          return `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(artwork.kind)}" value="${artwork.id}" data-artwork-kind="${escapeHtml(artwork.kind)}"${selected.get(artwork.kind) === artwork.id ? ' checked' : ''}><span>${image}${escapeHtml(artwork.kind)} #${artwork.id}</span></label>`;
-        }).join('');
-        return automatic + choices;
+        const choicesForKind = artworks.filter((artwork) => artwork.kind === kind);
+        const primary = choicesForKind.find((artwork) => artwork.is_primary) || choicesForKind[0];
+        const artworkUrl = (artwork) => typeof artwork?.url === 'string'
+          ? artwork.url.replace(/^\/api\/v1\/library\/items\/(\d+)\/artwork\/(\d+)$/, '/kanvas/artwork/$1/$2')
+          : null;
+        const image = (artwork) => {
+          const url = artworkUrl(artwork);
+          return url && localArtworkUrl(url)
+            ? `<img src="${escapeHtml(url)}" alt="" loading="lazy" decoding="async">`
+            : '<span class="k-item-editor__artwork-placeholder" aria-hidden="true"></span>';
+        };
+        const details = (artwork) => {
+          const values = [];
+          if (typeof artwork.language === 'string' && artwork.language.trim()) values.push(artwork.language.toUpperCase());
+          if (Number.isSafeInteger(artwork.width) && Number.isSafeInteger(artwork.height)) values.push(`${artwork.width} × ${artwork.height}`);
+          if (typeof artwork.vote_average === 'number' && Number.isFinite(artwork.vote_average) && Number.isSafeInteger(artwork.vote_count) && artwork.vote_count > 0) values.push(`${artwork.vote_average.toFixed(1)} · ${artwork.vote_count} votes`);
+          return values.length ? values.join(' · ') : 'Poster variant';
+        };
+        const automatic = `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(kind)}" value="" data-artwork-kind="${escapeHtml(kind)}"${selected.has(kind) ? '' : ' checked'}><span class="k-item-editor__artwork-card">${image(primary)}<span class="k-item-editor__artwork-title">Automatic</span><small>Provider default</small></span></label>`;
+        const choices = choicesForKind.map((artwork) => `<label class="k-item-editor__artwork"><input type="radio" name="artwork-${escapeHtml(artwork.kind)}" value="${artwork.id}" data-artwork-kind="${escapeHtml(artwork.kind)}"${selected.get(artwork.kind) === artwork.id ? ' checked' : ''}><span class="k-item-editor__artwork-card">${image(artwork)}<span class="k-item-editor__artwork-title">${artwork.is_primary ? 'Provider default' : 'Poster variant'}</span><small>${escapeHtml(details(artwork))}</small></span></label>`).join('');
+        return `<fieldset class="k-item-editor__artwork-group"><legend>${escapeHtml(kind)}</legend>${automatic}${choices}</fieldset>`;
       }).join('');
     }
 

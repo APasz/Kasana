@@ -121,6 +121,7 @@ from kasana.katalog.api.contracts import (
 )
 from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.limits import MAX_ARTWORK_PER_ITEM
 from kasana.katalog.models import (
     AuditCategory,
     AuditIssue,
@@ -1098,8 +1099,13 @@ class KatalogQueryService:
                 session.scalars(
                     select(CachedArtwork)
                     .where(CachedArtwork.library_item_id == item_id)
-                    .order_by(CachedArtwork.artwork_kind, CachedArtwork.id)
-                    .limit(10)
+                    .order_by(
+                        CachedArtwork.artwork_kind,
+                        CachedArtwork.is_primary.desc(),
+                        CachedArtwork.display_order,
+                        CachedArtwork.id,
+                    )
+                    .limit(MAX_ARTWORK_PER_ITEM)
                 )
             )
             return tuple(_artwork_selection(item_id, artwork) for artwork in artworks)
@@ -3796,6 +3802,8 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             key=lambda artwork: (
                 0 if selected_ids.get(artwork.kind.value) == artwork.id else 1,
                 artwork.kind.value,
+                0 if artwork.is_primary else 1,
+                artwork.display_order,
                 artwork.id,
             )
         )
@@ -3814,7 +3822,7 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             context_label=_context_label_for_summary(item, first_media_paths.get(item.id)),
             availability=Availability(item.availability.value),
             tags=tuple(sorted(root_tags[item.library_root_id] | frozenset(item.tags))),
-            artwork=tuple(artworks[item.id]),
+            artwork=tuple(artworks[item.id][:MAX_ARTWORK_PER_ITEM]),
         )
         for item in items
     }
@@ -4780,6 +4788,13 @@ def _artwork_selection(item_id: int, artwork: CachedArtwork) -> ArtworkSelection
         url=f"/api/v1/library/items/{item_id}/artwork/{artwork.id}",
         content_type=artwork.content_type,
         size_bytes=artwork.size_bytes,
+        language=artwork.language,
+        width=artwork.width,
+        height=artwork.height,
+        vote_average=artwork.vote_average,
+        vote_count=artwork.vote_count,
+        is_primary=artwork.is_primary,
+        display_order=artwork.display_order,
     )
 
 
