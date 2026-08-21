@@ -70,6 +70,10 @@ async def start_fragmented_mp4(
     ]
     # Input seeking lets FFmpeg use the media index instead of reading every prior packet.
     if start_seconds > 0:
+        # A copied video stream starts at its preceding keyframe. Without this, FFmpeg
+        # accurately trims only the transcoded audio and puts it ahead of that video.
+        if transcode_audio:
+            command.append("-noaccurate_seek")
         command.extend(("-ss", f"{start_seconds:.3f}"))
     command.extend(("-i", input_url))
     command.extend(

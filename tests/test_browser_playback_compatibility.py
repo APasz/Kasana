@@ -240,10 +240,28 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
     assert isinstance(result, FragmentedMp4Stream)
     assert ["-c:v", "copy"] == launched[launched.index("-c:v") : launched.index("-c:v") + 2]
     assert ["-c:a", "aac"] == launched[launched.index("-c:a") : launched.index("-c:a") + 2]
-    assert ["-ss", "42.500", "-i", "http://katalog.test/api/v1/media/token"] == launched[
-        launched.index("-ss") : launched.index("-i") + 2
+    assert [
+        "-noaccurate_seek",
+        "-ss",
+        "42.500",
+        "-i",
+        "http://katalog.test/api/v1/media/token",
+    ] == launched[
+        launched.index("-noaccurate_seek") : launched.index("-i") + 2
     ]
     assert "pipe:1" in launched
+
+    remux_command_start = len(launched)
+    remux = await start_fragmented_mp4(
+        "ffmpeg",
+        "http://katalog.test/api/v1/media/token",
+        audio_stream_index=2,
+        transcode_audio=False,
+        start_seconds=42.5,
+    )
+    assert isinstance(remux, FragmentedMp4Stream)
+    remux_command = launched[remux_command_start:]
+    assert "-noaccurate_seek" not in remux_command
 
     subtitle_command_start = len(launched)
     subtitle = await start_subtitle_extract(
