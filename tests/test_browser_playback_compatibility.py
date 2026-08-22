@@ -760,6 +760,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "k-player__fullscreen-special-info" in element._classes  # pyright: ignore[reportPrivateUsage]
         )
+        fullscreen_time = next(
+            element
+            for element in client.elements.values()
+            if "k-player__fullscreen-time" in element._classes  # pyright: ignore[reportPrivateUsage]
+        )
 
     assert len(video_elements) == 1
     assert "src" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
@@ -772,6 +777,8 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert queues == []
     assert fullscreen_title._text == "Example Show · Pilot"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+    assert fullscreen_time._props["aria-label"] == "Current time"  # pyright: ignore[reportPrivateUsage]
+    assert "data-player-fullscreen-time" in fullscreen_time._props  # pyright: ignore[reportPrivateUsage]
 
     with Client(page("")) as client:
         render_browser_playback_card(session, play_on_load=True)

@@ -260,6 +260,9 @@ def render_browser_playback_card(
                 "data-player-fullscreen-special-info"
                 + (" hidden" if browser_entry.special_info is None else "")
             )
+            ui.label("").classes("k-player__fullscreen-time").props(
+                'data-player-fullscreen-time aria-label="Current time"'
+            )
         with ui.element("span").props('data-player-ass-fonts hidden'):
             for font in entry.subtitle_font_attachments:
                 ui.element("span").props(f'data-player-ass-font="{font.id}"')

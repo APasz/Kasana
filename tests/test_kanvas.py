@@ -711,6 +711,28 @@ def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
     )
 
 
+def test_fullscreen_player_shows_the_local_time_with_seconds() -> None:
+    repository_root = Path(__file__).parents[1]
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
+        encoding="utf-8"
+    )
+    stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "data-player-fullscreen-time" in player
+    assert "const fullscreenClockFormatter = new Intl.DateTimeFormat" in script
+    assert "hourCycle: 'h23'" in script
+    assert "second: '2-digit'" in script
+    assert "window.setInterval" in script
+    assert ".k-player__fullscreen-time" in stylesheet
+    assert "left: 50%;" in stylesheet
+    assert "transform: translateX(-50%);" in stylesheet
+
+
 def test_fullscreen_player_shows_play_next_only_in_its_controls() -> None:
     repository_root = Path(__file__).parents[1]
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(

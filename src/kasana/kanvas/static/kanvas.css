@@ -821,6 +821,7 @@ kanvas-poster {
 .k-player__fullscreen-title, .k-player__fullscreen-special-info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .k-player__fullscreen-title { color: var(--k-text); font-size: 0.92rem; font-weight: 650; }
 .k-player__fullscreen-special-info { color: var(--k-text-muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; text-align: right; }
+.k-player__fullscreen-time { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 50%; color: var(--k-text); font-size: 0.92rem; font-variant-numeric: tabular-nums; transform: translateX(-50%); white-space: nowrap; }
 .k-player:fullscreen .k-player__progress,
 .k-player:fullscreen .k-player__details {
     position: absolute;

@@ -201,6 +201,8 @@ global.navigator = {getGamepads() { return []; }};
 global.CSS = {supports() { return true; }};
 const scheduledTimeouts = new Map();
 let nextTimeoutId = 1;
+const scheduledIntervals = new Map();
+let nextIntervalId = 1;
 const assignedLocations = [];
 const replacedLocations = [];
 global.window = {
@@ -209,6 +211,7 @@ global.window = {
     listeners.push(listener);
     windowListeners.set(name, listeners);
   },
+  clearInterval(id) { scheduledIntervals.delete(id); },
   clearTimeout(id) { scheduledTimeouts.delete(id); },
   emit(name, event = {}) {
     for (const listener of windowListeners.get(name) || []) listener(event);
@@ -228,6 +231,12 @@ global.window = {
     const id = nextTimeoutId;
     nextTimeoutId += 1;
     scheduledTimeouts.set(id, callback);
+    return id;
+  },
+  setInterval(callback) {
+    const id = nextIntervalId;
+    nextIntervalId += 1;
+    scheduledIntervals.set(id, callback);
     return id;
   }
 };
@@ -308,6 +317,10 @@ function runScheduledTimeouts() {
   for (const callback of callbacks) callback();
 }
 
+function runScheduledIntervals() {
+  for (const callback of scheduledIntervals.values()) callback();
+}
+
 function createPlayer({
   durationSeconds = 0,
   hasFullscreenQueueNext = false,
@@ -347,6 +360,7 @@ function createPlayer({
   const nativeControls = new FakeElement();
   const fullscreenTitle = new FakeElement();
   const fullscreenSpecialInfo = new FakeElement();
+  const fullscreenTime = new FakeElement();
   const kestrelLink = new HTMLAnchorElement();
   const elements = new Map([
     ['video', video],
@@ -363,6 +377,7 @@ function createPlayer({
     ['[data-player-native-controls]', nativeControls],
     ['[data-player-fullscreen-title]', fullscreenTitle],
     ['[data-player-fullscreen-special-info]', fullscreenSpecialInfo],
+    ['[data-player-fullscreen-time]', fullscreenTime],
     ['[data-player-kestrel]', kestrelLink]
   ]);
   const subtitleTrack = new FakeElement();
@@ -416,6 +431,7 @@ function createPlayer({
     controls,
     currentTime,
     fullscreenSpecialInfo,
+    fullscreenTime,
     fullscreenTitle,
     fullscreenQueueNext,
     player,
@@ -925,6 +941,26 @@ async function testQueueAdvanceAutoplaysWithoutLeavingFullscreen() {
   completionPayload = null;
 }
 
+async function testFullscreenClockShowsLocalTimeWithSeconds() {
+  const {fullscreenTime, player} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  document.fullscreenElement = player;
+  document.emit('fullscreenchange');
+
+  assert.match(fullscreenTime.textContent, /\d{1,2}:\d{2}:\d{2}/);
+  assert.equal(scheduledIntervals.size, 1);
+  runScheduledIntervals();
+  assert.match(fullscreenTime.textContent, /\d{1,2}:\d{2}:\d{2}/);
+
+  document.fullscreenElement = null;
+  document.emit('fullscreenchange');
+  assert.equal(fullscreenTime.textContent, '');
+  assert.equal(scheduledIntervals.size, 0);
+}
+
 async function testFullscreenExitNavigatesWithoutWaitingForProgress() {
   const {player, video} = createPlayer();
   player.connectedCallback();
@@ -993,6 +1029,7 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testQueueControlAdvancesPlayback();
   await testFullscreenQueueControlAdvancesPlayback();
   await testQueueAdvanceAutoplaysWithoutLeavingFullscreen();
+  await testFullscreenClockShowsLocalTimeWithSeconds();
   await testFullscreenExitNavigatesWithoutWaitingForProgress();
   await testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen();
 })()

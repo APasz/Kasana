@@ -2875,6 +2875,7 @@
       const subtitleFonts = this.querySelector('[data-player-ass-fonts]');
       const fullscreenTitle = this.querySelector('[data-player-fullscreen-title]');
       const fullscreenSpecialInfo = this.querySelector('[data-player-fullscreen-special-info]');
+      const fullscreenTime = this.querySelector('[data-player-fullscreen-time]');
       const sessionId = this.getAttribute('session-id');
       const queueNext = document.querySelector('[data-player-next]');
       const fullscreenQueueNext = controls?.querySelector('[data-player-action="next"]');
@@ -2891,7 +2892,7 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !fullscreenTitle || !fullscreenSpecialInfo || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -2903,6 +2904,7 @@
       let pendingProgress = null;
       let progressReportPromise = null;
       let fullscreenHideTimer = null;
+      let fullscreenClockTimer = null;
       let deliveryMode = 'direct';
       let streamStartSeconds = 0;
       let generatedStreamSeekPending = false;
@@ -3489,6 +3491,28 @@
       const isPlayerFullscreen = () => (
         webkitFullscreenActive || document.fullscreenElement === this || document.fullscreenElement === video
       );
+      const fullscreenClockFormatter = new Intl.DateTimeFormat(undefined, {
+        hour: '2-digit',
+        hourCycle: 'h23',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      const clearFullscreenClock = () => {
+        if (fullscreenClockTimer !== null) window.clearInterval(fullscreenClockTimer);
+        fullscreenClockTimer = null;
+        fullscreenTime.textContent = '';
+      };
+      const startFullscreenClock = () => {
+        fullscreenTime.textContent = fullscreenClockFormatter.format(new Date());
+        if (fullscreenClockTimer !== null) return;
+        fullscreenClockTimer = window.setInterval(() => {
+          fullscreenTime.textContent = fullscreenClockFormatter.format(new Date());
+        }, 1_000);
+      };
+      const synchroniseFullscreenClock = () => {
+        if (isCardFullscreen()) startFullscreenClock();
+        else clearFullscreenClock();
+      };
       const clearFullscreenHideTimer = () => {
         if (fullscreenHideTimer !== null) window.clearTimeout(fullscreenHideTimer);
         fullscreenHideTimer = null;
@@ -3949,6 +3973,7 @@
       this._dispose = () => {
         invalidatePlaybackAttempts();
         clearFullscreenHideTimer();
+        clearFullscreenClock();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
         video.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
@@ -3995,6 +4020,7 @@
       video.addEventListener('volumechange', updateControls);
       const onFullscreenChange = () => {
         updateControls();
+        synchroniseFullscreenClock();
         if (isCardFullscreen()) showFullscreenControls();
         else {
           clearFullscreenHideTimer();
