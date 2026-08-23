@@ -30,10 +30,12 @@ from kasana.katalog.public import (
     parse_numeral,
 )
 
-_ARTWORK_URL = re.compile(
-    r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$"
-)
+_ARTWORK_URL = re.compile(r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$")
 _GENERIC_EPISODE_TITLE = re.compile(r"^(?:episode|ep\.?)\s*(?P<number>\d+)$", re.IGNORECASE)
+_EPISODE_IDENTIFIER_TITLE = re.compile(
+    r"^s\s*\d+\s*e\s*\d+(?:\s*-\s*(?:s\s*\d+\s*)?e\s*\d+)?$",
+    re.IGNORECASE,
+)
 _COMBINED_EPISODE_TITLE_PREFIX = re.compile(
     rf"^(?:episode|ep|e)\s*(?P<number>{NUMERAL_TOKEN_PATTERN})(?:\s*[-:._]\s*)+",
     re.IGNORECASE,
@@ -228,8 +230,14 @@ def poster_from_summary(
     partially_watched: bool = False,
     selected: bool = False,
     loading: bool = False,
+    href: str | None = None,
+    detail: str | None = None,
 ) -> PosterView:
-    """Translate a Katalog summary to the single poster visual contract."""
+    """Translate a Katalog summary to the single poster visual contract.
+
+    ``href`` and ``detail`` let contextual surfaces state their safe launch
+    destination and compact supporting copy before the immutable view is built.
+    """
 
     title = display_title(item)
     poster_url = artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER)
@@ -240,15 +248,17 @@ def poster_from_summary(
         selected=selected,
         loading=loading,
     )
-    subtitle = None if item.series_title else " · ".join(
-        part for part in (item.year and str(item.year), item.kind.value) if part
+    default_detail = (
+        None
+        if item.series_title
+        else " · ".join(part for part in (item.year and str(item.year), item.kind.value) if part)
     )
     return PosterView(
         id=item.id,
         title=title,
-        header=item.series_title,
-        subtitle=subtitle or None,
-        href=f"/item/{item.id}",
+        context=_non_redundant_poster_context(item.series_title, title),
+        detail=detail if detail is not None else default_detail or None,
+        href=href if href is not None else f"/item/{item.id}",
         posterUrl=poster_url,
         placeholder=placeholder_art_for_summary(item, title=title),
         progressPercent=progress_percent(playback),
@@ -257,6 +267,16 @@ def poster_from_summary(
         partiallyWatched=partially_watched and (playback is None or not playback.completed),
         available=item.availability is Availability.AVAILABLE,
     )
+
+
+def _non_redundant_poster_context(context: str | None, title: str) -> str | None:
+    """Keep series context only when it adds identity beyond the poster title."""
+
+    if context is None:
+        return None
+    normalised_context = " ".join(context.split()).casefold()
+    normalised_title = " ".join(title.split()).casefold()
+    return None if normalised_context == normalised_title else context
 
 
 def poster_state(
@@ -310,7 +330,7 @@ def placeholder_art_for_summary(
     """Build deterministic missing-poster text from the strongest known item label."""
 
     display = title if title is not None else item.title
-    if item.kind is LibraryItemKind.EPISODE and _is_generic_episode_title(
+    if item.kind is LibraryItemKind.EPISODE and is_generic_episode_title(
         display, item.episode_number, item.series_title
     ):
         episode_label = (
@@ -332,10 +352,14 @@ def placeholder_title_lines(title: str) -> tuple[str, ...]:
     return (title.strip(),)
 
 
-def _is_generic_episode_title(
+def is_generic_episode_title(
     title: str, episode_number: int | None, series_title: str | None
 ) -> bool:
+    """Return whether an episode title is only a generated identifier."""
+
     if series_title is not None and title.strip().casefold() == series_title.strip().casefold():
+        return True
+    if _EPISODE_IDENTIFIER_TITLE.fullmatch(title.strip()) is not None:
         return True
     if episode_number is None:
         return False

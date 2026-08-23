@@ -342,9 +342,7 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
 ) -> None:
     ids = playback_fixture.ids
 
-    initial_on_deck = await playback_fixture.client.get(
-        f"/api/v1/users/{ids['user']}/on-deck"
-    )
+    initial_on_deck = await playback_fixture.client.get(f"/api/v1/users/{ids['user']}/on-deck")
     assert initial_on_deck.status_code == 200
     assert all(entry["item"]["id"] != ids["series"] for entry in initial_on_deck.json()["items"])
 
@@ -359,6 +357,7 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
     )
     assert series_entry["source_watch_order_id"] is None
     assert series_entry["partially_watched"] is True
+    assert series_entry["next_item"]["id"] == ids["episode_two"]
 
     partial_states = await playback_fixture.client.post(
         f"/api/v1/users/{ids['user']}/playback-states",
@@ -378,6 +377,7 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
     )
     assert series_page.status_code == 200
     assert series_page.json()["items"][0]["item"]["id"] == ids["series"]
+    assert series_page.json()["items"][0]["next_item"]["id"] == ids["episode_two"]
 
     for episode_key in ("episode_two", "episode_three"):
         marked = await playback_fixture.client.post(
@@ -389,13 +389,9 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
     )
     assert marked_special.status_code == 200
 
-    completed_on_deck = await playback_fixture.client.get(
-        f"/api/v1/users/{ids['user']}/on-deck"
-    )
+    completed_on_deck = await playback_fixture.client.get(f"/api/v1/users/{ids['user']}/on-deck")
     assert completed_on_deck.status_code == 200
-    assert all(
-        entry["item"]["id"] != ids["series"] for entry in completed_on_deck.json()["items"]
-    )
+    assert all(entry["item"]["id"] != ids["series"] for entry in completed_on_deck.json()["items"])
 
     completed_states = await playback_fixture.client.post(
         f"/api/v1/users/{ids['user']}/playback-states",
@@ -403,6 +399,30 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
     )
     assert completed_states.status_code == 200
     assert completed_states.json()["partially_watched_item_ids"] == []
+
+
+async def test_on_deck_hides_series_represented_by_an_active_collection(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as session:
+        add_collection_membership(
+            session,
+            collection_id=ids["collection"],
+            library_item_id=ids["series"],
+        )
+
+    marked_first_episode = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['episode_one']}/watched"
+    )
+    assert marked_first_episode.status_code == 200
+
+    on_deck = await playback_fixture.client.get(f"/api/v1/users/{ids['user']}/on-deck")
+
+    assert on_deck.status_code == 200
+    entries = on_deck.json()["items"]
+    assert any(entry["source_collection_id"] == ids["collection"] for entry in entries)
+    assert all(entry["item"]["id"] != ids["series"] for entry in entries)
 
 
 async def test_standalone_launch_is_one_use_and_media_has_ranges(
@@ -467,7 +487,6 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
     ]
     assert series["entries"][0]["series_title"] == "Kasana Series"
     assert series["entries"][0]["context_label"] == "S01 E02"
-
 
     resume_launch = await _create_plan(
         playback_fixture,
@@ -761,9 +780,7 @@ async def test_profile_can_disable_subtitles_for_new_playback_sessions(
             {"codec": "subrip", "language": "en", "default": True},
         ]
 
-    launch = await _create_plan(
-        playback_fixture, {"kind": "standalone", "item_id": ids["movie"]}
-    )
+    launch = await _create_plan(playback_fixture, {"kind": "standalone", "item_id": ids["movie"]})
     entry = (await client.get(f"/api/v1/playback/plans/{launch}")).json()["current_item"]
 
     assert entry["selected_subtitle_track_id"] is None
@@ -849,10 +866,10 @@ async def test_stopping_an_advanced_queue_then_marking_its_current_item_updates_
     on_deck = await client.get(f"/api/v1/users/{ids['user']}/on-deck")
     assert on_deck.status_code == 200
     assert on_deck.json()["items"][0]["item"]["id"] == ids["episode_two"]
+    assert on_deck.json()["items"][0]["next_item"]["id"] == ids["episode_two"]
     continue_watching = await client.get(f"/api/v1/users/{ids['user']}/continue-watching")
     assert all(
-        entry["item"]["id"] != ids["episode_two"]
-        for entry in continue_watching.json()["items"]
+        entry["item"]["id"] != ids["episode_two"] for entry in continue_watching.json()["items"]
     )
 
 
@@ -891,7 +908,8 @@ async def test_progress_seek_completion_expiry_and_unavailable_items(
         assert media_file is not None
         media_file.duration_seconds = 8.0
     corrected_duration = await playback_fixture.client.put(
-        progress_path, json={"position_seconds": 8},
+        progress_path,
+        json={"position_seconds": 8},
     )
     assert corrected_duration.status_code == 200
     with playback_fixture.database.transaction() as database_session:

@@ -9,7 +9,7 @@ from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.kanvas.viewmodels.home import MediaRailView
+from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.katalog.public import KatalogClientError, KatalogClientErrorKind
 
 
@@ -37,7 +37,7 @@ async def render_home(settings: Kanvas_Settings, profile: SessionProfile) -> Non
 def _needs_artwork_onboarding(rails: tuple[MediaRailView, ...]) -> bool:
     """Prompt only for an actual first library whose catalogue posters lack artwork."""
 
-    added = next((rail for rail in rails if rail.title == "Recently Added"), None)
+    added = next((rail for rail in rails if rail.kind is HomeRailKind.RECENTLY_ADDED), None)
     if added is None or not added.posters:
         return False
     artwork_count = sum(poster.poster_url is not None for poster in added.posters)

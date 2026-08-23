@@ -132,7 +132,7 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderRowView,
     WatchOrderSourceView,
 )
-from kasana.kanvas.viewmodels.home import MediaRailView
+from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
     IncludedCollectionView,
@@ -143,6 +143,7 @@ from kasana.kanvas.viewmodels.library import (
     LibraryFilters,
     LibraryPageEnvelope,
     PlaceholderArtView,
+    PosterAction,
     PosterState,
     PosterView,
 )
@@ -155,6 +156,7 @@ from kasana.katalog.public import (
     CollectionDetail,
     CollectionMembership,
     CollectionSummary,
+    ContinueWatchingEntry,
     DirectoryEntry,
     DirectoryListing,
     DuplicateEpisodeIssue,
@@ -533,10 +535,35 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
             series_title="Aldnoah Zero",
         )
     )
-    assert episode_poster.header == "Aldnoah Zero"
-    assert episode_poster.subtitle is None
+    assert episode_poster.context == "Aldnoah Zero"
+    assert episode_poster.detail is None
+    repeated_context_poster = poster_from_summary(
+        _summary_with_title(
+            "The Rookie",
+            kind=LibraryItemKind.SERIES,
+            series_title="  the   rookie ",
+        )
+    )
+    assert repeated_context_poster.context is None
     assert "playback_url" not in json.dumps(poster.model_dump(mode="json"))
     assert "/tmp/" not in json.dumps(poster.model_dump(mode="json"))
+
+
+def test_home_artwork_onboarding_uses_the_recently_added_rail_kind() -> None:
+    missing_artwork = PosterView(id=7, title="Poster", href="/item/7", available=True)
+
+    assert home_route._needs_artwork_onboarding(  # pyright: ignore[reportPrivateUsage]
+        (
+            MediaRailView(
+                kind=HomeRailKind.RECENTLY_ADDED,
+                title="New additions",
+                posters=(missing_artwork,),
+            ),
+        )
+    )
+    assert not home_route._needs_artwork_onboarding(  # pyright: ignore[reportPrivateUsage]
+        (MediaRailView(title="Recently Added", posters=(missing_artwork,)),)
+    )
 
 
 def test_missing_poster_placeholder_lines_split_titles_and_generic_episodes() -> None:
@@ -555,6 +582,14 @@ def test_missing_poster_placeholder_lines_split_titles_and_generic_episodes() ->
         season_number=1,
         episode_number=2,
     )
+    identifier_episode = _summary_with_title(
+        "S01E02",
+        kind=LibraryItemKind.EPISODE,
+        season_number=1,
+        episode_number=2,
+        series_title="Aldnoah Zero",
+        context_label="S01 E02",
+    )
 
     assert placeholder_art_for_summary(titled).lines == (
         "Mobile Suit Gundam",
@@ -564,6 +599,9 @@ def test_missing_poster_placeholder_lines_split_titles_and_generic_episodes() ->
         lines=("Episode 2",), footer="S01 E02"
     )
     assert placeholder_art_for_summary(named_episode).lines == ("The Door to Summer",)
+    assert placeholder_art_for_summary(identifier_episode) == PlaceholderArtView(
+        lines=("Episode 2",), footer="S01 E02"
+    )
 
 
 def test_poster_state_precedence_covers_missing_and_unavailable_artwork() -> None:
@@ -716,9 +754,7 @@ def test_fullscreen_player_shows_the_local_time_with_seconds() -> None:
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
-        encoding="utf-8"
-    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
     stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
         encoding="utf-8"
     )
@@ -748,20 +784,36 @@ def test_fullscreen_player_shows_play_next_only_in_its_controls() -> None:
     assert ".k-player:fullscreen .k-player__control--next { display: grid; }" in stylesheet
 
 
-def test_watched_posters_use_an_accessible_bottom_left_corner_marker() -> None:
+def test_poster_statuses_use_an_accessible_completion_triangle_and_unavailable_badge() -> None:
     static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
     javascript = (static_root / "kanvas.js").read_text(encoding="utf-8")
     stylesheet = (static_root / "kanvas.css").read_text(encoding="utf-8")
 
-    assert 'class="k-poster__watched" role="img" aria-label="Watched"' in javascript
-    assert 'class="k-poster__watched k-poster__watched--partial"' in javascript
+    assert 'k-poster__completion--watched" role="img" aria-label="Watched"' in javascript
+    assert 'k-poster__completion--partial" role="img" aria-label="Partially watched"' in javascript
     assert 'aria-label="Partially watched"' in javascript
-    assert ".k-poster__watched" in stylesheet
-    assert ".k-poster__watched--partial::after" in stylesheet
+    assert ".k-poster__status" in stylesheet
+    assert ".k-poster__completion" in stylesheet
+    assert ".k-poster__completion--partial::after" in stylesheet
+    assert "top: 6px;" in stylesheet
+    assert "right: 6px;" in stylesheet
     assert "bottom: 0;" in stylesheet
     assert "left: 0;" in stylesheet
-    assert "background: var(--k-watched-marker);" in stylesheet
     assert "clip-path: polygon(0 0, 0 100%, 100% 100%);" in stylesheet
+
+
+def test_poster_context_and_actions_keep_artwork_uncluttered() -> None:
+    static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
+    javascript = (static_root / "kanvas.js").read_text(encoding="utf-8")
+    stylesheet = (static_root / "kanvas.css").read_text(encoding="utf-8")
+
+    assert 'class="k-poster__context"' in javascript
+    assert 'class="k-poster__detail"' in javascript
+    assert 'class="k-poster__action-content"' in javascript
+    assert ".k-poster__action-content {" in stylesheet
+    assert "@media (hover: hover)" in stylesheet
+    hover_none = stylesheet.split("@media (hover: none)", maxsplit=1)[1]
+    assert ".k-poster--has-action .k-poster__action" not in hover_none
 
 
 def test_playback_proxy_preserves_range_headers_and_disables_media_caching() -> None:
@@ -861,14 +913,33 @@ def test_poster_view_allows_only_safe_item_detail_and_resume_destinations() -> N
         ).href
         == "/play/item/7?resume=true&onDeck=true"
     )
+    assert (
+        PosterView(
+            id=7,
+            title="Resume collection",
+            href="/play/watch-orders/11?resume=true&onDeck=true",
+            available=True,
+        ).href
+        == "/play/watch-orders/11?resume=true&onDeck=true"
+    )
     assert PosterView(
-        id=7,
-        title="Resume collection",
+        id=8,
+        title="Collection",
         href="/play/watch-orders/11?resume=true&onDeck=true",
+        mosaicUrls=("/kanvas/artwork/7/8",),
         available=True,
-    ).href == "/play/watch-orders/11?resume=true&onDeck=true"
+    ).mosaic_urls == ("/kanvas/artwork/7/8",)
     with pytest.raises(ValueError):
         PosterView(id=7, title="Unsafe", href="/play/watch-orders/11?itemId=7", available=True)
+    with pytest.raises(ValueError, match="explicit artwork and a mosaic"):
+        PosterView(
+            id=8,
+            title="Ambiguous art",
+            href="/item/8",
+            posterUrl="/kanvas/artwork/8/9",
+            mosaicUrls=("/kanvas/artwork/7/8",),
+            available=True,
+        )
 
 
 def test_collection_mosaic_is_stable_and_never_returns_an_absolute_artwork_path() -> None:
@@ -1831,6 +1902,7 @@ async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode
         (unavailable_episode.id, 1, False, (unavailable_episode.id,)),
         (movie.id, 1, True, (movie.id,)),
     ]
+    assert sources[0][0].poster.detail == "Series · 3 episodes"
 
 
 async def test_watch_order_source_addition_uses_one_contiguous_batch(
@@ -3086,6 +3158,101 @@ def test_native_component_builders_cover_poster_rail_feedback_and_shell() -> Non
         skeleton_posters(2)
 
 
+def test_home_media_rails_expose_actions_empty_states_and_scroll_controls() -> None:
+    poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
+
+    with Client(page("")) as client:
+        media_rail(
+            MediaRailView(
+                kind=HomeRailKind.CONTINUE,
+                title='Continue "again"',
+                posters=(poster, poster),
+            )
+        )
+        media_rail(MediaRailView(kind=HomeRailKind.ON_DECK, title="On Deck", posters=(poster,)))
+        media_rail(MediaRailView(kind=HomeRailKind.ON_DECK, title="On Deck", posters=()))
+
+        posters = [
+            element for element in client.elements.values() if element.tag == "kanvas-poster"
+        ]
+        controls = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-kanvas-rail-scroll") is not None
+        ]
+        control_groups = [
+            element
+            for element in client.elements.values()
+            if "k-rail__controls" in _element_classes(element)
+        ]
+        first_section = next(
+            element for element in client.elements.values() if element.tag == "section"
+        )
+        empty_action = next(
+            element
+            for element in client.elements.values()
+            if "k-rail__empty-action" in _element_classes(element)
+        )
+
+    assert [
+        json.loads(cast(str, _element_props(element)["poster"]))["action"] for element in posters
+    ] == ["resume", "resume", "play_next"]
+    assert {_element_props(control)["data-kanvas-rail-scroll"] for control in controls} == {
+        "previous",
+        "next",
+    }
+    assert _element_props(first_section)["aria-label"] == 'Continue "again"'
+    assert {_element_props(control)["aria-label"] for control in controls} == {
+        'Scroll Continue "again" backward',
+        'Scroll Continue "again" forward',
+    }
+    assert len(control_groups) == 1
+    assert "hidden" in _element_props(control_groups[0])
+    assert _element_props(empty_action)["href"] == "/collections"
+
+
+def test_home_media_rails_are_compact_and_centre_short_rows() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+    rail_viewport = stylesheet.split(".k-rail__viewport {", maxsplit=1)[1].split("}", maxsplit=1)[0]
+
+    assert ".k-rail { margin: 0; }" in stylesheet
+    assert ".k-rail + .k-rail { margin-top: 12px; }" in stylesheet
+    assert ".k-rail .k-section-title { margin: 0 0 8px; }" in stylesheet
+    assert "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);" in stylesheet
+    assert ".k-rail__heading .k-section-title { grid-column: 2; text-align: center; }" in stylesheet
+    assert ".k-rail__controls[hidden] { display: none; }" in stylesheet
+    assert "justify-content: safe center;" in stylesheet
+    assert "padding: 2px;" in rail_viewport
+
+
+def test_shell_clears_nicegui_default_padding_that_causes_phantom_scrollbars() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+    root_layout = (
+        ".nicegui-content {\n    display: block;\n    min-height: 100vh;\n    padding: 0;\n}"
+    )
+
+    assert root_layout in stylesheet
+    assert "html { scrollbar-gutter: stable; }" in stylesheet
+    assert ".k-main--home { padding-bottom: 16px; }" in stylesheet
+
+
+def test_home_shell_uses_compact_bottom_padding() -> None:
+    with Client(page("")) as client:
+        with page_shell(Kanvas_Settings(), "/", "Home", _selected_profile()):
+            pass
+        main = next(
+            element
+            for element in client.elements.values()
+            if element.tag == "main" and "k-main" in _element_classes(element)
+        )
+
+    assert "k-main--home" in _element_classes(main)
+
+
 def test_shell_does_not_mount_search_overlay() -> None:
     with Client(page("")) as client:
         with page_shell(Kanvas_Settings(), "/library", "Library", _selected_profile()):
@@ -3616,6 +3783,19 @@ def test_poster_component_passes_one_safe_payload_to_the_browser_renderer() -> N
     assert payload == poster.model_dump(by_alias=True, mode="json")
 
 
+def test_poster_component_adds_only_the_requested_home_action() -> None:
+    poster = PosterView(id=7, title="Poster", href="/item/7", available=True)
+
+    with Client(page("")) as client:
+        poster_card(poster, action=PosterAction.PLAY_NEXT)
+        element = next(
+            element for element in client.elements.values() if element.tag == "kanvas-poster"
+        )
+
+    payload = json.loads(cast(str, _element_props(element)["poster"]))
+    assert payload["action"] == "play_next"
+
+
 def test_server_placeholder_poster_uses_standardised_art_treatment() -> None:
     with Client(page("")) as client:
         poster_placeholder_art(7, PlaceholderArtView(lines=("Title",), footer="S01 E02"))
@@ -3754,9 +3934,7 @@ async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
     monkeypatch.setattr(item_route, "action_button", action)
     monkeypatch.setattr(item_route.ui.navigate, "to", destinations.append)
 
-    with Client(
-        page(""), request=Request({"type": "http", "path": "/item/7", "headers": []})
-    ):
+    with Client(page(""), request=Request({"type": "http", "path": "/item/7", "headers": []})):
         item_route._item_actions(  # pyright: ignore[reportPrivateUsage]
             Kanvas_Settings(),
             profile,
@@ -3851,6 +4029,14 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
         size_bytes=4,
     )
     item = _item(artwork=(artwork,))
+    next_item = _summary_with_title(
+        "S05E12",
+        kind=LibraryItemKind.EPISODE,
+        season_number=5,
+        episode_number=12,
+        series_title="A title",
+        context_label="S05 E12",
+    )
 
     class FakeClient:
         async def __aenter__(self) -> FakeClient:
@@ -3861,8 +4047,12 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
 
         async def continue_watching(
             self, _user_id: int, *, cursor: str | None = None, limit: int = 50
-        ) -> PaginatedResponse[object]:
-            return PaginatedResponse(items=(), next_cursor=None, limit=limit)
+        ) -> PaginatedResponse[ContinueWatchingEntry]:
+            return PaginatedResponse(
+                items=(ContinueWatchingEntry(item=item, playback=_playback()),),
+                next_cursor=None,
+                limit=limit,
+            )
 
         async def on_deck(
             self, _user_id: int, *, cursor: str | None = None, limit: int = 50
@@ -3871,13 +4061,18 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
                 items=(
                     OnDeckEntry(
                         item=item,
+                        next_item=next_item,
                         source_collection_id=12,
                         source_watch_order_id=11,
                         source_watch_order_name="Chronological",
                         source_collection_name="Stargateo",
                         partially_watched=True,
                     ),
-                    OnDeckEntry(item=item, partially_watched=True),
+                    OnDeckEntry(
+                        item=item,
+                        next_item=next_item,
+                        partially_watched=True,
+                    ),
                 ),
                 next_cursor=None,
                 limit=limit,
@@ -3893,6 +4088,17 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
         ) -> PaginatedResponse[LibraryItemSummary]:
             return PaginatedResponse(items=(item,), next_cursor=None, limit=limit)
 
+        async def get_collection(self, collection_id: int) -> CollectionDetail:
+            assert collection_id == 12
+            return CollectionDetail(
+                id=12,
+                name="Stargateo",
+                item_count=1,
+                watch_order_count=1,
+                revision=1,
+                members=(CollectionMembership(id=1, collection_id=12, item=item),),
+            )
+
     def fake_client(*_args: object, **_kwargs: object) -> FakeClient:
         return FakeClient()
 
@@ -3902,14 +4108,23 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     rails = await service.home_rails()
     posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
 
+    assert [rail.kind for rail in rails] == [
+        HomeRailKind.CONTINUE,
+        HomeRailKind.ON_DECK,
+        HomeRailKind.RECENTLY_ADDED,
+    ]
     assert [rail.title for rail in rails] == ["Continue", "On Deck", "Recently Added"]
+    assert rails[0].posters[0].href == "/play/item/7?resume=true&onDeck=true"
     assert rails[1].posters[0].id == 12
     assert rails[1].posters[0].title == "Stargateo"
-    assert rails[1].posters[0].subtitle == "Next: A title"
+    assert rails[1].posters[0].context is None
+    assert rails[1].posters[0].detail == "S05 E12"
     assert rails[1].posters[0].href == "/play/watch-orders/11?resume=true&onDeck=true"
     assert rails[1].posters[0].poster_url is None
+    assert rails[1].posters[0].mosaic_urls == ("/kanvas/artwork/7/8",)
     assert rails[1].posters[0].partially_watched is False
     assert rails[1].posters[1].title == "A title"
+    assert rails[1].posters[1].detail == "S05 E12"
     assert rails[1].posters[1].href == "/play/item/7?resume=true&onDeck=true"
     assert rails[1].posters[1].partially_watched is True
     assert posters[0].poster_url == "/kanvas/artwork/7/8"

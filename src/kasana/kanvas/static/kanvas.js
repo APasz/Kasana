@@ -67,6 +67,19 @@
   const POSTER_STATES = new Set([
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
+  const POSTER_ACTIONS = {
+    resume: {
+      label: 'Resume',
+      icon: '<svg class="k-poster__action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>'
+    },
+    play_next: {
+      label: 'Play next',
+      icon: '<svg class="k-poster__action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14l9-7z M16 5v14"></path></svg>'
+    }
+  };
+  const POSTER_STATUS_ICONS = {
+    unavailable: '<svg class="k-poster__status-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12 M18 6 6 18"></path></svg>'
+  };
 
   const localArtworkUrl = (value) => typeof value === 'string' && /^\/kanvas\/artwork\/\d+\/\d+$/.test(value);
   const safeRequestId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
@@ -499,27 +512,48 @@
     if (typeof poster.href !== 'string' || !/^\/(?:item\/\d+|play\/item\/\d+\?resume=true&onDeck=true|play\/watch-orders\/\d+\?resume=true&onDeck=true)$/.test(poster.href)) return null;
     if (typeof poster.available !== 'boolean') return null;
     if (poster.posterUrl != null && !localArtworkUrl(poster.posterUrl)) return null;
+    const mosaicUrls = poster.mosaicUrls ?? [];
+    if (!Array.isArray(mosaicUrls) || mosaicUrls.length > 4 || mosaicUrls.some((url) => !localArtworkUrl(url))) return null;
+    if (poster.posterUrl != null && mosaicUrls.length > 0) return null;
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
-    if (poster.header != null && typeof poster.header !== 'string') return null;
-    if (poster.subtitle != null && typeof poster.subtitle !== 'string') return null;
+    if (poster.context != null && typeof poster.context !== 'string') return null;
+    if (poster.detail != null && typeof poster.detail !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
     if (poster.watched != null && typeof poster.watched !== 'boolean') return null;
     if (poster.partiallyWatched != null && typeof poster.partiallyWatched !== 'boolean') return null;
+    if (poster.action != null && (
+      typeof poster.action !== 'string' || !Object.prototype.hasOwnProperty.call(POSTER_ACTIONS, poster.action)
+    )) return null;
     return {
       id: poster.id,
       title: poster.title,
       href: poster.href,
       posterUrl: poster.posterUrl ?? null,
+      mosaicUrls,
       placeholder,
-      header: poster.header?.trim() || null,
-      subtitle: poster.subtitle ?? null,
+      context: poster.context?.trim() || null,
+      detail: poster.detail?.trim() || null,
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
       watched: poster.watched === true,
       partiallyWatched: poster.partiallyWatched === true,
-      available: poster.available
+      available: poster.available,
+      action: poster.action ?? null
     };
+  };
+
+  const posterStatusMarkup = (poster) => {
+    if (!poster.available) {
+      return `<span class="k-poster__status k-poster__status--unavailable" role="img" aria-label="Unavailable">${POSTER_STATUS_ICONS.unavailable}</span>`;
+    }
+    if (poster.watched) {
+      return '<span class="k-poster__completion k-poster__completion--watched" role="img" aria-label="Watched"></span>';
+    }
+    if (poster.partiallyWatched) {
+      return '<span class="k-poster__completion k-poster__completion--partial" role="img" aria-label="Partially watched"></span>';
+    }
+    return '';
   };
 
   const posterMarkup = (poster) => {
@@ -531,19 +565,26 @@
     const placeholderFooter = poster.placeholder.footer
       ? `<span class="k-poster__fallback-footer">${escapeHtml(poster.placeholder.footer)}</span>`
       : '';
+    const mosaic = poster.mosaicUrls.length
+      ? `<span class="k-poster-mosaic" aria-hidden="true">${poster.mosaicUrls
+        .map((url) => `<img class="k-poster-mosaic__image" src="${escapeHtml(url)}" alt="" loading="lazy" decoding="async">`)
+        .join('')}</span>`
+      : '';
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
-      : `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
-    const watched = poster.watched
-      ? '<span class="k-poster__watched" role="img" aria-label="Watched"></span>'
-      : poster.partiallyWatched
-        ? '<span class="k-poster__watched k-poster__watched--partial" role="img" aria-label="Partially watched"></span>'
-        : '';
-    const header = poster.header ? `<span class="k-poster__header">${escapeHtml(poster.header)}</span>` : '';
-    const subtitle = poster.subtitle ? `<span class="k-poster__subtitle">${escapeHtml(poster.subtitle)}</span>` : '';
-    return `<a class="k-poster k-poster--${escapeHtml(poster.state)}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(poster.title)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
-      <span class="k-poster__art">${artwork}${header}${progress}${watched}</span>
-      <span class="k-poster__meta"><span class="k-poster__title">${escapeHtml(poster.title)}</span>${subtitle}</span>
+      : mosaic || `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
+    const status = posterStatusMarkup(poster);
+    const context = poster.context ? `<span class="k-poster__context">${escapeHtml(poster.context)}</span>` : '';
+    const detail = poster.detail ? `<span class="k-poster__detail"><span class="k-poster__detail-text">${escapeHtml(poster.detail)}</span></span>` : '';
+    const actionView = poster.action ? POSTER_ACTIONS[poster.action] : null;
+    const action = actionView
+      ? `<span class="k-poster__action k-poster__action--${poster.action}" aria-hidden="true"><span class="k-poster__action-content">${actionView.icon}<span class="k-poster__action-label">${actionView.label}</span></span></span>`
+      : '';
+    const actionClass = actionView ? ` k-poster--has-action k-poster--action-${poster.action}` : '';
+    const accessibleLabel = actionView ? `${actionView.label} ${poster.title}` : poster.title;
+    return `<a class="k-poster k-poster--${escapeHtml(poster.state)}${actionClass}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
+      <span class="k-poster__art">${artwork}${progress}${status}${action}</span>
+      <span class="k-poster__meta">${context}<span class="k-poster__title">${escapeHtml(poster.title)}</span>${detail}</span>
     </a>`;
   };
 
@@ -587,6 +628,60 @@
     element.setAttribute('poster', JSON.stringify(poster));
     return element;
   };
+
+  const updateRailControls = () => {
+    if (typeof document.querySelectorAll !== 'function') return;
+    for (const rail of document.querySelectorAll('.k-rail')) {
+      const viewport = rail.querySelector('[data-kanvas-rail-viewport="true"]');
+      const controls = rail.querySelector('.k-rail__controls');
+      if (!(viewport instanceof HTMLElement) || !(controls instanceof HTMLElement)) continue;
+      controls.hidden = viewport.scrollWidth <= viewport.clientWidth + 1;
+    }
+  };
+
+  let railControlsObserver = null;
+  let railControlsUpdateQueued = false;
+  const queueRailControlsUpdate = () => {
+    if (railControlsUpdateQueued) return;
+    railControlsUpdateQueued = true;
+    const update = () => {
+      railControlsUpdateQueued = false;
+      updateRailControls();
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(update);
+    } else {
+      update();
+    }
+  };
+
+  const initialiseRailControls = () => {
+    queueRailControlsUpdate();
+    if (railControlsObserver || typeof MutationObserver !== 'function' || !document.body) return;
+    railControlsObserver = new MutationObserver(queueRailControlsUpdate);
+    railControlsObserver.observe(document.body, {childList: true, subtree: true});
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialiseRailControls, {once: true});
+  } else {
+    initialiseRailControls();
+  }
+  window.addEventListener('resize', queueRailControlsUpdate);
+
+  document.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const control = target?.closest('[data-kanvas-rail-scroll]');
+    if (!(control instanceof HTMLButtonElement)) return;
+    const direction = control.getAttribute('data-kanvas-rail-scroll') === 'previous' ? -1 : 1;
+    const viewport = control.closest('.k-rail')?.querySelector('[data-kanvas-rail-viewport="true"]');
+    if (!(viewport instanceof HTMLElement)) return;
+    event.preventDefault();
+    viewport.scrollBy({
+      left: direction * Math.max(Math.round(viewport.clientWidth * 0.85), 180),
+      behavior: 'smooth'
+    });
+  });
 
   const gridColumnCount = (grid) => {
     const children = Array.from(grid.children);
@@ -1298,7 +1393,7 @@
       href: `/item/${row.itemId}`,
       posterUrl: row.posterUrl ?? null,
       placeholder: {lines: [row.title], footer: row.kind},
-      subtitle: [row.year, row.kind].filter(Boolean).join(' · ') || null,
+      detail: [row.year, row.kind].filter(Boolean).join(' · ') || null,
       state: row.available ? (row.posterUrl ? 'normal' : 'missing_artwork') : 'unavailable',
       available: row.available
     };

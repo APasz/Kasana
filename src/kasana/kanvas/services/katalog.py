@@ -20,6 +20,7 @@ from kasana.kanvas.services.presentation import (
     display_title,
     generated_row,
     group_collection_members,
+    is_generic_episode_title,
     is_series_like,
     item_picker_view,
     placeholder_art_for_summary,
@@ -53,7 +54,7 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderSourceView,
     WatchOrderWorkspaceView,
 )
-from kasana.kanvas.viewmodels.home import MediaRailView
+from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
     IncludedCollectionView,
@@ -71,6 +72,7 @@ from kasana.katalog.public import (
     ArtworkSelection,
     Availability,
     CollectionCreate,
+    CollectionDetail,
     CollectionMembership,
     CollectionMembershipCreate,
     CollectionMembershipUpdate,
@@ -221,7 +223,7 @@ class KanvasKatalogService:
             yield client
 
     async def home_rails(self) -> tuple[MediaRailView, ...]:
-        """Load the three small, real-data home rails concurrently at the HTTP layer."""
+        """Load Home rails and the collection artwork needed by On Deck."""
 
         async with self._client() as client:
             continue_page, on_deck_page, added_page = await gather(
@@ -229,20 +231,38 @@ class KanvasKatalogService:
                 client.on_deck(self._required_user_id(), limit=_RAIL_PAGE_SIZE),
                 client.recently_added_catalogue_items(limit=_RAIL_PAGE_SIZE),
             )
+            on_deck_collections = await _on_deck_collection_details(client, on_deck_page.items)
 
         return (
             MediaRailView(
+                kind=HomeRailKind.CONTINUE,
                 title="Continue",
                 posters=tuple(
-                    poster_from_summary(entry.item, playback=entry.playback)
+                    poster_from_summary(
+                        entry.item,
+                        playback=entry.playback,
+                        href=f"/play/item/{entry.item.id}?resume=true&onDeck=true",
+                    )
                     for entry in continue_page.items
                 ),
             ),
             MediaRailView(
+                kind=HomeRailKind.ON_DECK,
                 title="On Deck",
-                posters=tuple(_on_deck_poster(entry) for entry in on_deck_page.items),
+                posters=tuple(
+                    _on_deck_poster(
+                        entry,
+                        source_collection=(
+                            on_deck_collections.get(entry.source_collection_id)
+                            if entry.source_collection_id is not None
+                            else None
+                        ),
+                    )
+                    for entry in on_deck_page.items
+                ),
             ),
             MediaRailView(
+                kind=HomeRailKind.RECENTLY_ADDED,
                 title="Recently Added",
                 posters=tuple(poster_from_summary(item) for item in added_page.items),
             ),
@@ -252,9 +272,7 @@ class KanvasKatalogService:
         """Load only the small operational inputs needed by the overview."""
 
         async with self._client() as client:
-            status, review = await gather(
-                client.status(), client.metadata_review(limit=100)
-            )
+            status, review = await gather(client.status(), client.metadata_review(limit=100))
         return overview_from_status(
             status,
             unresolved_metadata_count=len({candidate.item_id for candidate in review.items}),
@@ -691,9 +709,7 @@ class KanvasKatalogService:
             sources = await self._watch_order_sources(client, detail.watch_order.collection_id)
         existing_item_ids = frozenset(entry.item.id for entry in existing_entries)
         available_sources = tuple(
-            source
-            for source, item_ids in sources
-            if not existing_item_ids.intersection(item_ids)
+            source for source, item_ids in sources if not existing_item_ids.intersection(item_ids)
         )
         return WatchOrderWorkspaceView(
             revision=detail.watch_order.revision,
@@ -1100,12 +1116,11 @@ class KanvasKatalogService:
                         entryCount=len(item_ids),
                         addable=bool(item_ids),
                         available=available,
-                        poster=poster_from_summary(item).model_copy(
-                            update={
-                                "subtitle": _watch_order_source_subtitle(
-                                    item, len(item_ids), bool(item_ids)
-                                )
-                            }
+                        poster=poster_from_summary(
+                            item,
+                            detail=_watch_order_source_subtitle(
+                                item, len(item_ids), bool(item_ids)
+                            ),
                         ),
                     ),
                     item_ids,
@@ -1204,9 +1219,7 @@ async def _child_posters(
     )
 
 
-def _watch_order_source_subtitle(
-    item: LibraryItemSummary, entry_count: int, addable: bool
-) -> str:
+def _watch_order_source_subtitle(item: LibraryItemSummary, entry_count: int, addable: bool) -> str:
     """Describe a collection-browser card and its recursive playable block."""
 
     labels = [item.series_title] if item.series_title else []
@@ -1241,23 +1254,72 @@ async def _playback_for_item(
     return await client.playback_state(user_id, item_id)
 
 
-def _on_deck_poster(entry: OnDeckEntry) -> PosterView:
-    """Launch the next collection entry or resume an in-progress standalone series."""
+async def _on_deck_collection_details(
+    client: KatalogClient, entries: tuple[OnDeckEntry, ...]
+) -> dict[int, CollectionDetail]:
+    """Load each collection backing On Deck once so its identity art can be shown."""
+
+    collection_ids = tuple(
+        sorted(
+            {
+                entry.source_collection_id
+                for entry in entries
+                if entry.source_collection_id is not None
+            }
+        )
+    )
+    if not collection_ids:
+        return {}
+    details = await gather(
+        *(client.get_collection(collection_id) for collection_id in collection_ids)
+    )
+    return {detail.id: detail for detail in details}
+
+
+def _on_deck_poster(
+    entry: OnDeckEntry, *, source_collection: CollectionDetail | None
+) -> PosterView:
+    """Show each queue source as a series or collection with its next launch target."""
 
     if entry.source_watch_order_id is None:
         return poster_from_summary(
             entry.item,
             partially_watched=entry.partially_watched,
-        ).model_copy(update={"href": f"/play/item/{entry.item.id}?resume=true&onDeck=true"})
+            href=f"/play/item/{entry.item.id}?resume=true&onDeck=true",
+            detail=_on_deck_item_detail(entry.next_item),
+        )
     if entry.source_collection_id is None:
         raise RuntimeError("A collection-backed On Deck entry requires its collection ID.")
-    collection_name = entry.source_collection_name or "Collection"
+    if source_collection is None:
+        raise RuntimeError("On Deck collection artwork could not be loaded.")
+    if source_collection.id != entry.source_collection_id:
+        raise RuntimeError("On Deck collection artwork did not match its queue source.")
+    collection_name = entry.source_collection_name or source_collection.name
+    artwork_url, mosaic_urls = collection_artwork(
+        source_collection,
+        tuple(poster_from_summary(member.item) for member in source_collection.members),
+    )
     return PosterView(
         id=entry.source_collection_id,
         title=collection_name,
-        subtitle=f"Next: {entry.item.title}",
+        detail=_on_deck_item_detail(entry.next_item or entry.item),
         href=f"/play/watch-orders/{entry.source_watch_order_id}?resume=true&onDeck=true",
+        posterUrl=artwork_url,
+        mosaicUrls=mosaic_urls,
         placeholder=PlaceholderArtView(lines=(collection_name,)),
         state=PosterState.NORMAL,
         available=True,
     )
+
+
+def _on_deck_item_detail(item: LibraryItemSummary | None) -> str:
+    """Format the exact queued item's compact episode context and title."""
+
+    if item is None:
+        return "Next episode"
+    title = display_title(item)
+    if item.kind is LibraryItemKind.EPISODE and is_generic_episode_title(
+        title, item.episode_number, item.series_title
+    ):
+        title = None
+    return " · ".join(part for part in (item.context_label, title) if part) or "Next episode"

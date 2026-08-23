@@ -529,7 +529,7 @@ async def item_parent_choices_data(item_id: int, request: Request) -> JSONRespon
     raw_kind = request.query_params.get("kind")
     try:
         target_kind = LibraryItemKind(raw_kind)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return JSONResponse({"error": "A valid item kind is required."}, status_code=422)
     try:
         choices = await KanvasKatalogService(_settings, profile.user.id).item_parent_choices(
@@ -1542,9 +1542,7 @@ async def complete_playback(session_id: str, request: Request) -> JSONResponse:
     return JSONResponse(
         BrowserPlaybackCompletionView(
             nextEntry=(
-                BrowserPlaybackEntryView.from_entry(next_item)
-                if next_item is not None
-                else None
+                BrowserPlaybackEntryView.from_entry(next_item) if next_item is not None else None
             ),
             nextUrl=next_url,
         ).model_dump(by_alias=True, mode="json")
@@ -1842,9 +1840,7 @@ def _requested_subtitle_offset_seconds(request: Request, duration_seconds: float
     return offset_seconds
 
 
-def _requested_subtitle_timing_offset_seconds(
-    request: Request, default_milliseconds: int
-) -> float:
+def _requested_subtitle_timing_offset_seconds(request: Request, default_milliseconds: int) -> float:
     """Read a bounded subtitle timing adjustment, defaulting to the saved session value."""
 
     value = request.query_params.get("timingOffsetMilliseconds")
@@ -2633,9 +2629,7 @@ async def play_item_page(item_id: int, request: Request) -> Response | None:
         with page_shell(_settings, "/library", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
-    start_query = _playback_start_query(
-        current_item.saved_resume_position_seconds, resume, on_deck
-    )
+    start_query = _playback_start_query(current_item.saved_resume_position_seconds, resume, on_deck)
     return RedirectResponse(
         f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
@@ -2677,17 +2671,13 @@ async def play_watch_order_page(watch_order_id: int, request: Request) -> Respon
         with page_shell(_settings, "/collections", "Playback", profile):
             feedback_state("Playback unavailable", "Katalog did not provide a current media item.")
         return
-    start_query = _playback_start_query(
-        current_item.saved_resume_position_seconds, resume, on_deck
-    )
+    start_query = _playback_start_query(current_item.saved_resume_position_seconds, resume, on_deck)
     return RedirectResponse(
         f"/item/{current_item.item_id}?playbackSession={session.id}{start_query}", status_code=303
     )
 
 
-def _playback_start_query(
-    saved_resume_position_seconds: float, resume: bool, on_deck: bool
-) -> str:
+def _playback_start_query(saved_resume_position_seconds: float, resume: bool, on_deck: bool) -> str:
     """Start a new On Deck item, while leaving true resumes to the profile preference."""
 
     if not resume or (on_deck and saved_resume_position_seconds == 0):
@@ -2878,10 +2868,11 @@ async def design_page() -> None:
                     PosterView(
                         id=index + 1,
                         title=state.value.replace("_", " ").title(),
-                        subtitle="2001 · Movie",
+                        detail="2001 · Movie",
                         href=f"/item/{index + 1}",
                         progressPercent=42 if state is PosterState.IN_PROGRESS else None,
                         state=state,
+                        watched=state is PosterState.WATCHED,
                         available=state is not PosterState.UNAVAILABLE,
                     )
                 )

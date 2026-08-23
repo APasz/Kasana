@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kasana.katalog.public import Availability, LibraryItemKind, WatchedFilter
 
@@ -56,17 +56,25 @@ class PosterState(StrEnum):
     MISSING_ARTWORK = "missing_artwork"
 
 
+class PosterAction(StrEnum):
+    """Explicit launch intents available on contextual Home posters."""
+
+    RESUME = "resume"
+    PLAY_NEXT = "play_next"
+
+
 class PosterView(BaseModel):
-    """Safe, small poster payload for HTML and browser components."""
+    """Safe identity, artwork, context, and state for one reusable poster card."""
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=1_000)
-    header: str | None = Field(default=None, max_length=200)
-    subtitle: str | None = Field(default=None, max_length=200)
+    context: str | None = Field(default=None, max_length=200)
+    detail: str | None = Field(default=None, max_length=200)
     href: str = Field(pattern=_POSTER_HREF_PATTERN)
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    mosaic_urls: tuple[str, ...] = Field(default=(), max_length=4, alias="mosaicUrls")
     placeholder: PlaceholderArtView = Field(
         default_factory=lambda: PlaceholderArtView(lines=("Untitled",))
     )
@@ -75,6 +83,23 @@ class PosterView(BaseModel):
     watched: bool = False
     partially_watched: bool = Field(default=False, alias="partiallyWatched")
     available: bool
+
+    @field_validator("context", "detail")
+    @classmethod
+    def normalise_optional_copy(cls, value: str | None) -> str | None:
+        """Keep optional card copy compact without emitting empty visual rows."""
+
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def artwork_sources_are_unambiguous(self) -> PosterView:
+        """Use either one explicit poster or a collection mosaic, never both."""
+
+        if self.poster_url is not None and self.mosaic_urls:
+            raise ValueError("A poster cannot have both explicit artwork and a mosaic.")
+        return self
 
 
 class LibraryDiagnosticCategory(StrEnum):

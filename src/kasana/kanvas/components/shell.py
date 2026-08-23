@@ -79,6 +79,7 @@ def page_shell(
 
     with ui.element("div").classes("k-app"):
         primary_navigation(active_route, profile, settings)
-        with ui.element("main").classes("k-main").props(f'aria-label="{title}"'):
+        main_classes = "k-main k-main--home" if active_route == "/" else "k-main"
+        with ui.element("main").classes(main_classes).props(f'aria-label="{title}"'):
             with ui.element("div").classes("k-page-content"):
                 yield

@@ -808,6 +808,7 @@ class ContinueWatchingEntry(APIModel):
 
 class OnDeckEntry(APIModel):
     item: LibraryItemSummary
+    next_item: LibraryItemSummary | None = None
     source_collection_id: int | None = Field(default=None, gt=0)
     source_watch_order_id: int | None = Field(default=None, gt=0)
     source_watch_order_name: str | None = Field(default=None, min_length=1, max_length=1_000)

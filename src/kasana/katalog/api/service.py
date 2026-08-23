@@ -951,7 +951,9 @@ class KatalogQueryService:
                         Zaisan.item_kind.in_(parent_kinds),
                         Zaisan.id.not_in(excluded_ids),
                     )
-                    .order_by(func.natural_sort_key(Zaisan.sort_title), Zaisan.sort_title, Zaisan.id)
+                    .order_by(
+                        func.natural_sort_key(Zaisan.sort_title), Zaisan.sort_title, Zaisan.id
+                    )
                 )
             )
             summaries = _summaries_for(session, candidates)
@@ -1963,23 +1965,34 @@ class KatalogQueryService:
                 )
                 for series in _in_progress_series(session, user_id)
             )
+            candidates = _on_deck_candidates_without_collection_series(session, candidates)
             if cursor_value is not None:
                 candidates = _on_deck_candidates_after_cursor(candidates, cursor_value)
             page, has_next = _split_page(tuple(candidates), normalised_limit)
+            next_items = tuple(
+                candidate.item
+                if candidate.source is _OnDeckCandidateSource.WATCH_ORDER
+                else _series_resume_item(session, user_id, candidate.item.id)
+                for candidate in page
+            )
+            summary_items = {
+                item.id: item for item in (tuple(candidate.item for candidate in page) + next_items)
+            }
             summaries: dict[int, LibraryItemSummary] = _summaries_for(
-                session, tuple(candidate.item for candidate in page)
+                session, tuple(summary_items.values())
             )
             return PaginatedResponse[OnDeckEntry](
                 items=tuple[OnDeckEntry, ...](
                     OnDeckEntry(
                         item=summaries[candidate.item.id],
+                        next_item=summaries[next_item.id],
                         source_collection_id=candidate.source_collection_id,
                         source_watch_order_id=candidate.source_watch_order_id,
                         source_watch_order_name=candidate.source_watch_order_name,
                         source_collection_name=candidate.source_collection_name,
                         partially_watched=candidate.partially_watched,
                     )
-                    for candidate in page
+                    for candidate, next_item in zip(page, next_items, strict=True)
                 ),
                 next_cursor=(
                     _encode_cursor("on-deck", _on_deck_cursor_values(page[-1]))
@@ -2109,9 +2122,7 @@ class KatalogQueryService:
             )
             return PlaybackStatesResponse(
                 states=tuple(_playback(state) for state in states),
-                partially_watched_item_ids=_partially_watched_item_ids(
-                    session, user_id, item_ids
-                ),
+                partially_watched_item_ids=_partially_watched_item_ids(session, user_id, item_ids),
             )
 
         return self._database.run_transaction(load)
@@ -3087,6 +3098,48 @@ def _in_progress_series(
     return tuple(session.scalars(statement.order_by(Zaisan.sort_title, Zaisan.id)))
 
 
+def _on_deck_candidates_without_collection_series(
+    session: Session, candidates: list[_OnDeckCandidate]
+) -> list[_OnDeckCandidate]:
+    """Prefer an active collection card over its directly included series card."""
+
+    collection_ids = tuple(
+        sorted(
+            {
+                candidate.source_collection_id
+                for candidate in candidates
+                if candidate.source is _OnDeckCandidateSource.WATCH_ORDER
+                and candidate.source_collection_id is not None
+            }
+        )
+    )
+    series_ids = tuple(
+        sorted(
+            {
+                candidate.item.id
+                for candidate in candidates
+                if candidate.source is _OnDeckCandidateSource.IN_PROGRESS_SERIES
+            }
+        )
+    )
+    if not collection_ids or not series_ids:
+        return candidates
+    collection_series_ids = set(
+        session.scalars(
+            select(CollectionKin.library_item_id).where(
+                CollectionKin.collection_id.in_(collection_ids),
+                CollectionKin.library_item_id.in_(series_ids),
+            )
+        )
+    )
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.source is not _OnDeckCandidateSource.IN_PROGRESS_SERIES
+        or candidate.item.id not in collection_series_ids
+    ]
+
+
 def _partially_watched_item_ids(
     session: Session, user_id: int, item_ids: tuple[int, ...]
 ) -> tuple[int, ...]:
@@ -3277,7 +3330,9 @@ def _series_and_episodic_items(
     if context.episode_id is not None:
         episode = _require(session, Zaisan, context.episode_id, "Library item")
         if episode.item_kind not in EPISODIC_ITEM_KINDS:
-            raise CatalogueValidationError("A series episode_id must identify an episode or special.")
+            raise CatalogueValidationError(
+                "A series episode_id must identify an episode or special."
+            )
         series = _series_parent_for_episodic_item(session, episode)
         if context.series_id is not None and context.series_id != series.id:
             raise CatalogueValidationError("The episode does not belong to the requested series.")
@@ -3372,6 +3427,17 @@ def _series_start_index(
         ),
         len(episodic_items),
     )
+
+
+def _series_resume_item(session: Session, user_id: int, series_id: int) -> Zaisan:
+    """Resolve the exact episode a resume-enabled series launch will begin with."""
+
+    context = SeriesPlaybackContext(series_id=series_id, resume=True)
+    _, episodic_items = _series_and_episodic_items(session, context)
+    start_index = _series_start_index(session, user_id, episodic_items, context)
+    if start_index >= len(episodic_items):
+        raise RuntimeError("An in-progress series must have an uncompleted episode.")
+    return episodic_items[start_index]
 
 
 def _series_parent_for_episodic_item(session: Session, item: Zaisan) -> Zaisan:

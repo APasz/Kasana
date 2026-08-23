@@ -88,6 +88,7 @@ class FakeHTMLElement extends FakeElement {}
 const elementRegistry = new Map();
 const storage = new Map();
 const consoleErrors = [];
+const railElements = [];
 let throwPosterCreation = false;
 
 global.HTMLElement = FakeHTMLElement;
@@ -109,6 +110,9 @@ global.document = {
   addEventListener() {},
   querySelector() {
     return null;
+  },
+  querySelectorAll(selector) {
+    return selector === '.k-rail' ? railElements : [];
   },
   createElement(name) {
     if (name === 'kanvas-poster' && throwPosterCreation) throw new Error('rendering failed');
@@ -158,7 +162,7 @@ const source = [
 ].join('\n');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
-  "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, libraryGridPayload};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
+  "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, posterMarkup, libraryGridPayload, updateRailControls};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
 ).replace(
   "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
   "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
@@ -228,13 +232,13 @@ async function testValidPageRetainsAvailable() {
 function testPosterPlaceholderNormalisation() {
   const poster = globalThis.__libraryTest.normalisePoster({
     ...validPoster(11),
-    header: ' The show ',
+    context: ' The show ',
     posterUrl: null,
     placeholder: {lines: [' Main title ', '', 'Subtitle'], footer: ' S01 E02 '}
   });
 
   assert.equal(poster.posterUrl, null);
-  assert.equal(poster.header, 'The show');
+  assert.equal(poster.context, 'The show');
   assert.deepEqual(poster.placeholder.lines, ['Main title', 'Subtitle']);
   assert.equal(poster.placeholder.footer, 'S01 E02');
   assert.deepEqual(
@@ -253,6 +257,77 @@ function testPosterPartialWatchNormalisation() {
     globalThis.__libraryTest.normalisePoster({...validPoster(17), partiallyWatched: 'true'}),
     null
   );
+}
+
+function testPosterMosaicAndHomeActionNormalisation() {
+  const poster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(18),
+    posterUrl: null,
+    mosaicUrls: ['/kanvas/artwork/18/19', '/kanvas/artwork/20/21'],
+    action: 'play_next',
+    detail: 'Next: Pilot'
+  });
+
+  assert.deepEqual(poster.mosaicUrls, ['/kanvas/artwork/18/19', '/kanvas/artwork/20/21']);
+  assert.equal(poster.action, 'play_next');
+  const markup = globalThis.__libraryTest.posterMarkup(poster);
+  assert.match(markup, /k-poster-mosaic/);
+  assert.match(markup, /k-poster__action/);
+  assert.match(markup, /k-poster__action-icon/);
+  assert.doesNotMatch(markup, /k-poster__cue/);
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(19), action: 'watch_now'}),
+    null
+  );
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({
+      ...validPoster(20),
+      mosaicUrls: ['/kanvas/artwork/20/21']
+    }),
+    null
+  );
+}
+
+function testPosterStatusBadgeMarkup() {
+  const watched = globalThis.__libraryTest.posterMarkup(
+    globalThis.__libraryTest.normalisePoster({...validPoster(21), watched: true})
+  );
+  const partiallyWatched = globalThis.__libraryTest.posterMarkup(
+    globalThis.__libraryTest.normalisePoster({...validPoster(22), partiallyWatched: true})
+  );
+  const unavailable = globalThis.__libraryTest.posterMarkup(
+    globalThis.__libraryTest.normalisePoster({...validPoster(23), available: false, state: 'unavailable'})
+  );
+
+  assert.match(watched, /k-poster__completion--watched/);
+  assert.match(partiallyWatched, /k-poster__completion--partial/);
+  assert.match(unavailable, /k-poster__status--unavailable/);
+}
+
+function testRailControlsHideWhenViewportDoesNotOverflow() {
+  const buildRail = (clientWidth, scrollWidth) => {
+    const viewport = new FakeHTMLElement();
+    viewport.clientWidth = clientWidth;
+    viewport.scrollWidth = scrollWidth;
+    const controls = new FakeHTMLElement();
+    const rail = new FakeHTMLElement();
+    rail.querySelector = (selector) => {
+      if (selector === '[data-kanvas-rail-viewport="true"]') return viewport;
+      return selector === '.k-rail__controls' ? controls : null;
+    };
+    return {controls, rail};
+  };
+  const short = buildRail(600, 600);
+  const long = buildRail(600, 602);
+  railElements.push(short.rail, long.rail);
+
+  try {
+    globalThis.__libraryTest.updateRailControls();
+    assert.equal(short.controls.hidden, true);
+    assert.equal(long.controls.hidden, false);
+  } finally {
+    railElements.length = 0;
+  }
 }
 
 function testPosterNormalisationAllowsOnlySafeItemAndResumeLinks() {
@@ -589,9 +664,9 @@ function testItemEditorUsesTaskFocusedTabs() {
   assert.match(editor.renderOrganiseTab('movie', {}, ''), /Library organisation/);
   assert.match(
     editor.renderArtworkTab('', 'series', {provider: 'tmdb', provider_id: '63712'}),
-    /Fetch poster from current match/
+    /Load poster choices/
   );
-  assert.doesNotMatch(editor.renderArtworkTab('', 'episode', null), /Fetch poster from current match/);
+  assert.doesNotMatch(editor.renderArtworkTab('', 'episode', null), /Load poster choices/);
 }
 
 function testMetadataProviderLinksSupportDirectReassignment() {
@@ -776,6 +851,9 @@ async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
   testPosterPartialWatchNormalisation();
+  testPosterMosaicAndHomeActionNormalisation();
+  testPosterStatusBadgeMarkup();
+  testRailControlsHideWhenViewportDoesNotOverflow();
   testPosterNormalisationAllowsOnlySafeItemAndResumeLinks();
   testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
