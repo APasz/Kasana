@@ -449,9 +449,9 @@ def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time
     head = (repository_root / "src/kasana/kanvas/components/shell.py").read_text(encoding="utf-8")
     libass = repository_root / "src/kasana/kanvas/static/libass/subtitles-octopus.js"
 
-    assert '"audio", "Audio tracks"' in player
-    assert '"subtitles", "Subtitle tracks"' in player
-    assert player.index('"subtitles", "Subtitle tracks"') < player.index('"mute", "Mute"')
+    assert "_PlayerControlAction.AUDIO" in player
+    assert "_PlayerControlAction.SUBTITLES" in player
+    assert player.index("IconName.SUBTITLES") < player.index("IconName.VOLUME")
     assert "data-player-subtitle-unsupported" in player
     assert "data-player-subtitle-timing-step" in player
     assert "data-player-subtitle-font-scale-step" in player
@@ -750,6 +750,31 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "k-playback-queue" in element._classes  # pyright: ignore[reportPrivateUsage]
         ]
+        toggle_controls = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-player-action") == "toggle"
+        ]
+        overflow_controls = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-player-action") == "overflow"
+        ]
+        timeline_previews = [
+            element
+            for element in client.elements.values()
+            if "data-player-timeline-preview" in _element_props(element)
+        ]
+        mobile_menus = [
+            element
+            for element in client.elements.values()
+            if "data-player-mobile-menu" in _element_props(element)
+        ]
+        tooltips = [
+            element
+            for element in client.elements.values()
+            if "data-player-tooltip-host" in _element_props(element)
+        ]
         fullscreen_title = next(
             element
             for element in client.elements.values()
@@ -775,6 +800,14 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert player_elements[0]._props["play-on-load"] == "false"  # pyright: ignore[reportPrivateUsage]
     assert len(fallback_links) == 1
     assert queues == []
+    assert len(toggle_controls) == 1
+    assert "k-player__control--toggle" in toggle_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
+    assert len(overflow_controls) == 1
+    assert len(timeline_previews) == 1
+    assert len(mobile_menus) == 1
+    assert toggle_controls[0]._props["data-player-tooltip"] == "Play"  # pyright: ignore[reportPrivateUsage]
+    assert len(tooltips) == 1
+    assert "hidden" in tooltips[0]._props  # pyright: ignore[reportPrivateUsage]
     assert fullscreen_title._text == "Example Show · Pilot"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_time._props["aria-label"] == "Current time"  # pyright: ignore[reportPrivateUsage]

@@ -33,7 +33,7 @@ class ButtonType(StrEnum):
 
 
 class IconName(StrEnum):
-    """Locally controlled icons available to Kanvas components."""
+    """Locally controlled SVG icons available to Kanvas components."""
 
     HOME = "home"
     LIBRARY = "library"
@@ -41,6 +41,17 @@ class IconName(StrEnum):
     SEARCH = "search"
     ADMINISTRATION = "admin"
     PLAY = "play"
+    PAUSE = "pause"
+    REWIND = "rewind"
+    FORWARD = "forward"
+    NEXT = "next"
+    SUBTITLES = "subtitles"
+    AUDIO = "audio"
+    VOLUME = "volume"
+    VOLUME_MUTED = "volume_muted"
+    FULLSCREEN = "fullscreen"
+    FULLSCREEN_EXIT = "fullscreen_exit"
+    MORE = "more"
     CHECK = "check"
     BACK = "back"
 
@@ -54,6 +65,34 @@ _KEY_ACTIONS: dict[str, NavigationAction] = {
     "ArrowDown": NavigationAction.MOVE_DOWN,
     "ArrowLeft": NavigationAction.MOVE_LEFT,
     "ArrowRight": NavigationAction.MOVE_RIGHT,
+}
+
+
+_ICON_PATHS: dict[IconName, str] = {
+    IconName.HOME: (
+        "M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z M9 21v-6h6v6"
+    ),
+    IconName.LIBRARY: "M4 4h16v16H4z M8 4v16 M12 4v16",
+    IconName.COLLECTIONS: "M4 5h16v4H4z M4 15h16v4H4z M7 9v6 M17 9v6",
+    IconName.SEARCH: "m20 20-4.5-4.5 M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z",
+    IconName.ADMINISTRATION: (
+        "M12 3v3 M12 18v3 M3 12h3 M18 12h3 M5.6 5.6l2.1 2.1 M16.3 16.3l2.1 2.1 "
+        "M18.4 5.6l-2.1 2.1 M7.7 16.3l-2.1 2.1 M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"
+    ),
+    IconName.PLAY: "M8 5v14l11-7z",
+    IconName.PAUSE: "M8 5v14 M16 5v14",
+    IconName.REWIND: "M20 5v14l-7-7z M11 5v14l-7-7z",
+    IconName.FORWARD: "M4 5v14l7-7z M13 5v14l7-7z",
+    IconName.NEXT: "M5 5v14l9-7z M16 5v14",
+    IconName.SUBTITLES: "M4 5h16v11H8l-4 4z M8 9h8 M8 12h5",
+    IconName.AUDIO: "M4 13a8 8 0 0 1 16 0v5h-3v-5 M4 13v5h3v-5",
+    IconName.VOLUME: "M4 10h4l5-4v12l-5-4H4z M16 9a4 4 0 0 1 0 6 M18 6a8 8 0 0 1 0 12",
+    IconName.VOLUME_MUTED: "M4 10h4l5-4v12l-5-4H4z M17 10l4 4 M21 10l-4 4",
+    IconName.FULLSCREEN: "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
+    IconName.FULLSCREEN_EXIT: "M9 4v5H4 M15 4v5h5 M20 15h-5v5 M4 15h5v5",
+    IconName.MORE: "M12 5v2 M12 11v2 M12 17v2",
+    IconName.CHECK: "m5 12 4 4L19 6",
+    IconName.BACK: "m14 5-7 7 7 7",
 }
 
 
@@ -112,27 +151,12 @@ def icon_action(label: str, icon: IconName, handler: Callable[..., Any] | None =
 
 
 def icon_svg(name: IconName | str) -> None:
-    """Render the five locally controlled navigation glyphs as inline SVG."""
+    """Render one locally controlled glyph as inline SVG."""
 
-    paths = {
-        IconName.HOME: (
-            "M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z M9 21v-6h6v6"
-        ),
-        IconName.LIBRARY: "M4 4h16v16H4z M8 4v16 M12 4v16",
-        IconName.COLLECTIONS: "M4 5h16v4H4z M4 15h16v4H4z M7 9v6 M17 9v6",
-        IconName.SEARCH: "m20 20-4.5-4.5 M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z",
-        IconName.ADMINISTRATION: (
-            "M12 3v3 M12 18v3 M3 12h3 M18 12h3 M5.6 5.6l2.1 2.1 M16.3 16.3l2.1 2.1 "
-            "M18.4 5.6l-2.1 2.1 M7.7 16.3l-2.1 2.1 M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"
-        ),
-        IconName.PLAY: "M8 5v14l11-7z",
-        IconName.CHECK: "m5 12 4 4L19 6",
-        IconName.BACK: "m14 5-7 7 7 7",
-    }
     try:
         icon = IconName(name)
     except ValueError as error:
         msg = f"Unknown Kanvas icon: {name}."
         raise ValueError(msg) from error
-    path = paths[icon]
+    path = _ICON_PATHS[icon]
     ui.html(f'<svg class="k-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="{path}" /></svg>')

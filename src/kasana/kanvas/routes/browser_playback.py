@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from nicegui import ui
+from enum import StrEnum
+from html import escape
 
+from nicegui import ui
+from nicegui.element import Element
+
+from kasana.kanvas.components.controls import IconName, icon_svg
 from kasana.kanvas.viewmodels.playback import BrowserPlaybackEntryView
 from kasana.katalog.public import (
     PlaybackPlanEntry,
@@ -14,19 +19,95 @@ from kasana.katalog.public import (
 _PLAYBACK_RATES: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
-def _player_control(
-    label: str,
-    action: str,
+class _PlayerControlAction(StrEnum):
+    """Browser actions available from the custom player controls."""
+
+    TOGGLE = "toggle"
+    REWIND = "rewind"
+    FORWARD = "forward"
+    MENU = "menu"
+    NEXT = "next"
+    SUBTITLES = "subtitles"
+    AUDIO = "audio"
+    MUTE = "mute"
+    FULLSCREEN = "fullscreen"
+    OVERFLOW = "overflow"
+
+
+def _player_icon(icon: IconName, alternate_icon: IconName | None = None) -> None:
+    """Render a player icon, optionally with a script-selectable alternate glyph."""
+
+    with ui.element("span").classes("k-player__control-icon k-player__control-icon--default"):
+        icon_svg(icon)
+    if alternate_icon is not None:
+        with ui.element("span").classes(
+            "k-player__control-icon k-player__control-icon--alternate"
+        ):
+            icon_svg(alternate_icon)
+
+
+def _player_action_button(
+    classes: str,
+    action: _PlayerControlAction,
     accessible_name: str,
     *,
-    extra_classes: str = "",
+    alternate_icon: IconName | None = None,
+) -> Element:
+    """Build one accessible player action shell for its SVG content."""
+
+    escaped_name = escape(accessible_name, quote=True)
+    button = ui.element("button").classes(classes)
+    button.props(
+        f'type="button" data-player-action="{action.value}" '
+        f'aria-label="{escaped_name}" data-player-tooltip="{escaped_name}"'
+        + (' data-player-icon-state="default"' if alternate_icon is not None else "")
+    )
+    if action is _PlayerControlAction.OVERFLOW:
+        button.props('aria-haspopup="true" aria-expanded="false"')
+    return button
+
+
+def _player_control(
+    icon: IconName,
+    action: _PlayerControlAction,
+    accessible_name: str,
+    *,
+    alternate_icon: IconName | None = None,
+    extra_classes: tuple[str, ...] = (),
 ) -> None:
     """Render one semantic button handled by the browser player component."""
 
-    with ui.element("button").classes(f"k-player__control {extra_classes}").props(
-        f'type="button" data-player-action="{action}" aria-label="{accessible_name}"'
-    ):
-        ui.html(label, tag="span").classes("k-player__control-label")
+    button = _player_action_button(
+        " ".join(("k-player__control", *extra_classes)),
+        action,
+        accessible_name,
+        alternate_icon=alternate_icon,
+    )
+    with button:
+        _player_icon(icon, alternate_icon)
+
+
+def _mobile_player_menu_option(
+    icon: IconName,
+    action: _PlayerControlAction,
+    label: str,
+    *,
+    alternate_icon: IconName | None = None,
+    dynamic_label: bool = False,
+) -> None:
+    """Render one labelled control inside the narrow-player overflow menu."""
+
+    button = _player_action_button(
+        "k-player__mobile-menu-option",
+        action,
+        label,
+        alternate_icon=alternate_icon,
+    )
+    with button:
+        _player_icon(icon, alternate_icon)
+        visible_label = ui.label(label).classes("k-player__mobile-menu-option-label")
+        if dynamic_label:
+            visible_label.props(f'data-player-action-label="{action.value}"')
 
 
 def _queued_entries(session: PlaybackSessionResponse) -> tuple[PlaybackPlanEntry, ...]:
@@ -277,6 +358,9 @@ def render_browser_playback_card(
                 'type="range" min="0" max="0" value="0" step="0.1" '
                 'data-player-timeline aria-label="Seek" disabled'
             )
+            ui.label("0:00").classes("k-player__timeline-preview").props(
+                'data-player-timeline-preview aria-hidden="true" hidden'
+            )
             ui.label("-0:00").classes(
                 "k-player__time k-player__time--remaining k-player__bar-label"
             ).props(
@@ -287,26 +371,102 @@ def render_browser_playback_card(
                 'aria-label="Playback controls"'
             ):
                 with ui.element("div").classes("k-player__transport-controls"):
-                    _player_control("-10s", "rewind", "Rewind 10 seconds")
-                    _player_control("&#9654;", "toggle", "Play")
-                    _player_control("&#8942;", "menu", "Playback settings")
-                    _player_control("+10s", "forward", "Forward 10 seconds")
+                    _player_control(
+                        IconName.REWIND,
+                        _PlayerControlAction.REWIND,
+                        "Rewind 10 seconds",
+                    )
+                    _player_control(
+                        IconName.PLAY,
+                        _PlayerControlAction.TOGGLE,
+                        "Play",
+                        alternate_icon=IconName.PAUSE,
+                        extra_classes=("k-player__control--toggle",),
+                    )
+                    _player_control(
+                        IconName.MORE,
+                        _PlayerControlAction.MENU,
+                        "Playback settings",
+                        extra_classes=("k-player__control--settings",),
+                    )
+                    _player_control(
+                        IconName.FORWARD,
+                        _PlayerControlAction.FORWARD,
+                        "Forward 10 seconds",
+                    )
                     if has_queued_item:
                         _player_control(
-                            "Play next",
-                            "next",
+                            IconName.NEXT,
+                            _PlayerControlAction.NEXT,
                             "Play the next queue item",
-                            extra_classes="k-player__control--next",
+                            extra_classes=("k-player__control--next",),
                         )
+                    _player_control(
+                        IconName.MORE,
+                        _PlayerControlAction.OVERFLOW,
+                        "More playback controls",
+                        extra_classes=("k-player__control--overflow",),
+                    )
                 with ui.element("div").classes("k-player__audio-controls"):
-                    _player_control("&#128172;", "subtitles", "Subtitle tracks")
-                    _player_control("&#127911;", "audio", "Audio tracks")
-                    _player_control("&#128266;", "mute", "Mute")
+                    _player_control(
+                        IconName.SUBTITLES, _PlayerControlAction.SUBTITLES, "Subtitle tracks"
+                    )
+                    _player_control(IconName.AUDIO, _PlayerControlAction.AUDIO, "Audio tracks")
+                    _player_control(
+                        IconName.VOLUME,
+                        _PlayerControlAction.MUTE,
+                        "Mute",
+                        alternate_icon=IconName.VOLUME_MUTED,
+                    )
                     ui.element("input").classes("k-player__volume").props(
                         'type="range" min="0" max="1" value="1" step="0.05" '
                         'data-player-volume aria-label="Volume"'
                     )
-                    _player_control("&#9974;", "fullscreen", "Fullscreen")
+                    _player_control(
+                        IconName.FULLSCREEN,
+                        _PlayerControlAction.FULLSCREEN,
+                        "Fullscreen",
+                        alternate_icon=IconName.FULLSCREEN_EXIT,
+                    )
+            with ui.element("div").classes("k-player__mobile-menu").props(
+                'data-player-mobile-menu role="group" aria-label="More playback controls" hidden'
+            ):
+                _mobile_player_menu_option(
+                    IconName.ADMINISTRATION,
+                    _PlayerControlAction.MENU,
+                    "Playback settings",
+                )
+                _mobile_player_menu_option(
+                    IconName.SUBTITLES,
+                    _PlayerControlAction.SUBTITLES,
+                    "Subtitle tracks",
+                )
+                _mobile_player_menu_option(
+                    IconName.AUDIO,
+                    _PlayerControlAction.AUDIO,
+                    "Audio tracks",
+                )
+                _mobile_player_menu_option(
+                    IconName.VOLUME,
+                    _PlayerControlAction.MUTE,
+                    "Mute",
+                    alternate_icon=IconName.VOLUME_MUTED,
+                    dynamic_label=True,
+                )
+                _mobile_player_menu_option(
+                    IconName.FULLSCREEN,
+                    _PlayerControlAction.FULLSCREEN,
+                    "Fullscreen",
+                    alternate_icon=IconName.FULLSCREEN_EXIT,
+                    dynamic_label=True,
+                )
+                with ui.element("label").classes("k-player__mobile-volume"):
+                    icon_svg(IconName.VOLUME)
+                    ui.label("Volume").classes("k-player__mobile-volume-label")
+                    ui.element("input").classes("k-player__volume").props(
+                        'type="range" min="0" max="1" value="1" step="0.05" '
+                        'data-player-mobile-volume aria-label="Volume"'
+                    )
         with ui.element("div").classes("k-player__context-menu").props(
             'data-player-context-menu role="menu" hidden'
         ):
@@ -323,4 +483,7 @@ def render_browser_playback_card(
                 )
                 ui.html("Show browser controls", tag="span")
         _render_track_menus(entry)
+        ui.element("span").classes("k-player__tooltip").props(
+            'data-player-tooltip-host aria-hidden="true" hidden'
+        )
     _render_playback_queue(session)

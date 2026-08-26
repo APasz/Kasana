@@ -2953,6 +2953,7 @@
       const status = this.querySelector('.k-player__status');
       const controls = this.querySelector('.k-player__controls');
       const timeline = this.querySelector('[data-player-timeline]');
+      const timelinePreview = this.querySelector('[data-player-timeline-preview]');
       const bufferedIndicator = this.querySelector('[data-player-buffered]');
       const currentTime = this.querySelector('[data-player-current-time]');
       const remainingTime = this.querySelector('[data-player-remaining-time]');
@@ -2960,10 +2961,13 @@
       const contextMenu = this.querySelector('[data-player-context-menu]');
       const audioMenu = this.querySelector('[data-player-audio-menu]');
       const subtitleMenu = this.querySelector('[data-player-subtitle-menu]');
+      const mobileMenu = this.querySelector('[data-player-mobile-menu]');
+      const playerTooltip = this.querySelector('[data-player-tooltip-host]');
       const subtitleTimingLabel = subtitleMenu?.querySelector('[data-player-subtitle-timing-label]');
       const subtitleFontScaleLabel = subtitleMenu?.querySelector('[data-player-subtitle-font-scale-label]');
       const subtitleAppearance = subtitleMenu?.querySelector('[data-player-subtitle-appearance]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
+      const mobileVolume = this.querySelector('[data-player-mobile-volume]');
       const kestrelLink = this.querySelector('[data-player-kestrel]');
       const audioOptions = audioMenu?.querySelector('[data-player-audio-options]');
       const subtitleOptions = subtitleMenu?.querySelector('[data-player-subtitle-options]');
@@ -2987,7 +2991,7 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -3023,6 +3027,8 @@
       let entryPlaybackReady = false;
       let mediaEntryPosition = null;
       let webkitFullscreenActive = false;
+      let timelinePointerDown = false;
+      let activePlayerTooltipButton = null;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
       let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
       const profileSubtitlePreference = typeof document.querySelector === 'function'
@@ -3254,14 +3260,95 @@
         audioMenu.hidden = true;
         subtitleMenu.hidden = true;
       };
+      const floatingMenuInset = 8;
+      const clampFloatingMenuOffset = (offset, maximum) => {
+        const boundedMaximum = Math.max(floatingMenuInset, maximum);
+        return Math.max(floatingMenuInset, Math.min(offset, boundedMaximum));
+      };
+      const playerTooltipText = (button) => (
+        button.getAttribute('aria-label')
+        || button.getAttribute('data-player-tooltip')
+        || button.textContent.trim()
+      );
+      const hidePlayerTooltip = () => {
+        activePlayerTooltipButton = null;
+        if (playerTooltip.hidden) return;
+        playerTooltip.hidden = true;
+        showFullscreenControls();
+      };
+      const showPlayerTooltip = (button) => {
+        if (button.hasAttribute('disabled')) return;
+        const text = playerTooltipText(button);
+        if (!text) return;
+        activePlayerTooltipButton = button;
+        playerTooltip.textContent = text;
+        playerTooltip.hidden = false;
+        const playerBounds = this.getBoundingClientRect();
+        const buttonBounds = button.getBoundingClientRect();
+        const tooltipBounds = playerTooltip.getBoundingClientRect();
+        const minimumCenter = tooltipBounds.width / 2 + floatingMenuInset;
+        const maximumCenter = playerBounds.width - minimumCenter;
+        const center = buttonBounds.left - playerBounds.left + buttonBounds.width / 2;
+        const left = Math.max(minimumCenter, Math.min(center, Math.max(minimumCenter, maximumCenter)));
+        const above = buttonBounds.top - playerBounds.top - tooltipBounds.height - floatingMenuInset;
+        const below = buttonBounds.bottom - playerBounds.top + floatingMenuInset;
+        const top = above >= floatingMenuInset
+          ? above
+          : clampFloatingMenuOffset(
+            below,
+            playerBounds.height - tooltipBounds.height - floatingMenuInset
+          );
+        playerTooltip.style.left = `${left}px`;
+        playerTooltip.style.top = `${top}px`;
+        showFullscreenControls();
+      };
+      const positionFloatingMenu = (
+        menu,
+        playerBounds,
+        menuBounds,
+        clientX,
+        preferredTop,
+        alternateTop
+      ) => {
+        const maximumLeft = playerBounds.width - menuBounds.width - floatingMenuInset;
+        const maximumTop = playerBounds.height - menuBounds.height - floatingMenuInset;
+        const topFits = (top) => top >= floatingMenuInset && top <= maximumTop;
+        const top = topFits(preferredTop) || !topFits(alternateTop)
+          ? preferredTop
+          : alternateTop;
+        menu.style.left = `${clampFloatingMenuOffset(clientX - playerBounds.left, maximumLeft)}px`;
+        menu.style.top = `${clampFloatingMenuOffset(top, maximumTop)}px`;
+      };
+      const overflowControl = controls.querySelector('[data-player-action="overflow"]');
+      const closeMobileMenu = () => {
+        mobileMenu.hidden = true;
+        if (overflowControl instanceof Element) overflowControl.setAttribute('aria-expanded', 'false');
+      };
+      const showMobileMenu = () => {
+        hidePlayerTooltip();
+        contextMenu.hidden = true;
+        closeTrackMenus();
+        mobileMenu.hidden = false;
+        if (overflowControl instanceof Element) overflowControl.setAttribute('aria-expanded', 'true');
+        showFullscreenControls();
+      };
       const showTrackMenu = (menu, target) => {
-        const bounds = this.getBoundingClientRect();
+        hidePlayerTooltip();
+        const playerBounds = this.getBoundingClientRect();
         const targetBounds = target.getBoundingClientRect();
         contextMenu.hidden = true;
         closeTrackMenus();
+        closeMobileMenu();
         menu.hidden = false;
-        menu.style.left = `${Math.max(8, Math.min(targetBounds.left - bounds.left, bounds.width - 210))}px`;
-        menu.style.top = `${Math.max(8, targetBounds.top - bounds.top - 8)}px`;
+        const menuBounds = menu.getBoundingClientRect();
+        positionFloatingMenu(
+          menu,
+          playerBounds,
+          menuBounds,
+          targetBounds.left,
+          targetBounds.top - playerBounds.top - menuBounds.height - floatingMenuInset,
+          targetBounds.bottom - playerBounds.top + floatingMenuInset
+        );
         showFullscreenControls();
       };
       const updateTrackOptions = () => {
@@ -3510,7 +3597,21 @@
         const hours = Math.floor(minutes / 60);
         return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
       };
-      const actionButton = (action) => controls.querySelector(`[data-player-action="${action}"]`);
+      const actionButtons = (action) => Array.from(
+        this.querySelectorAll(`[data-player-action="${action}"]`)
+      ).filter((button) => button instanceof Element);
+      const updateActionPresentation = (action, accessibleName, alternateIcon) => {
+        const buttons = actionButtons(action);
+        buttons.forEach((button) => {
+          button.setAttribute('aria-label', accessibleName);
+          button.dataset.playerTooltip = accessibleName;
+          button.dataset.playerIconState = alternateIcon ? 'alternate' : 'default';
+        });
+        if (buttons.includes(activePlayerTooltipButton)) playerTooltip.textContent = accessibleName;
+        this.querySelectorAll(`[data-player-action-label="${action}"]`).forEach((label) => {
+          label.textContent = accessibleName;
+        });
+      };
       const playbackDuration = () => {
         const mediaDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
         if (deliveryMode !== 'direct' && catalogueDuration > 0) return catalogueDuration;
@@ -3546,6 +3647,32 @@
         bufferedIndicator.style.setProperty('--buffered-start-percent', `${startPercent}%`);
         bufferedIndicator.style.setProperty('--buffered-end-percent', `${endPercent}%`);
       };
+      const showTimelinePreview = (position, clientX = null) => {
+        const duration = playbackDuration();
+        const timelineBounds = timeline.getBoundingClientRect();
+        if (!Number.isFinite(position) || duration <= 0 || timelineBounds.width <= 0) return;
+        const relativePosition = Math.min(Math.max(position / duration, 0), 1);
+        const resolvedClientX = Number.isFinite(clientX)
+          ? clientX
+          : timelineBounds.left + timelineBounds.width * relativePosition;
+        const cardBounds = this.getBoundingClientRect();
+        const offset = Math.min(
+          Math.max(resolvedClientX - cardBounds.left, 0),
+          cardBounds.width,
+        );
+        timelinePreview.textContent = formatTime(position);
+        timelinePreview.style.setProperty('--k-player-timeline-preview-offset', `${offset}px`);
+        timelinePreview.hidden = false;
+      };
+      const hideTimelinePreview = () => { timelinePreview.hidden = true; };
+      const timelinePositionAt = (clientX) => {
+        const duration = playbackDuration();
+        const timelineBounds = timeline.getBoundingClientRect();
+        if (!Number.isFinite(clientX) || duration <= 0 || timelineBounds.width <= 0) return null;
+        const ratio = Math.min(Math.max((clientX - timelineBounds.left) / timelineBounds.width, 0), 1);
+        return duration * ratio;
+      };
+      const volumeControls = [volume, mobileVolume];
       const updateControls = () => {
         const duration = playbackDuration();
         const position = playbackPosition();
@@ -3558,28 +3685,19 @@
         updateBufferedIndicator(duration, position);
         currentTime.textContent = formatTime(position);
         remainingTime.textContent = `-${formatTime(Math.max(duration - position, 0))}`;
-        const toggle = actionButton('toggle');
-        if (toggle) {
-          toggle.innerHTML = video.paused ? '&#9654;' : '&#10074;&#10074;';
-          toggle.setAttribute('aria-label', video.paused ? 'Play' : 'Pause');
-        }
-        const mute = actionButton('mute');
-        if (mute) {
-          mute.innerHTML = video.muted || video.volume === 0 ? '&#128263;' : '&#128266;';
-          mute.setAttribute('aria-label', video.muted || video.volume === 0 ? 'Unmute' : 'Mute');
-        }
-        const fullscreen = actionButton('fullscreen');
-        if (fullscreen) {
-          const isFullscreen = document.fullscreenElement === this || document.fullscreenElement === video;
-          fullscreen.innerHTML = isFullscreen ? '&#10005;' : '&#9974;';
-          fullscreen.setAttribute('aria-label', isFullscreen ? 'Exit fullscreen' : 'Fullscreen');
-        }
+        updateActionPresentation('toggle', video.paused ? 'Play' : 'Pause', !video.paused);
+        const muted = video.muted || video.volume === 0;
+        updateActionPresentation('mute', muted ? 'Unmute' : 'Mute', muted);
+        const isFullscreen = document.fullscreenElement === this || document.fullscreenElement === video;
+        updateActionPresentation('fullscreen', isFullscreen ? 'Exit fullscreen' : 'Fullscreen', isFullscreen);
         contextMenu.querySelectorAll('[data-player-rate]').forEach((option) => {
           const rate = Number(option.getAttribute('data-player-rate'));
           option.setAttribute('aria-pressed', String(Math.abs(rate - video.playbackRate) < 0.01));
         });
-        volume.value = String(video.muted ? 0 : video.volume);
-        volume.style.setProperty('--volume-percent', `${video.muted ? 0 : video.volume * 100}%`);
+        volumeControls.forEach((volumeControl) => {
+          volumeControl.value = String(muted ? 0 : video.volume);
+          volumeControl.style.setProperty('--volume-percent', `${muted ? 0 : video.volume * 100}%`);
+        });
         updateTrackOptions();
       };
       const isCardFullscreen = () => document.fullscreenElement === this;
@@ -3616,25 +3734,46 @@
         if (!isCardFullscreen()) return;
         this.classList.remove('k-player--controls-hidden');
         clearFullscreenHideTimer();
-        if (!video.paused && contextMenu.hidden) {
+        if (!video.paused && contextMenu.hidden && mobileMenu.hidden && audioMenu.hidden && subtitleMenu.hidden && playerTooltip.hidden) {
           fullscreenHideTimer = window.setTimeout(() => {
-            if (isCardFullscreen() && !video.paused && contextMenu.hidden) {
+            if (
+              isCardFullscreen()
+              && !video.paused
+              && contextMenu.hidden
+              && mobileMenu.hidden
+              && audioMenu.hidden
+              && subtitleMenu.hidden
+              && playerTooltip.hidden
+            ) {
               this.classList.add('k-player--controls-hidden');
             }
           }, 2600);
         }
       };
       const hideContextMenu = () => {
+        hidePlayerTooltip();
         contextMenu.hidden = true;
         closeTrackMenus();
+        closeMobileMenu();
         showFullscreenControls();
       };
       const showContextMenu = (clientX, clientY) => {
-        const bounds = this.getBoundingClientRect();
+        hidePlayerTooltip();
+        const playerBounds = this.getBoundingClientRect();
         contextMenu.hidden = false;
+        closeTrackMenus();
+        closeMobileMenu();
         showFullscreenControls();
-        contextMenu.style.left = `${Math.max(8, Math.min(clientX - bounds.left, bounds.width - 210))}px`;
-        contextMenu.style.top = `${Math.max(8, clientY - bounds.top)}px`;
+        const menuBounds = contextMenu.getBoundingClientRect();
+        const preferredTop = clientY - playerBounds.top;
+        positionFloatingMenu(
+          contextMenu,
+          playerBounds,
+          menuBounds,
+          clientX,
+          preferredTop,
+          preferredTop - menuBounds.height - floatingMenuInset
+        );
       };
       const toggleFullscreen = async () => {
         try {
@@ -3884,12 +4023,13 @@
           status.textContent = 'This subtitle needs Kestrel, but its fallback is unavailable.';
         }
       };
-      controls.addEventListener('click', (event) => {
-        showFullscreenControls();
-        const element = event.target instanceof Element ? event.target : null;
-        const target = element?.closest('[data-player-action]');
-        if (!target) return;
+      const handlePlayerAction = (target) => {
         const action = target.getAttribute('data-player-action');
+        if (action === 'overflow') {
+          if (mobileMenu.hidden) showMobileMenu();
+          else closeMobileMenu();
+          return;
+        }
         if (action === 'toggle') {
           if (video.paused) requestPlayback();
           else video.pause();
@@ -3912,10 +4052,20 @@
         } else if (action === 'next') {
           void completeAndAdvancePlayback();
         } else if (action === 'fullscreen') {
+          closeMobileMenu();
           void toggleFullscreen();
         }
         updateControls();
-      });
+      };
+      const onPlayerControlClick = (event) => {
+        showFullscreenControls();
+        const element = event.target instanceof Element ? event.target : null;
+        const target = element?.closest('[data-player-action]');
+        if (!target) return;
+        handlePlayerAction(target);
+      };
+      controls.addEventListener('click', onPlayerControlClick);
+      mobileMenu.addEventListener('click', onPlayerControlClick);
       audioMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
         const option = element?.closest('[data-player-audio-stream]');
@@ -4027,30 +4177,77 @@
         updateControls();
         hideContextMenu();
       });
+      const previewTimelineAtPointer = (event) => {
+        const position = timelinePositionAt(event.clientX);
+        if (position !== null) showTimelinePreview(position, event.clientX);
+      };
+      timeline.addEventListener('pointerenter', previewTimelineAtPointer);
+      timeline.addEventListener('pointermove', previewTimelineAtPointer);
+      timeline.addEventListener('pointerdown', (event) => {
+        timelinePointerDown = true;
+        previewTimelineAtPointer(event);
+      });
+      timeline.addEventListener('pointerup', () => {
+        timelinePointerDown = false;
+        hideTimelinePreview();
+      });
+      timeline.addEventListener('pointercancel', () => {
+        timelinePointerDown = false;
+        hideTimelinePreview();
+      });
+      timeline.addEventListener('pointerleave', () => {
+        if (!timelinePointerDown) hideTimelinePreview();
+      });
       timeline.addEventListener('input', () => {
         showFullscreenControls();
         const position = Number(timeline.value);
         if (!Number.isFinite(position)) return;
+        showTimelinePreview(position);
         if (deliveryMode !== 'direct') return;
         video.currentTime = position;
         updateControls();
       });
       timeline.addEventListener('change', () => {
+        hideTimelinePreview();
         if (deliveryMode === 'direct') return;
         const position = Number(timeline.value);
         if (Number.isFinite(position)) void restartGeneratedStream(position);
       });
-      volume.addEventListener('input', () => {
-        showFullscreenControls();
-        const nextVolume = Number(volume.value);
-        if (!Number.isFinite(nextVolume)) return;
-        video.volume = Math.min(Math.max(nextVolume, 0), 1);
-        video.muted = video.volume === 0;
-        updateControls();
+      volumeControls.forEach((volumeControl) => {
+        volumeControl.addEventListener('input', () => {
+          showFullscreenControls();
+          const nextVolume = Number(volumeControl.value);
+          if (!Number.isFinite(nextVolume)) return;
+          video.volume = Math.min(Math.max(nextVolume, 0), 1);
+          video.muted = video.volume === 0;
+          updateControls();
+        });
       });
       nativeControls.addEventListener('change', () => {
         video.controls = nativeControls.checked;
         hideContextMenu();
+      });
+      const playerTooltipButton = (target) => {
+        const element = target instanceof Element ? target : null;
+        const button = element?.closest('button');
+        return button instanceof Element ? button : null;
+      };
+      this.addEventListener('pointerover', (event) => {
+        const button = playerTooltipButton(event.target);
+        if (button) showPlayerTooltip(button);
+      });
+      this.addEventListener('pointerout', (event) => {
+        const button = playerTooltipButton(event.target);
+        if (button && playerTooltipButton(event.relatedTarget) !== button) hidePlayerTooltip();
+      });
+      this.addEventListener('focusin', (event) => {
+        showFullscreenControls();
+        const button = playerTooltipButton(event.target);
+        if (button) showPlayerTooltip(button);
+      });
+      this.addEventListener('focusout', (event) => {
+        const button = playerTooltipButton(event.target);
+        if (button && playerTooltipButton(event.relatedTarget) !== button) hidePlayerTooltip();
       });
       this.addEventListener('contextmenu', (event) => {
         event.preventDefault();
@@ -4060,9 +4257,13 @@
       this.addEventListener('pointerdown', showFullscreenControls);
       this.addEventListener('touchstart', showFullscreenControls, {passive: true});
       this.addEventListener('keydown', showFullscreenControls);
-      this.addEventListener('focusin', showFullscreenControls);
       const onPointerDown = (event) => {
-        if (!contextMenu.contains(event.target) && !audioMenu.contains(event.target) && !subtitleMenu.contains(event.target)) hideContextMenu();
+        if (
+          !contextMenu.contains(event.target)
+          && !audioMenu.contains(event.target)
+          && !subtitleMenu.contains(event.target)
+          && !mobileMenu.contains(event.target)
+        ) hideContextMenu();
       };
       document.addEventListener('pointerdown', onPointerDown);
       this._dispose = () => {

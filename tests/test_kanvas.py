@@ -713,7 +713,10 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress" in script
     assert "let reporting = false;" in script
     assert "data-player-native-controls" in script
-    assert '"toggle", "Play"' in card
+    assert "_PlayerControlAction.TOGGLE" in card
+    assert "IconName.PLAY" in card
+    assert "IconName.PAUSE" in card
+    assert "icon_svg(icon)" in card
     assert 'data-player-rate="{rate:g}"' in card
     assert "document.fullscreenElement === this" in script
     assert "fullscreenElement === this || fullscreenElement === video" in script
@@ -727,6 +730,22 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "preserveVideoHeight" in script
     assert "k-player--preparing" in script
     assert ".k-player--preparing .k-player__video" in stylesheet
+    assert "--k-player-control-size: 30px;" in stylesheet
+    assert "inline-size: var(--k-player-control-size);" in stylesheet
+    assert "block-size: var(--k-player-control-size);" in stylesheet
+    assert ".k-player__control-icon" in stylesheet
+    assert "playerIconState" in script
+    assert "data-player-timeline-preview" in card
+    assert "showTimelinePreview" in script
+    assert ".k-player__timeline-preview" in stylesheet
+    assert "data-player-mobile-menu" in card
+    assert "showMobileMenu" in script
+    assert ".k-player__mobile-menu:not([hidden])" in stylesheet
+    assert "data-player-tooltip-host" in card
+    assert "showPlayerTooltip" in script
+    assert ".k-player__tooltip" in stylesheet
+    assert "positionFloatingMenu" in script
+    assert "max-height: calc(100% - 16px);" in stylesheet
     assert "controls autoplay" not in card
     assert 'duration-seconds="{entry.duration_seconds:g}"' in card
     assert "ui.label(entry.display_title)" not in card
@@ -739,13 +758,19 @@ def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
     )
 
     assert "--k-player-progress-height: 34px;" in stylesheet
+    assert "--k-player-fullscreen-details-height: 52px;" in stylesheet
     assert (
-        ".k-player:fullscreen .k-player__progress { bottom: env(safe-area-inset-bottom);"
+        ".k-player:fullscreen .k-player__progress { z-index: 3; "
+        "bottom: env(safe-area-inset-bottom);"
         in stylesheet
     )
     assert (
         ".k-player:fullscreen .k-player__details { bottom: calc("
         "var(--k-player-progress-height) + env(safe-area-inset-bottom));" in stylesheet
+    )
+    assert (
+        ".k-player:fullscreen .k-player__timeline-preview { bottom: calc(100% + "
+        "var(--k-player-fullscreen-details-height) + 6px); }" in stylesheet
     )
 
 
@@ -778,8 +803,8 @@ def test_fullscreen_player_shows_play_next_only_in_its_controls() -> None:
         encoding="utf-8"
     )
 
-    assert '"next",' in player
-    assert 'extra_classes="k-player__control--next"' in player
+    assert "_PlayerControlAction.NEXT" in player
+    assert 'extra_classes=("k-player__control--next",)' in player
     assert ".k-player__control--next { display: none; }" in stylesheet
     assert ".k-player:fullscreen .k-player__control--next { display: grid; }" in stylesheet
 
