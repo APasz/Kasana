@@ -2967,6 +2967,8 @@
       const subtitleFontScaleLabel = subtitleMenu?.querySelector('[data-player-subtitle-font-scale-label]');
       const subtitleAppearance = subtitleMenu?.querySelector('[data-player-subtitle-appearance]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
+      const autoplayNextControl = this.querySelector('[data-player-autoplay-next]');
+      const autoplayNextOption = this.querySelector('[data-player-autoplay-next-option]');
       const mobileVolume = this.querySelector('[data-player-mobile-volume]');
       const kestrelLink = this.querySelector('[data-player-kestrel]');
       const audioOptions = audioMenu?.querySelector('[data-player-audio-options]');
@@ -3029,6 +3031,8 @@
       let webkitFullscreenActive = false;
       let timelinePointerDown = false;
       let activePlayerTooltipButton = null;
+      let hasQueuedNextItem = autoplayNextControl instanceof HTMLInputElement;
+      let autoplayNext = hasQueuedNextItem && autoplayNextControl.checked;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
       let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
       const profileSubtitlePreference = typeof document.querySelector === 'function'
@@ -3182,12 +3186,22 @@
         }
         updateTrackOptions();
       };
+      const updateAutoplayNextControl = () => {
+        if (!(autoplayNextControl instanceof HTMLInputElement)) return;
+        autoplayNextControl.checked = autoplayNext;
+      };
+      const setAutoplayNextAvailability = (available) => {
+        hasQueuedNextItem = available;
+        autoplayNext = available;
+        if (autoplayNextOption instanceof Element) autoplayNextOption.hidden = !available;
+        updateAutoplayNextControl();
+      };
       const updatePlaybackQueue = () => {
-        if (typeof document.querySelector !== 'function') return;
+        if (typeof document.querySelector !== 'function') return false;
         const queue = document.querySelector('[data-player-queue]');
         if (!(queue instanceof Element)) {
           if (fullscreenQueueNext instanceof Element) fullscreenQueueNext.hidden = true;
-          return;
+          return false;
         }
         const queueEntries = Array.from(queue.querySelectorAll('.k-playback-queue__entry'));
         queueEntries[0]?.remove();
@@ -3195,7 +3209,7 @@
         if (remainingEntries.length === 0) {
           queue.remove();
           if (fullscreenQueueNext instanceof Element) fullscreenQueueNext.hidden = true;
-          return;
+          return false;
         }
         const countLabel = remainingEntries.length === 1 ? 'item' : 'items';
         const heading = queue.querySelector('.k-playback-queue__heading');
@@ -3207,12 +3221,14 @@
         const summaryContext = queue.querySelector('.k-playback-queue__next .k-playback-queue__context');
         if (summaryTitle && nextTitle) summaryTitle.textContent = nextTitle.textContent;
         if (summaryContext) summaryContext.textContent = nextContext?.textContent || '';
+        return true;
       };
       const setQueueNextBusy = (busy) => {
         queueNextControls.forEach((control) => {
           control.toggleAttribute('disabled', busy);
           control.setAttribute('aria-disabled', String(busy));
         });
+        if (autoplayNextControl instanceof HTMLInputElement) autoplayNextControl.disabled = busy;
       };
       const itemPageUrl = (nextUrl) => (
         typeof nextUrl === 'string' && /^\/item\/\d+\?playbackSession=[A-Za-z0-9_-]+$/.test(nextUrl)
@@ -4227,6 +4243,16 @@
         video.controls = nativeControls.checked;
         hideContextMenu();
       });
+      if (autoplayNextControl instanceof HTMLInputElement) {
+        autoplayNextControl.addEventListener('change', () => {
+          if (!hasQueuedNextItem) {
+            updateAutoplayNextControl();
+            return;
+          }
+          autoplayNext = autoplayNextControl.checked;
+          showFullscreenControls();
+        });
+      }
       const playerTooltipButton = (target) => {
         const element = target instanceof Element ? target : null;
         const button = element?.closest('button');
@@ -4377,7 +4403,7 @@
             if (nextUrl === null) throw new Error('Playback item page is unavailable');
             updateFullscreenInfo(nextEntry);
             applyEntryTrackOptions(nextEntry);
-            updatePlaybackQueue();
+            setAutoplayNextAvailability(updatePlaybackQueue());
             pendingItemPageUrl = nextUrl;
             synchroniseItemPageUrl(nextUrl);
             await loadEntry(
@@ -4402,7 +4428,11 @@
       };
       if (queueNext instanceof Element) queueNext.addEventListener('click', onQueueNext);
       video.addEventListener('ended', () => {
-        void completeAndAdvancePlayback();
+        if (!hasQueuedNextItem || autoplayNext) {
+          void completeAndAdvancePlayback();
+        } else {
+          status.textContent = 'Playback complete. Select Play next to continue.';
+        }
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();

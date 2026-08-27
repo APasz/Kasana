@@ -482,6 +482,15 @@ def render_browser_playback_card(
                     'type="checkbox" data-player-native-controls aria-label="Show browser controls"'
                 )
                 ui.html("Show browser controls", tag="span")
+            if has_queued_item:
+                with ui.element("label").classes("k-player__context-option").props(
+                    "data-player-autoplay-next-option"
+                ):
+                    ui.element("input").props(
+                        'type="checkbox" data-player-autoplay-next checked '
+                        'aria-label="Autoplay next queue item"'
+                    )
+                    ui.html("Autoplay next item", tag="span")
         _render_track_menus(entry)
         ui.element("span").classes("k-player__tooltip").props(
             'data-player-tooltip-host aria-hidden="true" hidden'

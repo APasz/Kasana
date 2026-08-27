@@ -775,6 +775,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "data-player-tooltip-host" in _element_props(element)
         ]
+        autoplay_next_controls = [
+            element
+            for element in client.elements.values()
+            if "data-player-autoplay-next" in _element_props(element)
+        ]
         fullscreen_title = next(
             element
             for element in client.elements.values()
@@ -808,6 +813,7 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert toggle_controls[0]._props["data-player-tooltip"] == "Play"  # pyright: ignore[reportPrivateUsage]
     assert len(tooltips) == 1
     assert "hidden" in tooltips[0]._props  # pyright: ignore[reportPrivateUsage]
+    assert autoplay_next_controls == []
     assert fullscreen_title._text == "Example Show · Pilot"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_time._props["aria-label"] == "Current time"  # pyright: ignore[reportPrivateUsage]
@@ -899,6 +905,11 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
             for element in client.elements.values()
             if "k-playback-queue__advance" in element._classes  # pyright: ignore[reportPrivateUsage]
         ]
+        autoplay_next_controls = [
+            element
+            for element in client.elements.values()
+            if "data-player-autoplay-next" in _element_props(element)
+        ]
         queue_titles: list[str] = [
             cast(str, element._text)  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
             for element in client.elements.values()
@@ -917,6 +928,8 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
     ]
     assert len(fullscreen_next_controls) == 1
     assert "k-player__control--next" in fullscreen_next_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
+    assert len(autoplay_next_controls) == 1
+    assert "checked" in _element_props(autoplay_next_controls[0])
     assert queue_titles == ["Next episode", "Next episode"]
 
 

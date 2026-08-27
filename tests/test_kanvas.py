@@ -713,6 +713,7 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/progress" in script
     assert "let reporting = false;" in script
     assert "data-player-native-controls" in script
+    assert "data-player-autoplay-next" in card
     assert "_PlayerControlAction.TOGGLE" in card
     assert "IconName.PLAY" in card
     assert "IconName.PAUSE" in card
@@ -743,6 +744,8 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert ".k-player__mobile-menu:not([hidden])" in stylesheet
     assert "data-player-tooltip-host" in card
     assert "showPlayerTooltip" in script
+    assert "hasQueuedNextItem" in script
+    assert "setAutoplayNextAvailability" in script
     assert ".k-player__tooltip" in stylesheet
     assert "positionFloatingMenu" in script
     assert "max-height: calc(100% - 16px);" in stylesheet
@@ -759,11 +762,14 @@ def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
 
     assert "--k-player-progress-height: 34px;" in stylesheet
     assert "--k-player-fullscreen-details-height: 52px;" in stylesheet
+    assert "var(--k-surface-1) var(--progress-percent, 0%) 100%" in stylesheet
     assert (
         ".k-player:fullscreen .k-player__progress { z-index: 3; "
         "bottom: env(safe-area-inset-bottom);"
         in stylesheet
     )
+    assert "background: rgba(16, 16, 16, 0.78);" in stylesheet
+    assert "rgba(0, 0, 0, 0.84), rgba(0, 0, 0, 0.58)" in stylesheet
     assert (
         ".k-player:fullscreen .k-player__details { bottom: calc("
         "var(--k-player-progress-height) + env(safe-area-inset-bottom));" in stylesheet

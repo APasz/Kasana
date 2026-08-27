@@ -189,6 +189,7 @@ const documentListeners = new Map();
 const windowListeners = new Map();
 let activeProfileMenu = null;
 let activeQueueNext = null;
+let activePlaybackQueue = null;
 global.document = {
   addEventListener(name, listener) {
     const listeners = documentListeners.get(name) || [];
@@ -209,6 +210,7 @@ global.document = {
   querySelector(selector) {
     if (selector === 'kanvas-profile-menu') return activeProfileMenu;
     if (selector === '[data-player-next]') return activeQueueNext;
+    if (selector === '[data-player-queue]') return activePlaybackQueue;
     return null;
   },
   fullscreenElement: null
@@ -337,10 +339,27 @@ function runScheduledIntervals() {
   for (const callback of scheduledIntervals.values()) callback();
 }
 
+function createPlaybackQueue(entryCount) {
+  const queue = new FakeElement();
+  const entries = Array.from({length: entryCount}, () => new FakeElement());
+  entries.forEach((entry) => {
+    entry.remove = () => {
+      const index = entries.indexOf(entry);
+      if (index >= 0) entries.splice(index, 1);
+    };
+  });
+  queue.querySelectorAll = (selector) => (
+    selector === '.k-playback-queue__entry' ? entries : []
+  );
+  queue.remove = () => { activePlaybackQueue = null; };
+  return queue;
+}
+
 function createPlayer({
   durationSeconds = 0,
   hasFullscreenQueueNext = false,
   hasQueuedItem = false,
+  queuedItemCount = 0,
   resumePosition = 0,
   subtitlesDisabled = false
 } = {}) {
@@ -349,6 +368,7 @@ function createPlayer({
   activeProfileMenu = subtitlesDisabled ? new FakeElement() : null;
   activeProfileMenu?.setAttribute('data-preferred-subtitle-language', 'none');
   activeQueueNext = hasQueuedItem ? new FakeElement() : null;
+  activePlaybackQueue = queuedItemCount > 0 ? createPlaybackQueue(queuedItemCount) : null;
   const video = new FakeVideo();
   const status = new FakeElement();
   const controls = new FakeElement();
@@ -413,6 +433,10 @@ function createPlayer({
   const subtitleFontScaleLabel = new FakeElement();
   const subtitleAppearance = new FakeElement();
   const nativeControls = new FakeElement();
+  const autoplayNextOption = hasQueuedItem ? new FakeElement() : null;
+  const autoplayNextControl = hasQueuedItem ? new FakeElement() : null;
+  if (autoplayNextOption) autoplayNextOption.hidden = false;
+  if (autoplayNextControl) autoplayNextControl.checked = true;
   const fullscreenTitle = new FakeElement();
   const fullscreenSpecialInfo = new FakeElement();
   const fullscreenTime = new FakeElement();
@@ -434,6 +458,8 @@ function createPlayer({
     ['[data-player-mobile-menu]', mobileMenu],
     ['[data-player-tooltip-host]', playerTooltip],
     ['[data-player-native-controls]', nativeControls],
+    ['[data-player-autoplay-next]', autoplayNextControl],
+    ['[data-player-autoplay-next-option]', autoplayNextOption],
     ['[data-player-fullscreen-title]', fullscreenTitle],
     ['[data-player-fullscreen-special-info]', fullscreenSpecialInfo],
     ['[data-player-fullscreen-time]', fullscreenTime],
@@ -508,6 +534,8 @@ function createPlayer({
     audioControl,
     audioMenu,
     audioOption,
+    autoplayNextControl,
+    autoplayNextOption,
     bufferedIndicator,
     controls,
     contextMenu,
@@ -1112,6 +1140,77 @@ async function testQueueControlAdvancesPlayback() {
   completionPayload = null;
 }
 
+async function testAutoplayNextIsScopedToTheCurrentQueueItem() {
+  const {
+    autoplayNextControl,
+    autoplayNextOption,
+    player,
+    queueNext,
+    status,
+    video,
+  } = createPlayer({hasQueuedItem: true, queuedItemCount: 2});
+  assert.ok(autoplayNextControl);
+  assert.ok(autoplayNextOption);
+  assert.ok(queueNext);
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(autoplayNextControl.checked, true);
+  assert.equal(autoplayNextOption.hidden, false);
+  autoplayNextControl.checked = false;
+  autoplayNextControl.emit('change');
+  assert.equal(autoplayNextControl.checked, false);
+
+  const completionCallsBeforeEnd = fetchCalls.filter(
+    (call) => String(call.url).includes('/complete')
+  ).length;
+  video.emit('ended');
+  await nextTick();
+  assert.equal(
+    fetchCalls.filter((call) => String(call.url).includes('/complete')).length,
+    completionCallsBeforeEnd
+  );
+  assert.equal(status.textContent, 'Playback complete. Select Play next to continue.');
+
+  completionPayload = {
+    nextEntry: queuedEntry(),
+    nextUrl: `/item/2?playbackSession=${'s'.repeat(32)}`
+  };
+  document.fullscreenElement = player;
+  queueNext.emit('click', {preventDefault() {}, stopPropagation() {}});
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(player.getAttribute('entry-position'), '1');
+  assert.equal(autoplayNextControl.checked, true);
+  assert.equal(autoplayNextControl.disabled, false);
+  assert.equal(autoplayNextOption.hidden, false);
+
+  completionPayload = {
+    nextEntry: {
+      ...queuedEntry(),
+      displayTitle: 'Final episode',
+      fullscreenTitle: 'Example Show · Final episode',
+      itemId: 3,
+      position: 2,
+    },
+    nextUrl: `/item/3?playbackSession=${'s'.repeat(32)}`
+  };
+  queueNext.emit('click', {preventDefault() {}, stopPropagation() {}});
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(player.getAttribute('entry-position'), '2');
+  assert.equal(autoplayNextControl.checked, false);
+  assert.equal(autoplayNextOption.hidden, true);
+  document.fullscreenElement = null;
+  completionPayload = null;
+  activePlaybackQueue = null;
+}
+
 async function testFullscreenQueueControlAdvancesPlayback() {
   const {controls, fullscreenQueueNext, player} = createPlayer({
     hasFullscreenQueueNext: true,
@@ -1269,6 +1368,7 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testEachQueuedEntryGetsItsOwnStreamRecoveryAttempt();
   await testAudioSelectionCannotOutliveAQueueTransition();
   await testQueueControlAdvancesPlayback();
+  await testAutoplayNextIsScopedToTheCurrentQueueItem();
   await testFullscreenQueueControlAdvancesPlayback();
   await testQueueAdvanceAutoplaysWithoutLeavingFullscreen();
   await testFullscreenClockShowsLocalTimeWithSeconds();
