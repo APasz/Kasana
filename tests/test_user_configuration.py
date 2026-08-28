@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 from typing import cast
 
+from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import User, UserRole
-from kasana.katalog.user_configuration import UserConfigurationStore
+from kasana.katalog.user_configuration import UserConfiguration, UserConfigurationStore
 
 
 def test_legacy_integer_pin_migrates_to_the_valid_string_configuration_form(tmp_path: Path) -> None:
@@ -35,3 +36,22 @@ def test_legacy_integer_pin_in_an_existing_configuration_file_migrates_on_load(
 
     assert configuration.pin == "501"
     assert json.loads(configuration_path.read_text(encoding="utf-8"))["pin"] == "501"
+
+
+def test_targeted_synchronisation_creates_a_configured_database_user_without_autoflush(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    store = UserConfigurationStore(tmp_path / "users")
+    store.save(7, UserConfiguration(username="owner"))
+
+    with database.transaction() as session:
+        user, configuration = store.synchronise_database_user(session, 7)
+
+        assert user.id == 7
+        assert configuration.username == "owner"
+
+    with database.transaction() as session:
+        stored_user = session.get(User, 7)
+
+    assert stored_user is not None
+    assert stored_user.username == "owner"

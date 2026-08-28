@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.configuration import user_configuration_directory
@@ -155,10 +156,37 @@ class UserConfigurationStore:
             configured_users.append((user_id, self.load(user_id)))
         return tuple(sorted(configured_users, key=lambda entry: entry[0]))
 
-    def synchronise_database_users(self, session: Session) -> None:
+    def synchronise_database_user(
+        self, session: Session, user_id: int
+    ) -> tuple[User, UserConfiguration]:
+        """Project one profile only for a request that already knows its ID."""
+
+        if user_id <= 0:
+            raise ValueError("User IDs must be positive.")
+        user = session.get(User, user_id)
+        try:
+            configuration = self.load(user_id)
+        except ValueError as error:
+            if self.configuration_exists(user_id):
+                raise error
+            if user is None:
+                raise error
+            configuration = self.load_or_migrate(user)
+        if user is None:
+            user = User(id=user_id)
+            session.add(user)
+            self._ensure_unique_username(session, user_id, configuration.username)
+        elif user.username != configuration.username:
+            self._ensure_unique_username(session, user_id, configuration.username)
+        self._apply_configuration(user, configuration)
+        session.flush()
+        return user, configuration
+
+    def synchronise_database_users(self, session: Session) -> dict[int, UserConfiguration]:
         """Project configured IDs into SQLite rows needed by playback foreign keys."""
 
         configured_usernames: set[str] = set()
+        configurations: dict[int, UserConfiguration] = {}
         for user_id, configuration in self.configured_users():
             if configuration.username in configured_usernames:
                 raise ValueError("User configuration usernames must be unique.")
@@ -167,12 +195,27 @@ class UserConfigurationStore:
             if user is None:
                 user = User(id=user_id)
                 session.add(user)
-            user.username = configuration.username
-            user.display_name = configuration.name
-            user.role = UserRole(configuration.level.value)
-            user.is_disabled = configuration.state is UserConfigurationState.DISABLED
-            user.pin = None
+            self._apply_configuration(user, configuration)
+            configurations[user_id] = configuration
         session.flush()
+        return configurations
+
+    @staticmethod
+    def _apply_configuration(user: User, configuration: UserConfiguration) -> None:
+        user.username = configuration.username
+        user.display_name = configuration.name
+        user.role = UserRole(configuration.level.value)
+        user.is_disabled = configuration.state is UserConfigurationState.DISABLED
+        user.pin = None
+
+    @staticmethod
+    def _ensure_unique_username(session: Session, user_id: int, username: str) -> None:
+        with session.no_autoflush:
+            existing_id = session.scalar(
+                select(User.id).where(User.username == username, User.id != user_id)
+            )
+        if existing_id is not None:
+            raise ValueError("User configuration usernames must be unique.")
 
     def _configuration_path(self, user_id: int) -> Path:
         if user_id <= 0:

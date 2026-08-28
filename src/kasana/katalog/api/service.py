@@ -13,15 +13,17 @@ import mimetypes
 import re
 import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from os import stat_result
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, cast
 
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Select, and_, case, func, or_, select
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import update as sql_update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine.result import Result
@@ -42,6 +44,8 @@ from kasana.katalog.api.contracts import (
     CollectionSummary,
     CollectionUpdate,
     ContinueWatchingEntry,
+    DownloadGrantRequest,
+    DownloadGrantResponse,
     DuplicateEpisodeIssue,
     EpisodeItemDetail,
     ExtraItemDetail,
@@ -155,6 +159,9 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.models import (
+    DownloadGrant as ModelDownloadGrant,
+)
+from kasana.katalog.models import (
     PlaybackContextKind as ModelPlaybackContextKind,
 )
 from kasana.katalog.models import (
@@ -220,6 +227,10 @@ class CatalogueValidationError(ValueError):
 
 class CatalogueConflictError(RuntimeError):
     """A revisioned catalogue mutation was based on stale client state."""
+
+
+class _ExpiredDownloadGrantError(LookupError):
+    """Signal an expired grant after its read transaction has rolled back safely."""
 
 
 @dataclass(frozen=True)
@@ -298,6 +309,7 @@ class KatalogQueryService:
         playback_session_ttl: timedelta = timedelta(hours=8),
         playback_launch_token_ttl: timedelta = timedelta(minutes=5),
         media_access_token_ttl: timedelta = timedelta(minutes=10),
+        download_grant_ttl: timedelta = timedelta(hours=24),
         max_playback_queue_size: int = 100,
         user_configurations: UserConfigurationStore | None = None,
     ) -> None:
@@ -306,10 +318,11 @@ class KatalogQueryService:
                 playback_session_ttl.total_seconds(),
                 playback_launch_token_ttl.total_seconds(),
                 media_access_token_ttl.total_seconds(),
+                download_grant_ttl.total_seconds(),
             )
             <= 0
         ):
-            msg = "Playback token and session lifetimes must be positive."
+            msg = "Playback token, session, and download grant lifetimes must be positive."
             raise ValueError(msg)
         if max_playback_queue_size <= 0:
             msg = "The maximum playback queue size must be positive."
@@ -319,6 +332,7 @@ class KatalogQueryService:
         self._playback_session_ttl = playback_session_ttl
         self._playback_launch_token_ttl = playback_launch_token_ttl
         self._media_access_token_ttl = media_access_token_ttl
+        self._download_grant_ttl = download_grant_ttl
         self._max_playback_queue_size = max_playback_queue_size
         self._user_configurations = user_configurations or UserConfigurationStore(
             database.database_path.parent / "users"
@@ -338,7 +352,7 @@ class KatalogQueryService:
         interrupted_jobs: int = 0,
     ) -> StatusResponse:
         def load(session: Session) -> StatusResponse:
-            revision = self._database_revision()
+            revision = self._database_revision(session)
             roots = tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
             return StatusResponse(
                 database_revision=revision,
@@ -371,11 +385,29 @@ class KatalogQueryService:
 
     def list_users(self) -> tuple[UserSummary, ...]:
         def load(session: Session) -> tuple[UserSummary, ...]:
-            self._synchronise_configured_users(session)
+            configurations = self._synchronise_configured_users(session)
             return tuple(
-                _profile_summary(user.id, self._profile_configuration(user))
+                _profile_summary(
+                    user.id,
+                    configurations.get(user.id) or self._profile_configuration(user),
+                )
                 for user in session.scalars(select(User).order_by(User.id))
             )
+
+        return self._database.run_transaction(load)
+
+    def session_profile(self, user_id: int) -> UserSummary:
+        """Read one authoritative profile without database or directory enumeration."""
+
+        try:
+            return _profile_summary(user_id, self._user_configurations.load(user_id))
+        except ValueError as error:
+            if user_id <= 0 or self._user_configurations.configuration_exists(user_id):
+                raise CatalogueValidationError(str(error)) from error
+
+        def load(session: Session) -> UserSummary:
+            user, configuration = self._configured_user_with_configuration(session, user_id)
+            return _profile_summary(user.id, configuration)
 
         return self._database.run_transaction(load)
 
@@ -423,9 +455,8 @@ class KatalogQueryService:
         """Update profile metadata and optionally replace or remove its PIN."""
 
         def update_user(session: Session) -> UserSummary:
-            user = self._configured_user(session, user_id)
+            user, configuration = self._configured_user_with_configuration(session, user_id)
             values = request.model_fields_set
-            configuration = self._profile_configuration(user)
             if "username" in values and request.username is not None:
                 existing = session.scalar(
                     select(User).where(User.username == request.username, User.id != user_id)
@@ -486,9 +517,9 @@ class KatalogQueryService:
         """Disable new profile and playback sessions while preserving history."""
 
         def disable(session: Session) -> UserSummary:
-            user = self._configured_user(session, user_id)
+            user, configuration = self._configured_user_with_configuration(session, user_id)
             user.is_disabled = True
-            configuration = self._profile_configuration(user).model_copy(
+            configuration = configuration.model_copy(
                 update={"state": UserConfigurationState.DISABLED}
             )
             self._user_configurations.save(user.id, configuration)
@@ -501,8 +532,7 @@ class KatalogQueryService:
         """Validate a profile PIN before Kanvas starts a browser session."""
 
         def authenticate(session: Session) -> UserSummary:
-            user = self._configured_user(session, user_id)
-            configuration = self._profile_configuration(user)
+            user, configuration = self._configured_user_with_configuration(session, user_id)
             if configuration.state is UserConfigurationState.DISABLED:
                 raise CatalogueValidationError("Disabled users cannot start sessions.")
             if configuration.pin is not None and configuration.pin != request.pin:
@@ -1090,6 +1120,30 @@ class KatalogQueryService:
                 items=tuple(_media_summary(file) for file in page),
                 next_cursor=(_encode_cursor("media", {"id": page[-1].id}) if has_next else None),
                 limit=normalised_limit,
+            )
+
+        return self._database.run_transaction(load)
+
+    def list_download_options(self, item_id: int) -> tuple[MediaTechnicalSummary, ...]:
+        """Return scan-state download choices without synchronously statting each file."""
+
+        def load(session: Session) -> tuple[MediaTechnicalSummary, ...]:
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
+            if (
+                item.item_kind not in PLAYABLE_ITEM_KINDS
+                or item.availability is not AvailabilityState.AVAILABLE
+            ):
+                return ()
+            return tuple(
+                _media_summary(media_file)
+                for media_file in session.scalars(
+                    select(MediaFile)
+                    .where(
+                        MediaFile.library_item_id == item.id,
+                        MediaFile.availability == AvailabilityState.AVAILABLE,
+                    )
+                    .order_by(MediaFile.id)
+                )
             )
 
         return self._database.run_transaction(load)
@@ -2175,8 +2229,7 @@ class KatalogQueryService:
         """Persist a bounded queue, returning a one-use launch capability."""
 
         def create(session: Session) -> PlaybackPlanLaunch:
-            user = self._configured_user(session, request.user_id)
-            configuration = self._profile_configuration(user)
+            _, configuration = self._configured_user_with_configuration(session, request.user_id)
             if configuration.state is UserConfigurationState.DISABLED:
                 raise CatalogueValidationError("Disabled users cannot start playback sessions.")
             planned_entries, context, skipped_unavailable_titles = self._plan_entries(
@@ -2253,18 +2306,32 @@ class KatalogQueryService:
         return self._user_configurations.load_or_migrate(user)
 
     def _configured_user(self, session: Session, user_id: int) -> User:
-        """Resolve a user after creating structural SQLite rows for config directories."""
+        """Resolve one configured user without scanning every profile directory."""
 
-        self._synchronise_configured_users(session)
-        user = _require(session, User, user_id, "User")
-        self._profile_configuration(user)
+        user, _ = self._configured_user_with_configuration(session, user_id)
         return user
 
-    def _synchronise_configured_users(self, session: Session) -> None:
+    def _configured_user_with_configuration(
+        self, session: Session, user_id: int
+    ) -> tuple[User, UserConfiguration]:
+        """Resolve one profile and its filesystem-backed configuration in one read."""
+
+        try:
+            return self._user_configurations.synchronise_database_user(session, user_id)
+        except ValueError as error:
+            if (
+                user_id > 0
+                and not self._user_configurations.configuration_exists(user_id)
+                and session.get(User, user_id) is None
+            ):
+                raise CatalogueNotFoundError("User") from error
+            raise CatalogueValidationError(str(error)) from error
+
+    def _synchronise_configured_users(self, session: Session) -> dict[int, UserConfiguration]:
         """Project filesystem profiles into SQLite only where relations require numeric IDs."""
 
         try:
-            self._user_configurations.synchronise_database_users(session)
+            return self._user_configurations.synchronise_database_users(session)
         except ValueError as error:
             raise CatalogueValidationError(str(error)) from error
 
@@ -2558,6 +2625,84 @@ class KatalogQueryService:
 
         return self._database.run_transaction(close)
 
+    def create_download_grant(self, request: DownloadGrantRequest) -> DownloadGrantResponse:
+        """Persist a direct-download capability without creating a playback session."""
+
+        def create(session: Session) -> DownloadGrantResponse:
+            now = datetime.now(UTC)
+            user, configuration = self._configured_user_with_configuration(session, request.user_id)
+            if configuration.state is UserConfigurationState.DISABLED:
+                raise CatalogueValidationError("Disabled users cannot create download grants.")
+            item: Zaisan = _require(session, Zaisan, request.item_id, "Library item")
+            media_file: MediaFile = _require(session, MediaFile, request.media_file_id, "Media file")
+            if media_file.library_item_id != item.id:
+                raise CatalogueValidationError("The selected media version does not belong to this item.")
+            try:
+                transfer = _media_transfer_file(
+                    item,
+                    media_file,
+                    unavailable_message="Download is unavailable.",
+                )
+            except CatalogueNotFoundError as error:
+                raise CatalogueValidationError("The selected media version is unavailable.") from error
+            token = secrets.token_urlsafe(32)
+            expires_at = now + self._download_grant_ttl
+            session.add(
+                ModelDownloadGrant(
+                    token_hash=_token_hash(token),
+                    user_id=user.id,
+                    media_file_id=media_file.id,
+                    source_etag=transfer.etag,
+                    download_name=transfer.download_name,
+                    created_at=now,
+                    expires_at=expires_at,
+                )
+            )
+            return DownloadGrantResponse(token=token, expires_at=expires_at)
+
+        return self._database.run_transaction(create)
+
+    def resolve_download_grant(self, token: str) -> MediaTransferFile:
+        """Resolve a direct-download capability only while its source snapshot remains valid."""
+
+        def resolve(session: Session) -> MediaTransferFile:
+            now = datetime.now(UTC)
+            row: Row[tuple[ModelDownloadGrant, MediaFile, Zaisan]] | None = session.execute(
+                select(ModelDownloadGrant, MediaFile, Zaisan)
+                .join(MediaFile, ModelDownloadGrant.media_file_id == MediaFile.id)
+                .join(Zaisan, MediaFile.library_item_id == Zaisan.id)
+                .where(ModelDownloadGrant.token_hash == _token_hash(token))
+            ).one_or_none()
+            if row is None:
+                raise CatalogueNotFoundError("Download grant is unavailable.")
+            grant, media_file, item = row
+            if _is_expired(grant.expires_at, now):
+                raise _ExpiredDownloadGrantError
+            try:
+                transfer = _media_transfer_file(
+                    item,
+                    media_file,
+                    unavailable_message="Download grant is unavailable.",
+                )
+            except CatalogueNotFoundError as error:
+                raise CatalogueNotFoundError("Download grant is unavailable.") from error
+            if transfer.etag != grant.source_etag:
+                raise CatalogueConflictError("The download source changed. Create a new download.")
+            return replace(transfer, download_name=grant.download_name)
+
+        try:
+            return self._database.run_transaction(resolve)
+        except _ExpiredDownloadGrantError as error:
+            self.purge_expired_download_grants()
+            raise CatalogueNotFoundError("Download grant is unavailable.") from error
+
+    def purge_expired_download_grants(self) -> int:
+        """Remove expired direct-download grant metadata through its expiry index."""
+
+        return self._database.run_transaction(
+            lambda session: _purge_expired_download_grants(session, datetime.now(UTC))
+        )
+
     def resolve_media_access_token(
         self, access_token: str, operation: MediaAccessOperation
     ) -> MediaTransferFile:
@@ -2585,21 +2730,10 @@ class KatalogQueryService:
                 raise CatalogueNotFoundError("Media access token is unavailable.") from error
             media_file: MediaFile = _require(session, MediaFile, token.media_file_id, "Media file")
             item: Zaisan = _require(session, Zaisan, media_file.library_item_id, "Library item")
-            _require_available_media(item, media_file)
-            path: Path = Path(media_file.absolute_path)
-            try:
-                stat: stat_result = path.stat()
-            except OSError as error:
-                raise CatalogueNotFoundError("Media access token is unavailable.") from error
-            if not path.is_file():
-                raise CatalogueNotFoundError("Media access token is unavailable.")
-            return MediaTransferFile(
-                path=path,
-                size_bytes=stat.st_size,
-                content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                etag=_etag(f"media:{media_file.id}:{stat.st_size}:{stat.st_mtime_ns}"),
-                download_name=_download_name(item.title, path.suffix),
-                last_modified=datetime.fromtimestamp(stat.st_mtime, UTC),
+            return _media_transfer_file(
+                item,
+                media_file,
+                unavailable_message="Media access token is unavailable.",
             )
 
         return self._database.run_transaction(resolve)
@@ -2945,9 +3079,11 @@ class KatalogQueryService:
         )
         return token
 
-    def _database_revision(self) -> str | None:
-        with self._database.engine.connect() as connection:
-            return MigrationContext.configure(connection).get_current_revision()
+    @staticmethod
+    def _database_revision(session: Session) -> str | None:
+        """Read Alembic state from the transaction's connection without another pool checkout."""
+
+        return MigrationContext.configure(session.connection()).get_current_revision()
 
 
 def _profile_summary(user_id: int, configuration: UserConfiguration) -> UserSummary:
@@ -2979,6 +3115,17 @@ def _is_expired(expires_at: datetime, now: datetime) -> bool:
         expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
     )
     return normalised_expiry <= now
+
+
+def _purge_expired_download_grants(session: Session, now: datetime) -> int:
+    """Delete unusable grant records with the indexed expiry predicate."""
+
+    deleted: Result[Any] = session.execute(
+        sql_delete(ModelDownloadGrant).where(ModelDownloadGrant.expires_at <= now)
+    )
+    if not isinstance(deleted, CursorResult):
+        raise RuntimeError("Download grant cleanup did not produce a cursor result.")
+    return deleted.rowcount
 
 
 def _require_active_session(playback_session: ModelPlaybackSession, now: datetime) -> None:
@@ -3464,13 +3611,44 @@ def _require_parent(session: Session, item: Zaisan, expected_kind: ZaisanKind) -
     return parent
 
 
-def _require_available_media(item: Zaisan, media_file: MediaFile) -> None:
+def _require_available_media(
+    item: Zaisan,
+    media_file: MediaFile,
+    *,
+    unavailable_message: str = "Media access token is unavailable.",
+) -> None:
     if (
         item.item_kind not in PLAYABLE_ITEM_KINDS
         or item.availability is not AvailabilityState.AVAILABLE
         or media_file.availability is not AvailabilityState.AVAILABLE
     ):
-        raise CatalogueNotFoundError("Media access token is unavailable.")
+        raise CatalogueNotFoundError(unavailable_message)
+
+
+def _media_transfer_file(
+    item: Zaisan,
+    media_file: MediaFile,
+    *,
+    unavailable_message: str,
+) -> MediaTransferFile:
+    """Build one current media descriptor after validating database and filesystem state."""
+
+    _require_available_media(item, media_file, unavailable_message=unavailable_message)
+    path = Path(media_file.absolute_path)
+    try:
+        file_stat: stat_result = path.stat()
+    except OSError as error:
+        raise CatalogueNotFoundError(unavailable_message) from error
+    if not S_ISREG(file_stat.st_mode):
+        raise CatalogueNotFoundError(unavailable_message)
+    return MediaTransferFile(
+        path=path,
+        size_bytes=file_stat.st_size,
+        content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        etag=_etag(f"media:{media_file.id}:{file_stat.st_size}:{file_stat.st_mtime_ns}"),
+        download_name=_download_name(item.title, path.suffix),
+        last_modified=datetime.fromtimestamp(file_stat.st_mtime, UTC),
+    )
 
 
 def _watch_order_entry_is_unavailable(session: Session, item: Zaisan) -> bool:

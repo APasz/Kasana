@@ -9,8 +9,9 @@ from typing import TypeVar
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 
+from kasana.katalog.limits import DEFAULT_DATABASE_CONNECTION_POOL_SIZE
 from kasana.katalog.models import Base
 from kasana.katalog.numerals import natural_sort_key
 
@@ -20,19 +21,30 @@ Result = TypeVar("Result")
 class KatalogDatabase:
     """Owns SQLite configuration and transaction scopes for Katalog worker code."""
 
-    def __init__(self, database_path: Path, *, busy_timeout_ms: int = 5_000) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        busy_timeout_ms: int = 5_000,
+        connection_pool_size: int = DEFAULT_DATABASE_CONNECTION_POOL_SIZE,
+    ) -> None:
         if not database_path.is_absolute():
             msg = "The SQLite database path must be absolute."
             raise ValueError(msg)
         if busy_timeout_ms <= 0:
             msg = "The SQLite busy timeout must be positive."
             raise ValueError(msg)
+        if connection_pool_size <= 0:
+            msg = "The SQLite connection pool size must be positive."
+            raise ValueError(msg)
         self.database_path = database_path
 
         self.engine: Engine = create_engine(
             f"sqlite:///{database_path}",
             connect_args={"check_same_thread": False},
-            poolclass=NullPool,
+            poolclass=QueuePool,
+            pool_size=connection_pool_size,
+            max_overflow=0,
         )
         self.session_factory: sessionmaker[Session] = sessionmaker(
             self.engine, expire_on_commit=False

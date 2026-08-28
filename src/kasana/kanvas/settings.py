@@ -2,7 +2,7 @@
 
 from hashlib import sha256
 
-from pydantic import Field, HttpUrl
+from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import SettingsConfigDict
 
 from kasana.configuration import configured_katalog_api_url, kanvas_session_secret
@@ -40,7 +40,27 @@ class Kanvas_Settings(KSettings):
         default=PROFILE_ACCENT_COLOUR_DEFAULT, pattern=PROFILE_ACCENT_COLOUR_PATTERN
     )
     katalog_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
+    profile_cache_ttl_seconds: int = Field(default=30, ge=1, le=10 * 60)
+    download_public_url: HttpUrl | None = None
     ffmpeg_executable: str = "ffmpeg"
+
+    @field_validator("download_public_url")
+    @classmethod
+    def validate_download_public_url(cls, value: HttpUrl | None) -> HttpUrl | None:
+        """Require an origin because Kanvas appends the fixed Katalog API path."""
+
+        if value is not None and (
+            value.path not in {"", "/"}
+            or value.query is not None
+            or value.fragment is not None
+            or value.username is not None
+            or value.password is not None
+        ):
+            raise ValueError(
+                "download_public_url must be an origin without a path, query, fragment, "
+                "or credentials."
+            )
+        return value
 
     @property
     def static_max_cache_age(self) -> int:

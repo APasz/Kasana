@@ -11,6 +11,7 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderCardView,
     WatchOrderRowView,
 )
+from kasana.kanvas.viewmodels.item import DownloadOptionView
 from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterState, PosterView
 from kasana.katalog.public import (
     NUMERAL_TOKEN_PATTERN,
@@ -22,6 +23,7 @@ from kasana.katalog.public import (
     CollectionUpdate,
     LibraryItemKind,
     LibraryItemSummary,
+    MediaTechnicalSummary,
     PlaybackStateResponse,
     WatchOrderEntryDetail,
     WatchOrderKind,
@@ -50,6 +52,7 @@ PLAYABLE_KINDS = frozenset(
         LibraryItemKind.EXTRA,
     }
 )
+_DOWNLOAD_SIZE_UNITS = ("B", "KiB", "MiB", "GiB", "TiB")
 
 
 def collection_tile(detail: CollectionDetail) -> CollectionTileView:
@@ -383,6 +386,33 @@ def runtime_label(duration_seconds: float | None) -> str | None:
     total_minutes = round(duration_seconds / 60)
     hours, minutes = divmod(total_minutes, 60)
     return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+
+
+def download_option_view(media_file: MediaTechnicalSummary) -> DownloadOptionView:
+    """Format one safe technical summary into a compact version-picker option."""
+
+    resolution = next(
+        (
+            f"{stream.width}x{stream.height}"
+            for stream in media_file.video_streams
+            if stream.width is not None and stream.height is not None
+        ),
+        None,
+    )
+    parts = [media_file.container.upper()]
+    if resolution is not None:
+        parts.append(resolution)
+    parts.append(_download_size_label(media_file.size_bytes))
+    return DownloadOptionView(mediaFileId=media_file.id, label=" · ".join(parts))
+
+
+def _download_size_label(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in _DOWNLOAD_SIZE_UNITS[:-1]:
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} {_DOWNLOAD_SIZE_UNITS[-1]}"
 
 
 def is_series_like(kind: LibraryItemKind) -> bool:

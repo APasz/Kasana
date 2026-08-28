@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -44,7 +47,9 @@ from kasana.katalog.settings import KatalogSettings
 from kasana.katalog.user_configuration import UserConfigurationStore
 from kasana.kourier.settings import TMDBSettings
 from kasana.kourier.tmdb import TMDBProvider
-from kasana.shared.concurrency import run_blocking
+from kasana.shared.concurrency import BlockingExecutor, run_blocking
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MetadataProviderConfigurationError(RuntimeError):
@@ -63,11 +68,17 @@ class KatalogApiRuntime:
             playback_session_ttl=timedelta(seconds=settings.playback_session_ttl_seconds),
             playback_launch_token_ttl=timedelta(seconds=settings.playback_launch_token_ttl_seconds),
             media_access_token_ttl=timedelta(seconds=settings.media_access_token_ttl_seconds),
+            download_grant_ttl=timedelta(seconds=settings.download_grant_ttl_seconds),
             max_playback_queue_size=settings.playback_max_queue_size,
             user_configurations=UserConfigurationStore(settings.user_configuration_directory),
         )
+        self._media_blocking_executor = BlockingExecutor(
+            max_workers=settings.media_transfer_worker_count,
+            thread_name_prefix="kasana-media",
+        )
         self.file_transfers: FileTransferPolicy = RangeStreamingFileTransferPolicy(
-            chunk_size=settings.media_transfer_chunk_size
+            chunk_size=settings.media_transfer_chunk_size,
+            blocking_executor=self._media_blocking_executor,
         )
         self.jobs = JobRegistry(database, maximum_jobs=settings.maintenance_max_active_jobs)
         self._backup_scheduler = (
@@ -82,11 +93,18 @@ class KatalogApiRuntime:
             if settings.json_backup_enabled
             else None
         )
+        self._download_grant_cleanup_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Recover work that could not survive a prior process shutdown."""
 
         await self.jobs.recover_interrupted()
+        await run_blocking(self.queries.purge_expired_download_grants)
+        if self._download_grant_cleanup_task is None:
+            self._download_grant_cleanup_task = asyncio.create_task(
+                self._purge_expired_download_grants_forever(),
+                name="katalog-download-grant-cleanup",
+            )
         if self._backup_scheduler is not None:
             await self._backup_scheduler.start()
 
@@ -94,6 +112,26 @@ class KatalogApiRuntime:
         await self.jobs.close()
         if self._backup_scheduler is not None:
             await self._backup_scheduler.close()
+        cleanup_task = self._download_grant_cleanup_task
+        self._download_grant_cleanup_task = None
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
+        await run_blocking(self._media_blocking_executor.close)
+
+    async def _purge_expired_download_grants_forever(self) -> None:
+        """Keep capability metadata bounded without making issuance scan old grants."""
+
+        interval = self.settings.download_grant_cleanup_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await run_blocking(self.queries.purge_expired_download_grants)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Unable to purge expired download grants.")
 
     async def browse_directories(self, path: str | None, *, limit: int = 500) -> DirectoryListing:
         return await run_blocking(_directory_listing, path, limit)

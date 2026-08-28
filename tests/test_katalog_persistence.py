@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kasana.katalog.admin import DatabaseAdmin
+from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import (
     AvailabilityState,
@@ -69,6 +70,18 @@ def test_sqlite_connection_policy(database: KatalogDatabase) -> None:
         assert connection.scalar(text("PRAGMA foreign_keys")) == 1
         assert connection.scalar(text("PRAGMA journal_mode")) == "wal"
         assert connection.scalar(text("PRAGMA busy_timeout")) == 5_000
+
+
+def test_status_does_not_need_an_extra_connection_from_a_bounded_pool(tmp_path: Path) -> None:
+    database = KatalogDatabase(tmp_path / "katalog.sqlite3", connection_pool_size=1)
+    try:
+        database.create_schema()
+        status = KatalogQueryService(
+            database, artwork_cache_path=tmp_path / "artwork"
+        ).status(active_jobs=0, failed_jobs=0)
+        assert status.database_revision is None
+    finally:
+        database.close()
 
 
 def test_sqlite_connection_policy_does_not_reset_journal_mode_per_connection(
@@ -399,10 +412,17 @@ def test_folded_migration_creates_current_child_identity_indexes(tmp_path: Path)
                     "WHERE type = 'index' AND name = 'ix_library_item_episode_number'"
                 )
             )
+            download_grant_table = connection.scalar(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'download_grant'"
+                )
+            )
     finally:
         database.close()
 
     assert index_sql is not None
+    assert download_grant_table == "download_grant"
     assert "item_kind != 'episode'" in index_sql
     assert episode_index_sql is not None
     assert "episode_number IS NOT NULL" in episode_index_sql

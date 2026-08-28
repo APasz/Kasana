@@ -30,6 +30,15 @@ class CollectionChoiceView(BaseModel):
     revision: int = Field(ge=1)
 
 
+class DownloadOptionView(BaseModel):
+    """One Katalog-confirmed media version available for a native download form."""
+
+    model_config = ConfigDict(frozen=True)
+
+    media_file_id: int = Field(gt=0, alias="mediaFileId")
+    label: str = Field(min_length=1, max_length=200)
+
+
 class ItemDetailView(BaseModel):
     """Safe detail data for the first Kanvas item page."""
 
@@ -47,6 +56,7 @@ class ItemDetailView(BaseModel):
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     watched: bool = False
     available: bool
+    download_options: tuple[DownloadOptionView, ...] = Field(default=(), alias="downloadOptions")
     child_section_title: Literal["Episodes", "Seasons"] = Field(
         default="Episodes", alias="childSectionTitle"
     )
@@ -57,3 +67,9 @@ class ItemDetailView(BaseModel):
     available_collections: tuple[CollectionChoiceView, ...] = Field(
         default=(), alias="availableCollections"
     )
+
+    @property
+    def downloadable(self) -> bool:
+        """Expose download eligibility from the authoritative version list alone."""
+
+        return bool(self.download_options)

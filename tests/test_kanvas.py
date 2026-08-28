@@ -15,12 +15,12 @@ from typing import cast
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from fastapi import HTTPException
-from nicegui import app
+from nicegui import app, ui
 from nicegui.client import Client
 from nicegui.element import Element
 from nicegui.elements.label import Label
 from nicegui.page import page
-from pydantic import TypeAdapter
+from pydantic import HttpUrl, TypeAdapter
 from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.routing import Route
@@ -87,6 +87,7 @@ from kasana.kanvas.dashboard import (
     watch_order_entry_action,
     watch_order_launch_action,
 )
+from kasana.kanvas.katalog_clients import KatalogClientPool
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.routes import collections as collections_route
 from kasana.kanvas.routes import home as home_route
@@ -135,6 +136,7 @@ from kasana.kanvas.viewmodels.collections import (
 from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
+    DownloadOptionView,
     IncludedCollectionView,
     ItemDetailView,
 )
@@ -159,6 +161,8 @@ from kasana.katalog.public import (
     ContinueWatchingEntry,
     DirectoryEntry,
     DirectoryListing,
+    DownloadGrantRequest,
+    DownloadGrantResponse,
     DuplicateEpisodeIssue,
     DuplicateResolutionPreview,
     JobProgress,
@@ -176,6 +180,8 @@ from kasana.katalog.public import (
     LibraryRootKind,
     LibraryRootSummary,
     LibraryRootUpdate,
+    MediaStreamSummary,
+    MediaTechnicalSummary,
     MetadataBindingReference,
     MetadataReviewCandidate,
     MetadataSearchResult,
@@ -391,6 +397,7 @@ def _item_detail_client(
     playback: PlaybackStateResponse | None = None,
     child_playback: Mapping[int, PlaybackStateResponse | None] | None = None,
     partially_watched_child_ids: frozenset[int] = frozenset(),
+    download_options: tuple[MediaTechnicalSummary, ...] = (),
 ) -> type[object]:
     class FakeClient:
         def __init__(self, *_arguments: object, **_keywords: object) -> None:
@@ -410,6 +417,12 @@ def _item_detail_client(
             assert item_id == item.id
             assert limit == 1
             return SimpleNamespace(items=())
+
+        async def list_library_item_download_options(
+            self, item_id: int
+        ) -> tuple[MediaTechnicalSummary, ...]:
+            assert item_id == item.id
+            return download_options
 
         async def list_library_item_children(
             self, item_id: int, *, limit: int
@@ -472,6 +485,17 @@ def _playback(*, completed: bool = False) -> PlaybackStateResponse:
         completed=completed,
         play_count=0,
         last_played_at=datetime.now(UTC),
+    )
+
+
+def _download_option(media_file_id: int = 11) -> MediaTechnicalSummary:
+    return MediaTechnicalSummary(
+        id=media_file_id,
+        container="matroska",
+        size_bytes=2 * 1024 * 1024 * 1024,
+        duration_seconds=120,
+        availability=Availability.AVAILABLE,
+        video_streams=(MediaStreamSummary(width=1920, height=1080),),
     )
 
 
@@ -925,6 +949,151 @@ def test_playback_proxy_preserves_range_headers_and_disables_media_caching() -> 
     }
 
 
+async def test_download_grant_proxies_attachment_content_and_forwards_validators(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    grant_token = "g" * 32
+    opened_transfers: list[tuple[str, str | None, str | None, str | None, str]] = []
+    transfer_closed = False
+    client_closed = False
+
+    class DownloadClient:
+        def __init__(self, _base_url: str, *, timeout_seconds: float) -> None:
+            assert timeout_seconds == Kanvas_Settings().katalog_timeout_seconds
+
+        @asynccontextmanager
+        async def open_download_grant(
+            self,
+            requested_token: str,
+            *,
+            range_header: str | None,
+            if_none_match: str | None,
+            if_range: str | None,
+            method: str,
+        ) -> AsyncGenerator[SimpleNamespace]:
+            nonlocal transfer_closed
+            opened_transfers.append(
+                (requested_token, range_header, if_none_match, if_range, method)
+            )
+
+            async def chunks() -> AsyncIterator[bytes]:
+                yield b"download"
+
+            try:
+                yield SimpleNamespace(
+                    status_code=200,
+                    headers={
+                        "Content-Disposition": "attachment; filename*=UTF-8''Item.mkv",
+                        "Content-Length": "8",
+                        "Content-Type": "video/x-matroska",
+                    },
+                    chunks=chunks(),
+                )
+            finally:
+                transfer_closed = True
+
+        async def close(self) -> None:
+            nonlocal client_closed
+            client_closed = True
+
+    monkeypatch.setattr(dashboard, "KatalogClient", DownloadClient)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "headers": [
+                (b"range", b"bytes=3-"),
+                (b"if-none-match", b'"previous"'),
+                (b"if-range", b'"stable"'),
+            ],
+        }
+    )
+
+    response = await dashboard.download_grant(grant_token, request)
+    assert isinstance(response, dashboard.PlaybackStreamingResponse)
+    body = b"".join(
+        [chunk async for chunk in cast(AsyncIterator[bytes], response.body_iterator)]
+    )
+
+    assert body == b"download"
+    assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''Item.mkv"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert opened_transfers == [(grant_token, "bytes=3-", '"previous"', '"stable"', "GET")]
+    assert transfer_closed
+    assert client_closed
+
+
+async def test_create_item_download_requires_csrf_and_redirects_to_an_opaque_grant(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    csrf_token = "c" * 32
+    created: list[tuple[int, int, int]] = []
+
+    class DownloadCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, user_id: int) -> None:
+            assert user_id == 1
+
+        async def create_download_grant(
+            self, item_id: int, media_file_id: int
+        ) -> SimpleNamespace:
+            created.append((1, item_id, media_file_id))
+            return SimpleNamespace(token="g" * 32)
+
+    class FormRequest:
+        def __init__(self, token: str) -> None:
+            self.session = {"kanvas_download_csrf": csrf_token}
+            self._form = FormData({"csrf_token": token, "media_file_id": "11"})
+
+        async def form(self) -> FormData:
+            return self._form
+
+    monkeypatch.setattr(dashboard, "KanvasKatalogService", DownloadCatalogue)
+
+    response = await dashboard.create_item_download(7, cast(Request, FormRequest(csrf_token)))
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/kanvas/downloads/" + "g" * 32
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert created == [(1, 7, 11)]
+
+    with pytest.raises(HTTPException) as invalid_item:
+        await dashboard.create_item_download(0, cast(Request, FormRequest(csrf_token)))
+    assert invalid_item.value.status_code == 422
+
+    monkeypatch.setattr(
+        dashboard,
+        "_settings",
+        Kanvas_Settings(download_public_url=HttpUrl("https://downloads.example.test")),
+    )
+    direct_response = await dashboard.create_item_download(
+        7, cast(Request, FormRequest(csrf_token))
+    )
+
+    assert direct_response.status_code == 303
+    assert direct_response.headers["location"] == (
+        "https://downloads.example.test/api/v1/download-grants/" + "g" * 32
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await dashboard.create_item_download(7, cast(Request, FormRequest("wrong")))
+    assert error.value.status_code == 403
+
+
+async def test_katalog_client_pool_reuses_one_http_session() -> None:
+    pool = KatalogClientPool(Kanvas_Settings())
+
+    first = await pool.session()
+    second = await pool.session()
+    await pool.close()
+
+    assert first is second
+    assert first.closed
+    with pytest.raises(RuntimeError, match="pool is closed"):
+        await pool.session()
+
+
 async def test_playback_stream_response_preserves_fixed_length_when_complete() -> None:
     async def content() -> AsyncIterator[bytes]:
         yield b"media"
@@ -1182,6 +1351,7 @@ async def test_item_detail_flattens_a_single_series_season(monkeypatch: MonkeyPa
 
     assert detail.child_section_title == "Episodes"
     assert [child.title for child in detail.children] == ["Pilot", "Finale"]
+    assert detail.downloadable is False
     assert child_requests == [7, 8]
 
 
@@ -1267,13 +1437,55 @@ async def test_item_detail_reads_completed_watched_state_directly(
     child_requests: list[int] = []
     monkeypatch.setattr(
         "kasana.kanvas.services.katalog.KatalogClient",
-        _item_detail_client(movie, {7: ()}, child_requests, _playback(completed=True)),
+        _item_detail_client(
+            movie,
+            {7: ()},
+            child_requests,
+            _playback(completed=True),
+            download_options=(_download_option(),),
+        ),
     )
 
     detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
 
     assert detail.watched is True
     assert detail.progress_percent is None
+    assert detail.downloadable is True
+    assert detail.download_options == (
+        DownloadOptionView(mediaFileId=11, label="MATROSKA · 1920x1080 · 2.0 GiB"),
+    )
+
+
+async def test_download_grant_service_binds_the_selected_version_to_its_profile(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    requests: list[DownloadGrantRequest] = []
+
+    class GrantClient:
+        def __init__(self, *_arguments: object, **_keywords: object) -> None:
+            pass
+
+        async def __aenter__(self) -> GrantClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            return None
+
+        async def create_download_grant(
+            self, request: DownloadGrantRequest
+        ) -> DownloadGrantResponse:
+            requests.append(request)
+            return DownloadGrantResponse(token="g" * 32, expires_at=datetime.now(UTC))
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", GrantClient)
+
+    grant = await KanvasKatalogService(Kanvas_Settings(), user_id=3).create_download_grant(7, 11)
+
+    assert grant.token == "g" * 32
+    request = requests[0]
+    assert request.user_id == 3
+    assert request.item_id == 7
+    assert request.media_file_id == 11
 
 
 @pytest.mark.parametrize(
@@ -3524,7 +3736,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         monkeypatch.setattr(home_route, "KanvasKatalogService", HomeCatalogue)
         await home_route.render_home(Kanvas_Settings(), _selected_profile())
         monkeypatch.setattr(item_route, "KanvasKatalogService", ItemCatalogue)
-        await item_route.render_item(Kanvas_Settings(), _selected_profile(), 7)
+        await item_route.render_item(
+            Kanvas_Settings(), _selected_profile(), 7, download_csrf_token="c" * 32
+        )
         monkeypatch.setattr(library_route, "KanvasKatalogService", ItemCatalogue)
         await render_library(
             Kanvas_Settings(), _selected_profile(), LibraryFilters(search="poster")
@@ -3981,6 +4195,40 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
     assert member_shortcuts == []
 
 
+def test_item_actions_place_a_versioned_download_form_beside_play() -> None:
+    profile = SessionProfile(UserSummary(id=1, username="viewer", role=UserRole.USER))
+
+    with Client(page("")) as client:
+        status = ui.label("")
+        item_route._item_actions(  # pyright: ignore[reportPrivateUsage]
+            Kanvas_Settings(),
+            profile,
+            item_id=7,
+            initially_watched=False,
+            available=True,
+            download_options=(
+                DownloadOptionView(mediaFileId=11, label="MKV · 1080p · 2.0 GiB"),
+                DownloadOptionView(mediaFileId=12, label="MP4 · 720p · 1.0 GiB"),
+            ),
+            download_csrf_token="c" * 32,
+            status=status,
+            playback_session_id=None,
+        )
+        download_form = next(
+            element
+            for element in client.elements.values()
+            if element.tag == "form"
+            and _element_props(element).get("action") == "/kanvas/actions/items/7/download"
+        )
+        version_picker = _select_named(client, "media_file_id")
+        csrf = _input_named(client, "csrf_token")
+
+    assert "k-download-form" in _element_classes(download_form)
+    assert "k-action-row" in _element_classes(_parent_element(download_form))
+    assert _element_props(version_picker)["aria-label"] == "Download version"
+    assert _element_props(csrf)["value"] == "c" * 32
+
+
 async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -4030,6 +4278,8 @@ async def test_stopping_an_advanced_browser_queue_returns_its_current_item(
             item_id=7,
             initially_watched=False,
             available=True,
+            download_options=(),
+            download_csrf_token="c" * 32,
             status=cast(Label, Action()),
             playback_session_id="s" * 32,
         )
@@ -4272,6 +4522,8 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/",
         "/library",
         "/item/{item_id}",
+        "/kanvas/actions/items/{item_id}/download",
+        "/kanvas/downloads/{grant_token}",
         "/collections",
         "/collections/new",
         "/collections/{collection_id}",

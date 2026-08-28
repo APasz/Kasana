@@ -59,6 +59,13 @@ your host firewall blocks inbound connections, allow TCP port `5370`; set
 `host` to `127.0.0.1` in `configs/config.kanvas.json` to restrict Kanvas to the
 local machine again.
 
+For large browser downloads, set Kanvas's `download_public_url` to the
+browser-reachable Katalog origin (for example `http://media-server:5373`) in
+`configs/config.kanvas.json`. Kanvas will then redirect the browser to a
+short-lived opaque download grant, so media bytes bypass the dashboard process.
+Without this setting, downloads continue through the secure same-origin Kanvas
+proxy.
+
 ### Kanvas browser support
 
 Kanvas supports current desktop releases of Chrome, Chromium, Microsoft Edge,

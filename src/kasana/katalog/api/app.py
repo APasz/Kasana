@@ -33,6 +33,8 @@ from kasana.katalog.api.contracts import (
     CollectionUpdate,
     ContinueWatchingEntry,
     DirectoryListing,
+    DownloadGrantRequest,
+    DownloadGrantResponse,
     DuplicateEpisodeIssue,
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPreview,
@@ -133,7 +135,9 @@ def create_app(
         database_path = settings.database_path.expanduser().resolve()
         if owns_database:
             await run_blocking(DatabaseAdmin(database_path).initialise)
-        active_database = database or KatalogDatabase(database_path)
+        active_database = database or KatalogDatabase(
+            database_path, connection_pool_size=settings.database_connection_pool_size
+        )
         runtime = KatalogApiRuntime(settings, active_database)
         app.state.runtime = runtime
         try:
@@ -192,6 +196,18 @@ def create_app(
     )
     async def list_users(runtime: KatalogApiRuntime = Depends(_runtime)) -> tuple[UserSummary, ...]:
         return await run_blocking(runtime.queries.list_users)
+
+    @app.get(
+        "/api/v1/users/{user_id}/session-profile",
+        response_model=UserSummary,
+        operation_id="v1_get_user_session_profile",
+        responses=_ERROR_RESPONSES,
+    )
+    async def get_user_session_profile(
+        user_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> UserSummary:
+        return await run_blocking(runtime.queries.session_profile, user_id)
 
     @app.post(
         "/api/v1/users",
@@ -468,6 +484,18 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PaginatedResponse[MediaTechnicalSummary]:
         return await run_blocking(runtime.queries.list_media, item_id, cursor=cursor, limit=limit)
+
+    @app.get(
+        "/api/v1/library/items/{item_id}/download-options",
+        response_model=tuple[MediaTechnicalSummary, ...],
+        operation_id="v1_list_library_item_download_options",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_library_item_download_options(
+        item_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> tuple[MediaTechnicalSummary, ...]:
+        return await run_blocking(runtime.queries.list_download_options, item_id)
 
     @app.get(
         "/api/v1/library/items/{item_id}/artwork",
@@ -1057,6 +1085,19 @@ def create_app(
     ) -> PlaybackSessionCloseResult:
         return await run_blocking(runtime.queries.close_playback_session, session_id)
 
+    @app.post(
+        "/api/v1/download-grants",
+        response_model=DownloadGrantResponse,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="v1_create_download_grant",
+        responses=_ERROR_RESPONSES,
+    )
+    async def create_download_grant(
+        grant: DownloadGrantRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> DownloadGrantResponse:
+        return await run_blocking(runtime.queries.create_download_grant, grant)
+
     async def transfer_media(
         request: Request,
         access_token: str,
@@ -1066,6 +1107,7 @@ def create_app(
         *,
         operation: MediaAccessOperation,
         download: bool,
+        if_range: str | None = None,
     ) -> Response:
         media_file = await run_blocking(
             runtime.queries.resolve_media_access_token, access_token, operation
@@ -1076,7 +1118,29 @@ def create_app(
             range_header=range_header,
             if_none_match=if_none_match,
             download=download,
+            if_range=if_range,
         )
+
+    async def transfer_download_grant(
+        request: Request,
+        grant_token: str,
+        range_header: str | None,
+        if_none_match: str | None,
+        if_range: str | None,
+        runtime: KatalogApiRuntime,
+    ) -> Response:
+        media_file = await run_blocking(runtime.queries.resolve_download_grant, grant_token)
+        response = runtime.file_transfers.response(
+            media_file,
+            method=request.method,
+            range_header=range_header,
+            if_none_match=if_none_match,
+            download=True,
+            if_range=if_range,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     @app.get(
         "/api/v1/media/{access_token}",
@@ -1178,6 +1242,7 @@ def create_app(
         access_token: Annotated[str, Path(min_length=32, max_length=128)],
         range_header: Annotated[str | None, Header(alias="Range")] = None,
         if_none_match: Annotated[str | None, Header()] = None,
+        if_range: Annotated[str | None, Header()] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> Response:
         return await transfer_media(
@@ -1188,6 +1253,7 @@ def create_app(
             runtime,
             operation=MediaAccessOperation.DOWNLOAD,
             download=True,
+            if_range=if_range,
         )
 
     @app.head(
@@ -1200,6 +1266,7 @@ def create_app(
         access_token: Annotated[str, Path(min_length=32, max_length=128)],
         range_header: Annotated[str | None, Header(alias="Range")] = None,
         if_none_match: Annotated[str | None, Header()] = None,
+        if_range: Annotated[str | None, Header()] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> Response:
         return await transfer_media(
@@ -1210,6 +1277,51 @@ def create_app(
             runtime,
             operation=MediaAccessOperation.DOWNLOAD,
             download=True,
+            if_range=if_range,
+        )
+
+    @app.get(
+        "/api/v1/download-grants/{grant_token}",
+        operation_id="v1_download_grant_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def download_grant_media(
+        request: Request,
+        grant_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        if_range: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_download_grant(
+            request,
+            grant_token,
+            range_header,
+            if_none_match,
+            if_range,
+            runtime,
+        )
+
+    @app.head(
+        "/api/v1/download-grants/{grant_token}",
+        operation_id="v1_head_download_grant_media",
+        responses={**_ERROR_RESPONSES, 200: {"content": {"application/octet-stream": {}}}},
+    )
+    async def head_download_grant_media(
+        request: Request,
+        grant_token: Annotated[str, Path(min_length=32, max_length=128)],
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+        if_none_match: Annotated[str | None, Header()] = None,
+        if_range: Annotated[str | None, Header()] = None,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        return await transfer_download_grant(
+            request,
+            grant_token,
+            range_header,
+            if_none_match,
+            if_range,
+            runtime,
         )
 
     @app.put(
@@ -1502,7 +1614,12 @@ def _api_path_uses_opaque_capability(path: str) -> bool:
     """Allow media URLs whose unguessable access token is their credential."""
 
     return path == "/api/v1/health" or path.startswith(
-        ("/api/v1/media/", "/api/v1/subtitles/", "/api/v1/downloads/")
+        (
+            "/api/v1/media/",
+            "/api/v1/subtitles/",
+            "/api/v1/downloads/",
+            "/api/v1/download-grants/",
+        )
     )
 
 

@@ -7,7 +7,7 @@ from asyncio import CancelledError, gather
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from math import isfinite
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -33,11 +33,18 @@ from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import add_kanvas_head, kanvas_asset_versions, page_shell
 from kasana.kanvas.components.typography import page_title, section_title
+from kasana.kanvas.downloads import issue_download_csrf_token, valid_download_csrf_token
 from kasana.kanvas.ffmpeg import (
     FFmpegError,
     start_font_attachment_extract,
     start_fragmented_mp4,
     start_subtitle_extract,
+)
+from kasana.kanvas.katalog_clients import (
+    close_katalog_client_pool,
+    create_katalog_client,
+    katalog_client_context,
+    start_katalog_client_pool,
 )
 from kasana.kanvas.playback_compatibility import (
     BrowserPlaybackCapabilities,
@@ -133,6 +140,14 @@ _SUBTITLE_FONT_CONTENT_TYPES: Mapping[PlaybackSubtitleFontFormat, str] = {
 # producing `const dark = True;`. This lower-case JavaScript literal keeps the
 # page bootstrap valid until the upstream template serialises the value as JSON.
 _JAVASCRIPT_DARK_TRUE = cast(bool, "true")
+
+
+async def _start_katalog_clients() -> None:
+    await start_katalog_client_pool(_settings)
+
+
+async def _close_katalog_clients() -> None:
+    await close_katalog_client_pool()
 
 
 class PlaybackStreamingResponse(StreamingResponse):
@@ -282,12 +297,11 @@ async def update_current_profile(request: Request) -> JSONResponse:
         values["autoplay_on_resume"] = _boolean(payload, "autoplayOnResume")
     try:
         update = UserUpdate.model_validate(values)
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             user = await client.update_user(profile.user.id, update)
     except KatalogClientError, ValueError:
         return _invalid_action("Profile settings could not be saved.")
+    ProfileSessions(_settings).remember(user)
     return JSONResponse(user.model_dump(mode="json"))
 
 
@@ -299,9 +313,7 @@ async def current_profile_playback_languages(request: Request) -> JSONResponse:
     if profile is None:
         return JSONResponse({"error": "Select a profile."}, status_code=401)
     try:
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             languages = await client.list_playback_languages()
     except KatalogClientError:
         return JSONResponse({"error": "Language choices are unavailable."}, status_code=503)
@@ -316,12 +328,11 @@ async def update_kanvas_preferences(request: Request) -> JSONResponse:
     payload = await _json_object(request)
     try:
         update = UserUpdate.model_validate(payload)
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             user = await client.update_user(profile.user.id, update)
     except ValidationError, KatalogClientError, ValueError:
         return _invalid_action("Profile settings could not be saved.")
+    ProfileSessions(_settings).remember(user)
     return JSONResponse({"accentColour": user.accent_colour})
 
 
@@ -336,9 +347,7 @@ async def create_profile_user(request: Request) -> JSONResponse:
     payload = await _json_object(request)
     try:
         role = UserRole(_optional_string(payload.get("role"), maximum_length=20) or "user")
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             user = await client.create_user(
                 UserCreate(
                     username=_string(payload, "username", maximum_length=200),
@@ -349,6 +358,7 @@ async def create_profile_user(request: Request) -> JSONResponse:
             )
     except KatalogClientError, ValueError:
         return _invalid_action("Profile could not be created.")
+    ProfileSessions(_settings).remember(user)
     return JSONResponse(user.model_dump(mode="json"), status_code=201)
 
 
@@ -361,12 +371,11 @@ async def update_profile_user(user_id: int, request: Request) -> JSONResponse:
     payload = await _json_object(request)
     try:
         update = UserUpdate.model_validate(_profile_update_payload(payload))
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             user = await client.update_user(user_id, update)
     except KatalogClientError, ValueError:
         return _invalid_action("Profile could not be updated.")
+    ProfileSessions(_settings).remember(user)
     return JSONResponse(user.model_dump(mode="json"))
 
 
@@ -401,12 +410,11 @@ async def disable_profile_user(user_id: int, request: Request) -> JSONResponse:
         return JSONResponse({"error": "Select a profile."}, status_code=401)
     _require_administrator(profile)
     try:
-        async with KatalogClient(
-            str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-        ) as client:
+        async with katalog_client_context(_settings, client_factory=KatalogClient) as client:
             user = await client.disable_user(user_id)
     except KatalogClientError as error:
         return _katalog_data_error(error, "Profile could not be disabled.")
+    ProfileSessions(_settings).forget(user.id)
     return JSONResponse(user.model_dump(mode="json"))
 
 
@@ -1187,6 +1195,87 @@ async def watch_order_launch_action(watch_order_id: int, request: Request) -> JS
     return JSONResponse({"playbackUrl": f"/play/watch-orders/{watch_order_id}?itemId={item_id}"})
 
 
+@app.post("/kanvas/actions/items/{item_id}/download", include_in_schema=False)
+async def create_item_download(item_id: int, request: Request) -> Response:
+    """Create an owned, selected-version grant from a CSRF-protected native form."""
+
+    profile = await _require_profile(request)
+    if item_id <= 0:
+        raise HTTPException(status_code=422, detail="item_id must be positive.")
+    form = await request.form()
+    if not valid_download_csrf_token(request, _form_value(form, "csrf_token")):
+        raise HTTPException(status_code=403, detail="Download request could not be verified.")
+    try:
+        grant = await KanvasKatalogService(_settings, profile.user.id).create_download_grant(
+            item_id, _form_integer(form, "media_file_id")
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Download is unavailable.")
+    return RedirectResponse(
+        _download_grant_location(grant.token),
+        status_code=303,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
+def _download_grant_location(grant_token: str) -> str:
+    """Prefer a browser-reachable Katalog capability host when one is configured."""
+
+    if _settings.download_public_url is None:
+        return f"/kanvas/downloads/{grant_token}"
+    return f"{str(_settings.download_public_url).rstrip('/')}/api/v1/download-grants/{grant_token}"
+
+
+@app.api_route(
+    "/kanvas/downloads/{grant_token}",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def download_grant(grant_token: str, request: Request) -> Response:
+    """Proxy a short-lived opaque download grant without creating browser-side state."""
+
+    catalogue = await create_katalog_client(_settings, client_factory=KatalogClient)
+    method: Literal["GET", "HEAD"] = "HEAD" if request.method == "HEAD" else "GET"
+    transfer_context = catalogue.open_download_grant(
+        grant_token,
+        range_header=request.headers.get("range"),
+        if_none_match=request.headers.get("if-none-match"),
+        if_range=request.headers.get("if-range"),
+        method=method,
+    )
+    try:
+        transfer = await transfer_context.__aenter__()
+    except ValueError as error:
+        await catalogue.close()
+        raise HTTPException(status_code=404, detail="Download is unavailable.") from error
+    except KatalogClientError as error:
+        await catalogue.close()
+        return _katalog_data_error(error, "Download is unavailable.")
+
+    async def release_download_transfer() -> None:
+        try:
+            await transfer_context.__aexit__(None, None, None)
+        finally:
+            await catalogue.close()
+
+    headers = _download_response_headers(transfer.headers)
+    if request.method == "HEAD":
+        await release_download_transfer()
+        return Response(status_code=transfer.status_code, headers=headers)
+
+    async def stream() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in transfer.chunks:
+                yield chunk
+        except KatalogClientError as error:
+            _LOGGER.warning("Browser download ended early: %s", error)
+            raise
+        finally:
+            await release_download_transfer()
+
+    return PlaybackStreamingResponse(stream(), status_code=transfer.status_code, headers=headers)
+
+
 @app.api_route(
     "/kanvas/playback/sessions/{session_id}/entries/{entry_position}/media",
     methods=["GET", "HEAD"],
@@ -1242,9 +1331,7 @@ async def playback_media(session_id: str, entry_position: int, request: Request)
             headers={"Content-Type": "video/mp4", "Cache-Control": "no-store"},
         )
 
-    catalogue = KatalogClient(
-        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-    )
+    catalogue = await create_katalog_client(_settings, client_factory=KatalogClient)
     transfer_context = catalogue.open_stream_media(
         entry.stream_url, range_header=request.headers.get("range")
     )
@@ -1779,6 +1866,14 @@ def _stream_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return response_headers
 
 
+def _download_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Add capability-URL protections to a non-cacheable attachment response."""
+
+    response_headers = _stream_response_headers(headers)
+    response_headers["Referrer-Policy"] = "no-referrer"
+    return response_headers
+
+
 def _subtitle_cache_headers() -> dict[str, str]:
     """Keep immutable, session-scoped subtitle variants in the private browser cache."""
 
@@ -1880,9 +1975,7 @@ def _is_webvtt_track(codec: str | None) -> bool:
 async def _direct_webvtt_sidecar(subtitle_url: str) -> PlaybackStreamingResponse:
     """Proxy a VTT sidecar byte-for-byte when no generated-stream offset is needed."""
 
-    catalogue = KatalogClient(
-        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-    )
+    catalogue = await create_katalog_client(_settings, client_factory=KatalogClient)
     transfer_context = catalogue.open_stream_subtitle(subtitle_url)
     try:
         transfer = await transfer_context.__aenter__()
@@ -1907,9 +2000,7 @@ async def _direct_webvtt_sidecar(subtitle_url: str) -> PlaybackStreamingResponse
 async def _sidecar_subtitle_content(subtitle_url: str) -> bytes:
     """Read one bounded sidecar through Katalog's opaque capability."""
 
-    catalogue = KatalogClient(
-        str(_settings.katalog_url), timeout_seconds=_settings.katalog_timeout_seconds
-    )
+    catalogue = await create_katalog_client(_settings, client_factory=KatalogClient)
     try:
         async with catalogue.open_stream_subtitle(subtitle_url) as transfer:
             return await _bounded_subtitle_bytes(transfer.chunks)
@@ -2469,6 +2560,9 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     global _assets_registered, _head_registered, _pages_registered, _settings
     _settings = settings or Kanvas_Settings()
     if not _assets_registered:
+        lifecycle_app: Any = app
+        lifecycle_app.on_startup(_start_katalog_clients)
+        lifecycle_app.on_shutdown(_close_katalog_clients)
         app.add_middleware(
             SessionMiddleware,
             secret_key=_settings.session_secret,
@@ -2605,7 +2699,14 @@ async def item_page(item_id: int, request: Request) -> Response | None:
                 f"/item/{current_item.item_id}?playbackSession={playback_session.id}{start_query}",
                 status_code=303,
             )
-    await render_item(_settings, profile, item_id, playback_session, play_on_load)
+    await render_item(
+        _settings,
+        profile,
+        item_id,
+        playback_session,
+        play_on_load,
+        download_csrf_token=issue_download_csrf_token(request),
+    )
 
 
 async def play_item_page(item_id: int, request: Request) -> Response | None:

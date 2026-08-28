@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+from kasana.kanvas.katalog_clients import katalog_client_context
 from kasana.kanvas.services.katalog import is_series_like
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.public import (
@@ -32,12 +35,17 @@ class KanvasPlaybackService:
         self._settings = settings
         self._user_id = user_id
 
+    @asynccontextmanager
+    async def _client(self) -> AsyncGenerator[KatalogClient]:
+        async with katalog_client_context(
+            self._settings, client_factory=KatalogClient
+        ) as client:
+            yield client
+
     async def create_item_launch_uri(self, item_id: int, *, resume: bool) -> str:
         """Create a one-use launch URI, without exposing a media URL to the browser."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             conditional_item = await client.get_library_item(item_id)
             if conditional_item.item is None:
                 msg = "Katalog returned an unexpected empty item response."
@@ -57,9 +65,7 @@ class KanvasPlaybackService:
     ) -> str:
         """Launch an order while retaining its Katalog watch-order context."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             launch = await client.create_playback_plan(
                 watch_order_playback_plan_request(
                     watch_order_id,
@@ -76,9 +82,7 @@ class KanvasPlaybackService:
     ) -> PlaybackSessionResponse:
         """Create and consume a browser-owned playback plan for one item or series."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             conditional_item = await client.get_library_item(item_id)
             if conditional_item.item is None:
                 msg = "Katalog returned an unexpected empty item response."
@@ -98,9 +102,7 @@ class KanvasPlaybackService:
     ) -> PlaybackSessionResponse:
         """Create and consume a browser-owned watch-order playback plan."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             launch = await client.create_playback_plan(
                 watch_order_playback_plan_request(
                     watch_order_id,
@@ -115,9 +117,7 @@ class KanvasPlaybackService:
     async def playback_session(self, session_id: str) -> PlaybackSessionResponse:
         """Load a browser playback session, rejecting sessions owned by other profiles."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             session = await client.get_playback_session(session_id)
         return self._owned_session(session)
 
@@ -126,9 +126,7 @@ class KanvasPlaybackService:
     ) -> None:
         """Record one browser progress sample after verifying session ownership."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             await client.update_playback_session_progress(session_id, update)
@@ -138,9 +136,7 @@ class KanvasPlaybackService:
     ) -> PlaybackSessionResponse:
         """Store a current-entry browser track choice after checking profile ownership."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             selected = await client.update_playback_session_tracks(session_id, selection)
@@ -151,9 +147,7 @@ class KanvasPlaybackService:
     ) -> PlaybackSessionResponse:
         """Atomically complete the expected entry and transition its owned queue."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             transitioned = await client.complete_and_advance_playback_session(
@@ -165,9 +159,7 @@ class KanvasPlaybackService:
     async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
         """Close an owned browser session and return its final current entry."""
 
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             session = await client.get_playback_session(session_id)
             self._owned_session(session)
             return await client.close_playback_session(session_id)
@@ -185,9 +177,7 @@ class KanvasPlaybackService:
             user_id=self._user_id,
             context=ManualQueuePlaybackContext(item_ids=entry_ids),
         )
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        ) as client:
+        async with self._client() as client:
             launch = await client.create_playback_plan(request)
         return launch_uri(launch.launch_token)
 

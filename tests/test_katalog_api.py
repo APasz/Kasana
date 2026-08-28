@@ -1318,6 +1318,15 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     assert refreshed_user["role"] == "user"
     assert refreshed_user["accent_colour"] == "#336699"
 
+    targeted_profile = await api_fixture.client.get(
+        f"/api/v1/users/{user['id']}/session-profile"
+    )
+
+    assert targeted_profile.status_code == 200
+    assert targeted_profile.json()["id"] == user["id"]
+    assert targeted_profile.json()["role"] == "user"
+    assert targeted_profile.json()["accent_colour"] == "#336699"
+
     configured_user_path = (
         api_fixture.settings.user_configuration_directory / "73" / "configuration.json"
     )
@@ -1452,6 +1461,10 @@ async def test_openapi_uses_versioned_stable_operation_ids(api_fixture: ApiFixtu
         == "v1_list_recently_added_catalogue_items"
     )
     assert schema["paths"]["/api/v1/users"]["get"]["operationId"] == "v1_list_users"
+    assert (
+        schema["paths"]["/api/v1/users/{user_id}/session-profile"]["get"]["operationId"]
+        == "v1_get_user_session_profile"
+    )
     assert (
         schema["paths"]["/api/v1/library/directories"]["get"]["operationId"]
         == "v1_browse_library_directories"

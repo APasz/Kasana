@@ -12,7 +12,13 @@ from kasana.configuration import (
     katalog_api_url,
     user_configuration_directory,
 )
-from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
+from kasana.katalog.limits import (
+    DEFAULT_DATABASE_CONNECTION_POOL_SIZE,
+    DEFAULT_MEDIA_TRANSFER_CHUNK_SIZE,
+    DEFAULT_MEDIA_TRANSFER_WORKER_COUNT,
+    MAX_MEDIA_TRANSFER_CHUNK_SIZE,
+    MAX_PLAYBACK_QUEUE_SIZE,
+)
 from kasana.shared.settings import KSettings
 
 
@@ -46,8 +52,18 @@ class KatalogSettings(KSettings):
     playback_session_ttl_seconds: int = Field(default=8 * 60 * 60, ge=60, le=7 * 24 * 60 * 60)
     playback_launch_token_ttl_seconds: int = Field(default=5 * 60, ge=30, le=60 * 60)
     media_access_token_ttl_seconds: int = Field(default=10 * 60, ge=30, le=60 * 60)
+    download_grant_ttl_seconds: int = Field(default=24 * 60 * 60, ge=5 * 60, le=7 * 24 * 60 * 60)
+    download_grant_cleanup_interval_seconds: int = Field(default=15 * 60, ge=60, le=24 * 60 * 60)
     playback_max_queue_size: int = Field(default=100, ge=1, le=MAX_PLAYBACK_QUEUE_SIZE)
-    media_transfer_chunk_size: int = Field(default=64 * 1024, ge=4 * 1024, le=1024 * 1024)
+    media_transfer_chunk_size: int = Field(
+        default=DEFAULT_MEDIA_TRANSFER_CHUNK_SIZE, ge=4 * 1024, le=MAX_MEDIA_TRANSFER_CHUNK_SIZE
+    )
+    media_transfer_worker_count: int = Field(
+        default=DEFAULT_MEDIA_TRANSFER_WORKER_COUNT, ge=1, le=32
+    )
+    database_connection_pool_size: int = Field(
+        default=DEFAULT_DATABASE_CONNECTION_POOL_SIZE, ge=1, le=32
+    )
     maintenance_max_active_jobs: int = Field(default=4, ge=1, le=32)
 
     @property

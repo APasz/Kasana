@@ -521,6 +521,9 @@ class MediaFile(Base):
     access_tokens: Mapped[list[MediaAccessToken]] = orm_relationship(
         back_populates="media_file", cascade="all, delete-orphan", passive_deletes=True
     )
+    download_grants: Mapped[list[DownloadGrant]] = orm_relationship(
+        back_populates="media_file", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (
         CheckConstraint("size_bytes >= 0", name="nonnegative_size"),
@@ -845,6 +848,9 @@ class User(Base):
     playback_sessions: Mapped[list[PlaybackSession]] = orm_relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    download_grants: Mapped[list[DownloadGrant]] = orm_relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (Index("ix_user_username", "username", unique=True),)
 
@@ -1033,6 +1039,32 @@ class MediaAccessToken(Base):
     __table_args__ = (
         Index("ix_media_access_token_hash", "token_hash", unique=True),
         Index("ix_media_access_token_expiry", "expires_at"),
+    )
+
+
+class DownloadGrant(Base):
+    """Short-lived direct-download capability, independent of playback sessions."""
+
+    __tablename__ = "download_grant"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    media_file_id: Mapped[int] = mapped_column(
+        ForeignKey("media_file.id", ondelete="CASCADE"), nullable=False
+    )
+    source_etag: Mapped[str] = mapped_column(String(128), nullable=False)
+    download_name: Mapped[str] = mapped_column(String(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped[User] = orm_relationship(back_populates="download_grants")
+    media_file: Mapped[MediaFile] = orm_relationship(back_populates="download_grants")
+
+    __table_args__ = (
+        Index("ix_download_grant_hash", "token_hash", unique=True),
+        Index("ix_download_grant_expiry", "expires_at"),
+        Index("ix_download_grant_user_expiry", "user_id", "expires_at"),
     )
 
 

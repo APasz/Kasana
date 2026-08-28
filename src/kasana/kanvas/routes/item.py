@@ -6,8 +6,9 @@ from nicegui import ui
 from nicegui.elements.label import Label
 
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
-from kasana.kanvas.components.controls import action_button
+from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.feedback import feedback_state
+from kasana.kanvas.components.inputs import SelectOption, hidden_input, select_input
 from kasana.kanvas.components.poster import poster_card, poster_placeholder_art
 from kasana.kanvas.components.progress import progress_indicator
 from kasana.kanvas.components.shell import page_shell
@@ -17,7 +18,7 @@ from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.kanvas.viewmodels.item import ItemDetailView
+from kasana.kanvas.viewmodels.item import DownloadOptionView, ItemDetailView
 from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
@@ -31,6 +32,8 @@ async def render_item(
     item_id: int,
     playback_session: PlaybackSessionResponse | None = None,
     play_on_load: bool = False,
+    *,
+    download_csrf_token: str,
 ) -> None:
     """Render useful detail, playback, and compact child navigation for one item."""
 
@@ -84,6 +87,8 @@ async def render_item(
                     item_id,
                     detail.watched,
                     detail.available,
+                    detail.download_options,
+                    download_csrf_token,
                     status,
                     playback_session.id if playback_session is not None else None,
                 )
@@ -104,6 +109,8 @@ def _item_actions(
     item_id: int,
     initially_watched: bool,
     available: bool,
+    download_options: tuple[DownloadOptionView, ...],
+    download_csrf_token: str,
     status: Label,
     playback_session_id: str | None,
 ) -> None:
@@ -182,10 +189,38 @@ def _item_actions(
             _item_editor_button(item_id, profile)
             return
         action_button("Play", lambda: launch(False), primary=True, disabled=not available)
+        if download_options:
+            _item_download_form(item_id, download_options, download_csrf_token)
         watched_button = action_button(
             "Mark unwatched" if watched_state.watched else "Mark watched", toggle_watched
         )
         _item_editor_button(item_id, profile)
+
+
+def _item_download_form(
+    item_id: int, options: tuple[DownloadOptionView, ...], csrf_token: str
+) -> None:
+    """Render a CSRF-protected native form that creates one selected download grant."""
+
+    with (
+        ui.element("form")
+        .classes("k-download-form")
+        .props(f'method="post" action="/kanvas/actions/items/{item_id}/download"')
+    ):
+        hidden_input(name="csrf_token", value=csrf_token)
+        if len(options) == 1:
+            hidden_input(name="media_file_id", value=str(options[0].media_file_id))
+        else:
+            select_input(
+                name="media_file_id",
+                aria_label="Download version",
+                options=tuple(
+                    SelectOption(value=str(option.media_file_id), label=option.label)
+                    for option in options
+                ),
+                value=str(options[0].media_file_id),
+            )
+        action_button("Download", button_type=ButtonType.SUBMIT)
 
 
 def _item_editor_button(item_id: int, profile: SessionProfile) -> None:

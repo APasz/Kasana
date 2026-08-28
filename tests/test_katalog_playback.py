@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import socket
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
 from kasana.katalog.models import (
     AvailabilityState,
+    DownloadGrant,
     KeiroKind,
     MediaFile,
     PlaybackLaunchToken,
@@ -36,6 +38,7 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.public import (
+    DownloadGrantRequest,
     PlaybackContext,
     PlaybackContextKind,
     PlaybackPlanEntry,
@@ -57,6 +60,7 @@ from kasana.katalog.services import (
     record_playback_progress,
 )
 from kasana.katalog.settings import KatalogSettings
+from kasana.shared.concurrency import run_blocking
 
 
 @dataclass(frozen=True)
@@ -470,6 +474,149 @@ async def test_standalone_launch_is_one_use_and_media_has_ranges(
         entry["download_url"].replace("downloads", "media")
     )
     assert mismatched_operation.status_code == 404
+
+
+async def test_download_grants_are_versioned_expiring_and_range_safe(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as session:
+        media_file = session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == ids["movie"])
+        )
+        assert media_file is not None
+        media_path = Path(media_file.absolute_path)
+        unavailable_version = attach_media_file(
+            session,
+            library_item_id=ids["movie"],
+            absolute_path=media_path.with_name("missing-version.mkv"),
+            size_bytes=1,
+            mtime_ns=0,
+            container="matroska",
+        )
+
+    options = await playback_fixture.client.get(
+        f"/api/v1/library/items/{ids['movie']}/download-options"
+    )
+
+    assert options.status_code == 200
+    assert [option["id"] for option in options.json()] == [media_file.id, unavailable_version.id]
+
+    unavailable_grant = await playback_fixture.client.post(
+        "/api/v1/download-grants",
+        json={
+            "user_id": ids["user"],
+            "item_id": ids["movie"],
+            "media_file_id": unavailable_version.id,
+        },
+    )
+
+    assert unavailable_grant.status_code == 422
+
+    grant_response = await playback_fixture.client.post(
+        "/api/v1/download-grants",
+        json={
+            "user_id": ids["user"],
+            "item_id": ids["movie"],
+            "media_file_id": media_file.id,
+        },
+    )
+
+    assert grant_response.status_code == 201, grant_response.text
+    grant = grant_response.json()
+    grant_url = f"/api/v1/download-grants/{grant['token']}"
+    with playback_fixture.database.transaction() as session:
+        assert not tuple(session.scalars(select(PlaybackSession)))
+        persisted_grant = session.scalar(select(DownloadGrant))
+        assert persisted_grant is not None
+        assert persisted_grant.media_file_id == media_file.id
+        assert persisted_grant.user_id == ids["user"]
+
+    partial = await playback_fixture.client.get(
+        grant_url,
+        headers={"Authorization": "Bearer invalid", "Range": "bytes=1-3"},
+    )
+    assert partial.status_code == 206
+    assert partial.content == b"asa"
+    assert partial.headers["content-disposition"].startswith("attachment;")
+    assert partial.headers["cache-control"] == "no-store"
+    assert partial.headers["referrer-policy"] == "no-referrer"
+    etag = partial.headers["etag"]
+
+    not_modified = await playback_fixture.client.get(
+        grant_url,
+        headers={"If-None-Match": etag},
+    )
+    assert not_modified.status_code == 304
+
+    weak_not_modified = await playback_fixture.client.get(
+        grant_url,
+        headers={"If-None-Match": f"W/{etag}"},
+    )
+    assert weak_not_modified.status_code == 304
+
+    matched_range = await playback_fixture.client.get(
+        grant_url,
+        headers={"Range": "bytes=1-3", "If-Range": etag},
+    )
+    assert matched_range.status_code == 206
+    assert matched_range.content == b"asa"
+
+    restarted_download = await playback_fixture.client.get(
+        grant_url,
+        headers={"Range": "bytes=1-3", "If-Range": '"stale"'},
+    )
+    assert restarted_download.status_code == 200
+    assert restarted_download.content.startswith(b"Kasana")
+
+    head = await playback_fixture.client.head(
+        grant_url,
+        headers={"Range": "bytes=-2", "If-Range": etag},
+    )
+    assert head.status_code == 206
+    assert head.headers["content-length"] == "2"
+    assert head.content == b""
+
+    current_stat = await run_blocking(media_path.stat)
+    await run_blocking(
+        os.utime,
+        media_path,
+        ns=(current_stat.st_atime_ns, current_stat.st_mtime_ns + 1_000_000_000),
+    )
+    changed_source = await playback_fixture.client.get(grant_url)
+    assert changed_source.status_code == 409
+
+
+async def test_expired_download_grants_are_purged_when_resolved(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as session:
+        media_file = session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == ids["movie"])
+        )
+        assert media_file is not None
+
+    response = await playback_fixture.client.post(
+        "/api/v1/download-grants",
+        json={
+            "user_id": ids["user"],
+            "item_id": ids["movie"],
+            "media_file_id": media_file.id,
+        },
+    )
+    assert response.status_code == 201
+    token = response.json()["token"]
+    with playback_fixture.database.transaction() as session:
+        grant = session.scalar(select(DownloadGrant))
+        assert grant is not None
+        grant.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    expired = await playback_fixture.client.get(f"/api/v1/download-grants/{token}")
+
+    assert expired.status_code == 404
+    with playback_fixture.database.transaction() as session:
+        assert session.scalar(select(DownloadGrant)) is None
 
 
 async def test_series_resume_watch_order_and_manual_queue_contexts(
@@ -1176,10 +1323,21 @@ async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFi
     try:
         while not server.started:  # noqa: ASYNC110
             await asyncio.sleep(0.001)
+        with playback_fixture.database.transaction() as session:
+            media_file = session.scalar(
+                select(MediaFile).where(
+                    MediaFile.library_item_id == playback_fixture.ids["movie"]
+                )
+            )
+            assert media_file is not None
         async with KatalogClient(
             f"http://127.0.0.1:{socket_handle.getsockname()[1]}",
             bearer_token=playback_fixture.settings.api_bearer_token.get_secret_value(),
         ) as client:
+            options = await client.list_library_item_download_options(
+                playback_fixture.ids["movie"]
+            )
+            assert [option.id for option in options] == [media_file.id]
             launch = await client.create_playback_plan(
                 PlaybackPlanRequest(
                     user_id=playback_fixture.ids["user"],
@@ -1198,6 +1356,18 @@ async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFi
                 ]
             )
             assert body.startswith(b"Kasana")
+            grant = await client.create_download_grant(
+                DownloadGrantRequest(
+                    user_id=playback_fixture.ids["user"],
+                    item_id=playback_fixture.ids["movie"],
+                    media_file_id=media_file.id,
+                )
+            )
+            async with client.open_download_grant(
+                grant.token, range_header="bytes=0-5"
+            ) as transfer:
+                download_body = b"".join([chunk async for chunk in transfer.chunks])
+            assert download_body == b"Kasana"
     finally:
         server.should_exit = True
         await server_task

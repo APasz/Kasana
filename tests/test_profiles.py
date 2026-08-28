@@ -10,7 +10,7 @@ import pytest
 from nicegui.client import Client
 from nicegui.element import Element
 from nicegui.page import page
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 
@@ -36,6 +36,8 @@ class _ProfileClient:
     def __init__(self, users: tuple[UserSummary, ...]) -> None:
         self.users = users
         self.authentication_requests: list[tuple[int, UserAuthentication]] = []
+        self.list_user_requests = 0
+        self.session_profile_requests: list[int] = []
 
     async def __aenter__(self) -> _ProfileClient:
         return self
@@ -44,7 +46,12 @@ class _ProfileClient:
         return None
 
     async def list_users(self) -> tuple[UserSummary, ...]:
+        self.list_user_requests += 1
         return self.users
+
+    async def get_session_profile(self, user_id: int) -> UserSummary:
+        self.session_profile_requests.append(user_id)
+        return next(user for user in self.users if user.id == user_id)
 
     async def authenticate_user(self, user_id: int, request: UserAuthentication) -> UserSummary:
         self.authentication_requests.append((user_id, request))
@@ -129,6 +136,28 @@ async def test_switching_profiles_revokes_stale_page_callbacks(
     assert current.user.id == second.id
 
 
+async def test_current_profile_uses_one_targeted_lookup_then_caches_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = _profile(3)
+    registry = ProfileSessionRegistry()
+    client = _ProfileClient((user,))
+    sessions = ProfileSessions(Kanvas_Settings(), registry=registry)
+    monkeypatch.setattr(sessions, "_client", lambda: client)
+    browser_session: dict[str, object] = {}
+
+    await sessions.start(_request(browser_session), user_id=user.id, pin=None)
+    registry.invalidate_profile(user.id)
+
+    first = await sessions.current(_request(browser_session))
+    second = await sessions.current(_request(browser_session))
+
+    assert first is not None and first.user.id == user.id
+    assert second is not None and second.user.id == user.id
+    assert client.session_profile_requests == [user.id]
+    assert client.list_user_requests == 0
+
+
 def test_katalog_scoped_cookie_names_do_not_collide() -> None:
     first = Kanvas_Settings(katalog_url=HttpUrl("http://127.0.0.1:5373"))
     second = Kanvas_Settings(katalog_url=HttpUrl("http://127.0.0.1:5374"))
@@ -136,6 +165,11 @@ def test_katalog_scoped_cookie_names_do_not_collide() -> None:
 
     assert first.effective_session_cookie_name != second.effective_session_cookie_name
     assert first.effective_session_cookie_name != alternate_kanvas.effective_session_cookie_name
+
+
+def test_download_public_url_accepts_only_an_origin() -> None:
+    with pytest.raises(ValidationError, match="must be an origin"):
+        Kanvas_Settings(download_public_url=HttpUrl("https://downloads.example.test/katalog"))
 
 
 async def test_disabled_profile_clears_a_previous_browser_session(
@@ -197,6 +231,12 @@ async def test_profile_dashboard_session_and_administration_actions(
 
         def clear(self, request: Request) -> None:
             request.scope["cleared"] = True
+
+        def remember(self, _user: UserSummary) -> None:
+            return None
+
+        def forget(self, _user_id: int) -> None:
+            return None
 
     update_requests: list[tuple[int, UserUpdate]] = []
 

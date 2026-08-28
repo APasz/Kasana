@@ -543,6 +543,21 @@ class MediaTechnicalSummary(APIModel):
     subtitle_streams: tuple[MediaStreamSummary, ...] = Field(default=(), max_length=128)
 
 
+class DownloadGrantRequest(APIModel):
+    """Request one short-lived download capability for an eligible media version."""
+
+    user_id: int = Field(gt=0)
+    item_id: int = Field(gt=0)
+    media_file_id: int = Field(gt=0)
+
+
+class DownloadGrantResponse(APIModel):
+    """Opaque Katalog download capability returned only to trusted callers."""
+
+    token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    expires_at: datetime
+
+
 class CollectionSummary(APIModel):
     id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=1_000)

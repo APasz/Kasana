@@ -498,6 +498,12 @@ kanvas-poster {
     gap: 8px;
 }
 
+.k-download-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .k-filter-strip { margin: 0 0 20px; }
 
 .k-input,

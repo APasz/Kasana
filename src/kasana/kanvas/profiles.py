@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from secrets import token_urlsafe
 from time import monotonic
@@ -9,6 +11,7 @@ from typing import TypeGuard
 
 from starlette.requests import Request
 
+from kasana.kanvas.katalog_clients import katalog_client_context
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.public import (
     KatalogClient,
@@ -29,6 +32,7 @@ class ProfileSessionRegistry:
     def __init__(self) -> None:
         self._active_until: dict[str, float] = {}
         self._revoked_until: dict[str, float] = {}
+        self._profiles: dict[int, _CachedProfile] = {}
 
     def activate(self, session_id: str, *, max_age_seconds: int) -> None:
         now = monotonic()
@@ -51,6 +55,24 @@ class ProfileSessionRegistry:
         expires_at = self._active_until.get(session_id)
         return expires_at is None or expires_at > now
 
+    def cached_profile(self, user_id: int) -> UserSummary | None:
+        """Return one non-expired profile snapshot without a catalogue round trip."""
+
+        now = monotonic()
+        self._discard_expired(now)
+        cached = self._profiles.get(user_id)
+        return cached.user if cached is not None else None
+
+    def cache_profile(self, user: UserSummary, *, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("Profile cache TTL must be positive.")
+        now = monotonic()
+        self._discard_expired(now)
+        self._profiles[user.id] = _CachedProfile(user=user, expires_at=now + ttl_seconds)
+
+    def invalidate_profile(self, user_id: int) -> None:
+        self._profiles.pop(user_id, None)
+
     def _discard_expired(self, now: float) -> None:
         for session_ids in (self._active_until, self._revoked_until):
             expired = tuple(
@@ -58,9 +80,22 @@ class ProfileSessionRegistry:
             )
             for session_id in expired:
                 del session_ids[session_id]
+        expired_profile_ids = tuple(
+            user_id
+            for user_id, profile in self._profiles.items()
+            if profile.expires_at <= now
+        )
+        for user_id in expired_profile_ids:
+            del self._profiles[user_id]
 
 
 _PROFILE_SESSION_REGISTRY = ProfileSessionRegistry()
+
+
+@dataclass(frozen=True)
+class _CachedProfile:
+    user: UserSummary
+    expires_at: float
 
 
 @dataclass(frozen=True)
@@ -85,7 +120,10 @@ class ProfileSessions:
 
     async def profiles(self) -> tuple[UserSummary, ...]:
         async with self._client() as client:
-            return await client.list_users()
+            users = await client.list_users()
+        for user in users:
+            self.remember(user)
+        return users
 
     async def current(self, request: Request) -> SessionProfile | None:
         raw_user_id = request.session.get(_SESSION_USER_ID)
@@ -98,8 +136,12 @@ class ProfileSessions:
         ):
             self._clear(request)
             return None
-        user = next((user for user in await self.profiles() if user.id == raw_user_id), None)
-        if user is None or user.is_disabled:
+        user = self._registry.cached_profile(raw_user_id)
+        if user is None:
+            async with self._client() as client:
+                user = await client.get_session_profile(raw_user_id)
+            self.remember(user)
+        if user.is_disabled:
             self._clear(request)
             return None
         return SessionProfile(user)
@@ -112,6 +154,7 @@ class ProfileSessions:
         request.session[_SESSION_USER_ID] = user.id
         request.session[_SESSION_ID] = session_id
         self._registry.activate(session_id, max_age_seconds=self._settings.session_max_age_seconds)
+        self.remember(user)
         return SessionProfile(user)
 
     async def bootstrap(
@@ -140,10 +183,19 @@ class ProfileSessions:
         request.session[_SESSION_USER_ID] = user.id
         request.session[_SESSION_ID] = session_id
         self._registry.activate(session_id, max_age_seconds=self._settings.session_max_age_seconds)
+        self.remember(user)
         return SessionProfile(user)
 
     def clear(self, request: Request) -> None:
         self._clear(request)
+
+    def remember(self, user: UserSummary) -> None:
+        """Refresh the process-local snapshot after a successful profile mutation."""
+
+        self._registry.cache_profile(user, ttl_seconds=self._settings.profile_cache_ttl_seconds)
+
+    def forget(self, user_id: int) -> None:
+        self._registry.invalidate_profile(user_id)
 
     async def current_for_page(
         self, request: Request, *, expected_user_id: int
@@ -163,10 +215,12 @@ class ProfileSessions:
             )
         request.session.clear()
 
-    def _client(self) -> KatalogClient:
-        return KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
-        )
+    @asynccontextmanager
+    async def _client(self) -> AsyncGenerator[KatalogClient]:
+        async with katalog_client_context(
+            self._settings, client_factory=KatalogClient
+        ) as client:
+            yield client
 
 
 def profile_display_name(user: UserSummary) -> str:

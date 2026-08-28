@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
 
+from kasana.kanvas.katalog_clients import katalog_client_context
 from kasana.kanvas.services.presentation import (
     PLAYABLE_KINDS,
     artwork_proxy_from_api_url,
@@ -18,6 +19,7 @@ from kasana.kanvas.services.presentation import (
     collection_tile,
     collection_update_request,
     display_title,
+    download_option_view,
     generated_row,
     group_collection_members,
     is_generic_episode_title,
@@ -79,6 +81,8 @@ from kasana.katalog.public import (
     CollectionRelationship,
     CollectionSummary,
     DirectoryListing,
+    DownloadGrantRequest,
+    DownloadGrantResponse,
     DuplicateEpisodeIssue,
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPreview,
@@ -217,8 +221,8 @@ class KanvasKatalogService:
 
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[KatalogClient]:
-        async with KatalogClient(
-            str(self._settings.katalog_url), timeout_seconds=self._settings.katalog_timeout_seconds
+        async with katalog_client_context(
+            self._settings, client_factory=KatalogClient
         ) as client:
             yield client
 
@@ -506,10 +510,18 @@ class KanvasKatalogService:
                 msg = "Katalog returned an unexpected empty item response."
                 raise RuntimeError(msg)
             item = conditional_item.item
-            media_page, children_page = await gather(
-                client.list_library_item_media(item_id, limit=1),
-                client.list_library_item_children(item_id, limit=_DETAIL_CHILD_PAGE_SIZE),
-            )
+            if item.kind in PLAYABLE_KINDS and item.availability is Availability.AVAILABLE:
+                media_page, download_options, children_page = await gather(
+                    client.list_library_item_media(item_id, limit=1),
+                    client.list_library_item_download_options(item_id),
+                    client.list_library_item_children(item_id, limit=_DETAIL_CHILD_PAGE_SIZE),
+                )
+            else:
+                media_page, children_page = await gather(
+                    client.list_library_item_media(item_id, limit=1),
+                    client.list_library_item_children(item_id, limit=_DETAIL_CHILD_PAGE_SIZE),
+                )
+                download_options = ()
             collection_summaries = (
                 (await client.list_collections(limit=100)).items
                 if include_collection_choices
@@ -535,6 +547,7 @@ class KanvasKatalogService:
             progressPercent=progress_percent(playback),
             watched=playback.completed if playback is not None else False,
             available=item.availability is Availability.AVAILABLE,
+            downloadOptions=tuple(download_option_view(option) for option in download_options),
             childSectionTitle=child_view.title,
             children=child_view.children,
             includedCollections=tuple(
@@ -552,6 +565,20 @@ class KanvasKatalogService:
             ),
             availableCollections=_available_collection_choices(collection_summaries, item),
         )
+
+    async def create_download_grant(
+        self, item_id: int, media_file_id: int
+    ) -> DownloadGrantResponse:
+        """Ask Katalog for one direct-download grant owned by the active profile."""
+
+        async with self._client() as client:
+            return await client.create_download_grant(
+                DownloadGrantRequest(
+                    user_id=self._required_user_id(),
+                    item_id=item_id,
+                    media_file_id=media_file_id,
+                )
+            )
 
     async def item_edit_detail(self, item_id: int) -> LibraryItemDetail:
         """Return the full supported edit contract only to the Kanvas owner/admin UI."""
