@@ -2978,6 +2978,7 @@
       const fullscreenSpecialInfo = this.querySelector('[data-player-fullscreen-special-info]');
       const fullscreenTime = this.querySelector('[data-player-fullscreen-time]');
       const fullscreenFrameAlignment = this.querySelector('[data-player-frame-alignment-controls]');
+      const frameToggle = this.querySelector('[data-player-frame-toggle]');
       const sessionId = this.getAttribute('session-id');
       const queueNext = document.querySelector('[data-player-next]');
       const fullscreenQueueNext = controls?.querySelector('[data-player-action="next"]');
@@ -2994,11 +2995,22 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !fullscreenFrameAlignment || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !fullscreenFrameAlignment || !frameToggle || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       const frameAlignmentOptions = Array.from(
         fullscreenFrameAlignment.querySelectorAll('[data-player-frame-alignment-option]')
       ).filter((option) => option instanceof Element);
       if (frameAlignmentOptions.length !== 3) return;
+      const updateFrameToggleSize = () => {
+        const {height, width} = video.getBoundingClientRect();
+        if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+        frameToggle.style.setProperty(
+          '--k-player-frame-toggle-size', `${Math.max(0, Math.min(width, height) * 0.5)}px`
+        );
+      };
+      const frameToggleResizeObserver = typeof ResizeObserver === 'function'
+        ? new ResizeObserver(updateFrameToggleSize)
+        : null;
+      frameToggleResizeObserver?.observe(video);
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -3009,7 +3021,7 @@
       let activeProgress = null;
       let pendingProgress = null;
       let progressReportPromise = null;
-      let fullscreenHideTimer = null;
+      let playerControlsHideTimer = null;
       let fullscreenClockTimer = null;
       let deliveryMode = 'direct';
       let streamStartSeconds = 0;
@@ -3034,6 +3046,7 @@
       let entryPlaybackReady = false;
       let mediaEntryPosition = null;
       let webkitFullscreenActive = false;
+      let wasPlayerFullscreen = false;
       let timelinePointerDown = false;
       let activePlayerTooltipButton = null;
       let selectedFrameAlignment = 'centred';
@@ -3297,7 +3310,14 @@
         activePlayerTooltipButton = null;
         if (playerTooltip.hidden) return;
         playerTooltip.hidden = true;
-        showFullscreenControls();
+        showPlayerControls();
+      };
+      const playerTooltipAnchor = (button) => {
+        if (button !== frameToggle) return button;
+        const iconSelector = button.dataset.playerIconState === 'alternate'
+          ? '.k-player__control-icon--alternate .k-icon'
+          : '.k-player__control-icon--default .k-icon';
+        return button.querySelector(iconSelector) || button;
       };
       const showPlayerTooltip = (button) => {
         if (button.hasAttribute('disabled')) return;
@@ -3307,14 +3327,14 @@
         playerTooltip.textContent = text;
         playerTooltip.hidden = false;
         const playerBounds = this.getBoundingClientRect();
-        const buttonBounds = button.getBoundingClientRect();
+        const anchorBounds = playerTooltipAnchor(button).getBoundingClientRect();
         const tooltipBounds = playerTooltip.getBoundingClientRect();
         const minimumCenter = tooltipBounds.width / 2 + floatingMenuInset;
         const maximumCenter = playerBounds.width - minimumCenter;
-        const center = buttonBounds.left - playerBounds.left + buttonBounds.width / 2;
+        const center = anchorBounds.left - playerBounds.left + anchorBounds.width / 2;
         const left = Math.max(minimumCenter, Math.min(center, Math.max(minimumCenter, maximumCenter)));
-        const above = buttonBounds.top - playerBounds.top - tooltipBounds.height - floatingMenuInset;
-        const below = buttonBounds.bottom - playerBounds.top + floatingMenuInset;
+        const above = anchorBounds.top - playerBounds.top - tooltipBounds.height - floatingMenuInset;
+        const below = anchorBounds.bottom - playerBounds.top + floatingMenuInset;
         const top = above >= floatingMenuInset
           ? above
           : clampFloatingMenuOffset(
@@ -3323,7 +3343,7 @@
           );
         playerTooltip.style.left = `${left}px`;
         playerTooltip.style.top = `${top}px`;
-        showFullscreenControls();
+        showPlayerControls();
       };
       const positionFloatingMenu = (
         menu,
@@ -3353,7 +3373,7 @@
         closeTrackMenus();
         mobileMenu.hidden = false;
         if (overflowControl instanceof Element) overflowControl.setAttribute('aria-expanded', 'true');
-        showFullscreenControls();
+        showPlayerControls();
       };
       const showTrackMenu = (menu, target) => {
         hidePlayerTooltip();
@@ -3372,7 +3392,7 @@
           targetBounds.top - playerBounds.top - menuBounds.height - floatingMenuInset,
           targetBounds.bottom - playerBounds.top + floatingMenuInset
         );
-        showFullscreenControls();
+        showPlayerControls();
       };
       const updateTrackOptions = () => {
         audioMenu.querySelectorAll('[data-player-audio-stream]').forEach((option) => {
@@ -3803,36 +3823,32 @@
         if (isCardFullscreen()) startFullscreenClock();
         else clearFullscreenClock();
       };
-      const clearFullscreenHideTimer = () => {
-        if (fullscreenHideTimer !== null) window.clearTimeout(fullscreenHideTimer);
-        fullscreenHideTimer = null;
+      const clearPlayerControlsHideTimer = () => {
+        if (playerControlsHideTimer !== null) window.clearTimeout(playerControlsHideTimer);
+        playerControlsHideTimer = null;
       };
-      const showFullscreenControls = () => {
-        if (!isCardFullscreen()) return;
+      const playerControlsCanHide = () => (
+        !video.paused
+        && contextMenu.hidden
+        && mobileMenu.hidden
+        && audioMenu.hidden
+        && subtitleMenu.hidden
+        && playerTooltip.hidden
+      );
+      const showPlayerControls = () => {
         this.classList.remove('k-player--controls-hidden');
-        clearFullscreenHideTimer();
-        if (!video.paused && contextMenu.hidden && mobileMenu.hidden && audioMenu.hidden && subtitleMenu.hidden && playerTooltip.hidden) {
-          fullscreenHideTimer = window.setTimeout(() => {
-            if (
-              isCardFullscreen()
-              && !video.paused
-              && contextMenu.hidden
-              && mobileMenu.hidden
-              && audioMenu.hidden
-              && subtitleMenu.hidden
-              && playerTooltip.hidden
-            ) {
-              this.classList.add('k-player--controls-hidden');
-            }
-          }, 2600);
-        }
+        clearPlayerControlsHideTimer();
+        if (!playerControlsCanHide()) return;
+        playerControlsHideTimer = window.setTimeout(() => {
+          if (playerControlsCanHide()) this.classList.add('k-player--controls-hidden');
+        }, 2600);
       };
       const hideContextMenu = () => {
         hidePlayerTooltip();
         contextMenu.hidden = true;
         closeTrackMenus();
         closeMobileMenu();
-        showFullscreenControls();
+        showPlayerControls();
       };
       const showContextMenu = (clientX, clientY) => {
         hidePlayerTooltip();
@@ -3840,7 +3856,7 @@
         contextMenu.hidden = false;
         closeTrackMenus();
         closeMobileMenu();
-        showFullscreenControls();
+        showPlayerControls();
         const menuBounds = contextMenu.getBoundingClientRect();
         const preferredTop = clientY - playerBounds.top;
         positionFloatingMenu(
@@ -4141,7 +4157,7 @@
         updateControls();
       };
       const onPlayerControlClick = (event) => {
-        showFullscreenControls();
+        showPlayerControls();
         const element = event.target instanceof Element ? event.target : null;
         const target = element?.closest('[data-player-action]');
         if (!target) return;
@@ -4149,6 +4165,7 @@
       };
       controls.addEventListener('click', onPlayerControlClick);
       mobileMenu.addEventListener('click', onPlayerControlClick);
+      frameToggle.addEventListener('click', onPlayerControlClick);
       const onFullscreenFrameAlignmentClick = (event) => {
         const element = event.target instanceof Element ? event.target : null;
         const option = element?.closest('[data-player-frame-alignment-option]');
@@ -4156,7 +4173,7 @@
         if (!isFrameAlignment(alignment)) return;
         selectedFrameAlignment = alignment;
         synchroniseFullscreenFrameAlignment();
-        showFullscreenControls();
+        showPlayerControls();
       };
       fullscreenFrameAlignment.addEventListener('click', onFullscreenFrameAlignmentClick);
       audioMenu.addEventListener('click', (event) => {
@@ -4292,7 +4309,7 @@
         if (!timelinePointerDown) hideTimelinePreview();
       });
       timeline.addEventListener('input', () => {
-        showFullscreenControls();
+        showPlayerControls();
         const position = Number(timeline.value);
         if (!Number.isFinite(position)) return;
         showTimelinePreview(position);
@@ -4308,7 +4325,7 @@
       });
       volumeControls.forEach((volumeControl) => {
         volumeControl.addEventListener('input', () => {
-          showFullscreenControls();
+          showPlayerControls();
           const nextVolume = Number(volumeControl.value);
           if (!Number.isFinite(nextVolume)) return;
           video.volume = Math.min(Math.max(nextVolume, 0), 1);
@@ -4327,7 +4344,7 @@
             return;
           }
           autoplayNext = autoplayNextControl.checked;
-          showFullscreenControls();
+          showPlayerControls();
         });
       }
       const playerTooltipButton = (target) => {
@@ -4344,7 +4361,7 @@
         if (button && playerTooltipButton(event.relatedTarget) !== button) hidePlayerTooltip();
       });
       this.addEventListener('focusin', (event) => {
-        showFullscreenControls();
+        showPlayerControls();
         const button = playerTooltipButton(event.target);
         if (button) showPlayerTooltip(button);
       });
@@ -4356,10 +4373,11 @@
         event.preventDefault();
         showContextMenu(event.clientX, event.clientY);
       });
-      this.addEventListener('pointermove', showFullscreenControls);
-      this.addEventListener('pointerdown', showFullscreenControls);
-      this.addEventListener('touchstart', showFullscreenControls, {passive: true});
-      this.addEventListener('keydown', showFullscreenControls);
+      this.addEventListener('pointerenter', showPlayerControls);
+      this.addEventListener('pointermove', showPlayerControls);
+      this.addEventListener('pointerdown', showPlayerControls);
+      this.addEventListener('touchstart', showPlayerControls, {passive: true});
+      this.addEventListener('keydown', showPlayerControls);
       const onPointerDown = (event) => {
         if (
           !contextMenu.contains(event.target)
@@ -4371,17 +4389,23 @@
       document.addEventListener('pointerdown', onPointerDown);
       this._dispose = () => {
         invalidatePlaybackAttempts();
-        clearFullscreenHideTimer();
+        clearPlayerControlsHideTimer();
         clearFullscreenClock();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        controls.removeEventListener('click', onPlayerControlClick);
+        mobileMenu.removeEventListener('click', onPlayerControlClick);
+        frameToggle.removeEventListener('click', onPlayerControlClick);
         fullscreenFrameAlignment.removeEventListener('click', onFullscreenFrameAlignmentClick);
+        frameToggleResizeObserver?.disconnect();
         video.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
         video.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen);
         video.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
+        video.removeEventListener('resize', updateFrameToggleSize);
         if (queueNext instanceof Element) queueNext.removeEventListener('click', onQueueNext);
         window.removeEventListener('pagehide', flushProgressOnPageHide);
         window.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
+        window.removeEventListener('resize', updateFrameToggleSize);
         clearNativeSubtitle();
         disposeAssRenderer();
       };
@@ -4401,6 +4425,7 @@
           }
         }
         releaseVideoHeight();
+        updateFrameToggleSize();
         status.textContent = '';
         updateControls();
         synchroniseFullscreenFrameAlignment();
@@ -4412,41 +4437,42 @@
       video.addEventListener('play', () => {
         clearSelectPlayStatus();
         updateControls();
-        showFullscreenControls();
+        showPlayerControls();
       });
       video.addEventListener('playing', () => { streamRecoveryAttemptCount = 0; });
       video.addEventListener('pause', () => {
         updateControls();
-        showFullscreenControls();
+        showPlayerControls();
       });
       video.addEventListener('ratechange', updateControls);
       video.addEventListener('volumechange', updateControls);
       const onFullscreenChange = () => {
+        const playerFullscreen = isPlayerFullscreen();
         updateControls();
         synchroniseFullscreenClock();
         synchroniseFullscreenFrameAlignment();
-        if (isCardFullscreen()) showFullscreenControls();
-        else {
-          clearFullscreenHideTimer();
-          this.classList.remove('k-player--controls-hidden');
-        }
-        if (!isPlayerFullscreen()) void navigateToPendingItemPage();
+        if (playerFullscreen || wasPlayerFullscreen) showPlayerControls();
+        wasPlayerFullscreen = playerFullscreen;
+        if (!playerFullscreen) void navigateToPendingItemPage();
       };
       document.addEventListener('fullscreenchange', onFullscreenChange);
       const onWebkitBeginFullscreen = () => {
         webkitFullscreenActive = true;
         updateControls();
         synchroniseFullscreenFrameAlignment();
+        showPlayerControls();
       };
       const onWebkitEndFullscreen = () => {
         webkitFullscreenActive = false;
         updateControls();
         synchroniseFullscreenFrameAlignment();
+        showPlayerControls();
         void navigateToPendingItemPage();
       };
       video.addEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
       video.addEventListener('webkitendfullscreen', onWebkitEndFullscreen);
       video.addEventListener('resize', synchroniseFullscreenFrameAlignment);
+      video.addEventListener('resize', updateFrameToggleSize);
       video.addEventListener('timeupdate', () => {
         updateControls();
         void reportProgress(false, false);
@@ -4521,8 +4547,11 @@
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();
+      showPlayerControls();
+      updateFrameToggleSize();
       synchroniseFullscreenFrameAlignment();
       window.addEventListener('resize', synchroniseFullscreenFrameAlignment);
+      window.addEventListener('resize', updateFrameToggleSize);
       const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);
       void loadEntry(entryPosition, resumePosition, catalogueDuration, shouldPlayOnLoad).catch(() => {
         status.textContent = 'Playback compatibility could not be checked.';

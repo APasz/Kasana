@@ -98,6 +98,20 @@ def _player_control(
         _player_icon(icon, alternate_icon)
 
 
+def _player_frame_toggle() -> None:
+    """Render the centred video-frame play or pause control."""
+
+    button = _player_action_button(
+        "k-player__control k-player__frame-toggle",
+        _PlayerControlAction.TOGGLE,
+        "Play",
+        alternate_icon=IconName.PAUSE,
+    )
+    button.props("data-player-frame-toggle")
+    with button:
+        _player_icon(IconName.PLAY, IconName.PAUSE)
+
+
 def _fullscreen_frame_alignment_option(
     alignment: _FullscreenFrameAlignment,
     label: str,
@@ -355,9 +369,11 @@ def render_browser_playback_card(
         ui.element("a").classes("k-player__kestrel").props(
             'data-player-kestrel hidden aria-live="polite"'
         )
-        ui.element("video").classes("k-player__video").props(
-            'playsinline preload="metadata"'
-        )
+        with ui.element("div").classes("k-player__frame"):
+            ui.element("video").classes("k-player__video").props(
+                'playsinline preload="metadata"'
+            )
+            _player_frame_toggle()
         with ui.element("div").classes("k-player__fullscreen-info"):
             ui.label(browser_entry.fullscreen_title).classes("k-player__fullscreen-title").props(
                 'data-player-fullscreen-title'

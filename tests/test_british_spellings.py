@@ -1,4 +1,4 @@
-"""Repository spelling policy for British English."""
+"""Repository spelling policy for British and Australian English."""
 
 from __future__ import annotations
 
@@ -26,8 +26,10 @@ _IGNORED_PATHS = frozenset(
 )
 _TEXT_SUFFIXES = frozenset({".css", ".ini", ".js", ".md", ".mako", ".py", ".toml"})
 _REQUIRED_STANDARD_TERMS = frozenset({"authorization", "behavior", "center", "color", "license"})
-_UNAVOIDABLE_API_SPELLINGS = {
+_UNAVOIDABLE_TECHNICAL_SPELLINGS = {
+    Path("src/kasana/katalog/api/app.py"): frozenset({"unauthorized"}),
     Path("src/kasana/katalog/numerals.py"): frozenset({"normalize"}),
+    Path("tests/test_kanvas.py"): frozenset({"center"}),
 }
 _AMERICAN_SPELLING_PATTERN = re.compile(
     r"(?<![A-Za-z])"
@@ -113,7 +115,7 @@ def _source_files() -> Iterator[Path]:
 
 
 def _is_allowed_standard_term(path: Path, term: str) -> bool:
-    unavoidable_terms = _UNAVOIDABLE_API_SPELLINGS.get(path)
+    unavoidable_terms = _UNAVOIDABLE_TECHNICAL_SPELLINGS.get(path)
     if unavoidable_terms is not None and term in unavoidable_terms:
         return True
     if term not in _REQUIRED_STANDARD_TERMS:

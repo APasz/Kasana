@@ -717,6 +717,7 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "_PlayerControlAction.TOGGLE" in card
     assert "IconName.PLAY" in card
     assert "IconName.PAUSE" in card
+    assert "data-player-frame-toggle" in card
     assert "icon_svg(icon)" in card
     assert 'data-player-rate="{rate:g}"' in card
     assert "document.fullscreenElement === this" in script
@@ -735,7 +736,16 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "inline-size: var(--k-player-control-size);" in stylesheet
     assert "block-size: var(--k-player-control-size);" in stylesheet
     assert ".k-player__control-icon" in stylesheet
+    assert ".k-player__frame-toggle" in stylesheet
+    assert "clip-path: circle(50%);" in stylesheet
+    assert "opacity: 0.25;" in stylesheet
+    assert ".k-player__frame-toggle:hover { color: var(--k-text); opacity: 1;" in stylesheet
     assert "playerIconState" in script
+    assert "updateFrameToggleSize" in script
+    assert "showPlayerControls" in script
+    assert "this.addEventListener('pointerenter', showPlayerControls);" in script
+    assert "playerTooltipAnchor" in script
+    assert ".k-player.k-player--controls-hidden .k-player__frame-toggle" in stylesheet
     assert "data-player-timeline-preview" in card
     assert "showTimelinePreview" in script
     assert ".k-player__timeline-preview" in stylesheet

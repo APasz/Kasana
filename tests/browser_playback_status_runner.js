@@ -5,7 +5,12 @@ const vm = require('node:vm');
 class FakeElement {
   constructor() {
     this.attributes = new Map();
-    this.classList = {add() {}, remove() {}};
+    const classNames = new Set();
+    this.classList = {
+      add: (...names) => names.forEach((name) => classNames.add(name)),
+      contains: (name) => classNames.has(name),
+      remove: (...names) => names.forEach((name) => classNames.delete(name))
+    };
     this.dataset = {};
     this.hidden = true;
     this.children = [];
@@ -24,6 +29,11 @@ class FakeElement {
     const listeners = this.listeners.get(name) || [];
     listeners.push(listener);
     this.listeners.set(name, listeners);
+  }
+
+  removeEventListener(name, listener) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter((candidate) => candidate !== listener));
   }
 
   appendChild(child) {
@@ -98,6 +108,7 @@ class FakeVideo extends FakeElement {
     this.buffered = new FakeTimeRanges();
     this.children = [];
     this.playCalls = 0;
+    this.pauseCalls = 0;
   }
 
   canPlayType() {
@@ -109,6 +120,11 @@ class FakeVideo extends FakeElement {
   play() {
     this.playCalls += 1;
     return Promise.resolve();
+  }
+
+  pause() {
+    this.pauseCalls += 1;
+    this.paused = true;
   }
 
   appendChild(child) {
@@ -387,6 +403,15 @@ function createPlayer({
   const audioControl = playerAction('audio');
   const subtitlesControl = playerAction('subtitles');
   const toggleControl = playerAction('toggle');
+  const frameToggle = playerAction('toggle');
+  frameToggle.setAttribute('data-player-frame-toggle', '');
+  const frameTogglePlayIcon = new FakeElement();
+  const frameTogglePauseIcon = new FakeElement();
+  frameToggle.querySelector = (selector) => {
+    if (selector === '.k-player__control-icon--default .k-icon') return frameTogglePlayIcon;
+    if (selector === '.k-player__control-icon--alternate .k-icon') return frameTogglePauseIcon;
+    return null;
+  };
   const theatreControl = playerAction('theatre');
   const fullscreenQueueNext = hasFullscreenQueueNext ? new FakeElement() : null;
   if (fullscreenQueueNext) {
@@ -492,6 +517,7 @@ function createPlayer({
     ['[data-player-fullscreen-special-info]', fullscreenSpecialInfo],
     ['[data-player-fullscreen-time]', fullscreenTime],
     ['[data-player-frame-alignment-controls]', fullscreenFrameAlignment],
+    ['[data-player-frame-toggle]', frameToggle],
     ['[data-player-kestrel]', kestrelLink]
   ]);
   const subtitleTrack = new FakeElement();
@@ -535,6 +561,7 @@ function createPlayer({
   player.querySelector = (selector) => elements.get(selector) || null;
   const actionControls = [
     overflowControl,
+    frameToggle,
     toggleControl,
     theatreControl,
     fullscreenQueueNext,
@@ -579,6 +606,8 @@ function createPlayer({
     frameAlignmentCentred,
     frameAlignmentEnd,
     frameAlignmentStart,
+    frameTogglePauseIcon,
+    frameTogglePlayIcon,
     mobileFullscreen,
     mobileFullscreenLabel,
     mobileMenu,
@@ -588,6 +617,7 @@ function createPlayer({
     mobileTheatreLabel,
     mobileVolume,
     overflowControl,
+    frameToggle,
     player,
     playerTooltip,
     queueNext: activeQueueNext,
@@ -735,10 +765,22 @@ async function testTheatreModeExpandsThePlayerAndUpdatesBothControls() {
 }
 
 async function testPlayerTooltipsFollowTheCurrentButtonState() {
-  const {player, playerTooltip, timingEarlier, toggleControl, video} = createPlayer();
+  const {
+    frameToggle,
+    frameTogglePauseIcon,
+    frameTogglePlayIcon,
+    player,
+    playerTooltip,
+    timingEarlier,
+    toggleControl,
+    video
+  } = createPlayer();
   player.bounds = {bottom: 410, height: 360, left: 100, right: 740, top: 50, width: 640};
   playerTooltip.bounds = {bottom: 24, height: 24, left: 0, right: 110, top: 0, width: 110};
   toggleControl.bounds = {bottom: 400, height: 30, left: 700, right: 730, top: 370, width: 30};
+  frameToggle.bounds = {bottom: 390, height: 320, left: 260, right: 580, top: 70, width: 320};
+  frameTogglePlayIcon.bounds = {bottom: 242, height: 24, left: 408, right: 432, top: 218, width: 24};
+  frameTogglePauseIcon.bounds = {bottom: 254, height: 24, left: 408, right: 432, top: 230, width: 24};
   player.connectedCallback();
   await nextTick();
   await nextTick();
@@ -757,11 +799,56 @@ async function testPlayerTooltipsFollowTheCurrentButtonState() {
   video.emit('play');
   assert.equal(playerTooltip.textContent, 'Pause');
 
+  player.emit('pointerover', {target: frameToggle});
+  assert.equal(playerTooltip.textContent, 'Pause');
+  assert.equal(playerTooltip.style.left, '320px');
+  assert.equal(playerTooltip.style.top, '148px');
+
   player.emit('pointerover', {target: timingEarlier});
   assert.equal(playerTooltip.textContent, 'Show subtitles 0.5 seconds earlier');
 
   player.emit('pointerout', {target: timingEarlier, relatedTarget: new FakeElement()});
   assert.equal(playerTooltip.hidden, true);
+}
+
+async function testFrameToggleUsesTheSharedPlayerControlsTimer() {
+  scheduledTimeouts.clear();
+  const {controls, player, theatreControl, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  video.paused = false;
+  video.emit('play');
+  assert.equal(scheduledTimeouts.size, 1);
+  runScheduledTimeouts();
+  assert.equal(player.classList.contains('k-player--controls-hidden'), true);
+
+  player.emit('pointerenter');
+  assert.equal(player.classList.contains('k-player--controls-hidden'), false);
+  assert.equal(scheduledTimeouts.size, 1);
+
+  controls.emit('click', {target: theatreControl});
+  assert.equal(player.hasAttribute('data-player-theatre-mode'), true);
+  assert.equal(scheduledTimeouts.size, 1);
+  runScheduledTimeouts();
+  assert.equal(player.classList.contains('k-player--controls-hidden'), true);
+
+  document.fullscreenElement = new FakeElement();
+  document.emit('fullscreenchange');
+  assert.equal(player.classList.contains('k-player--controls-hidden'), true);
+  assert.equal(scheduledTimeouts.size, 0);
+
+  document.fullscreenElement = player;
+  document.emit('fullscreenchange');
+  assert.equal(player.classList.contains('k-player--controls-hidden'), false);
+  assert.equal(scheduledTimeouts.size, 1);
+  runScheduledTimeouts();
+  assert.equal(player.classList.contains('k-player--controls-hidden'), true);
+
+  document.fullscreenElement = null;
+  document.emit('fullscreenchange');
+  scheduledTimeouts.clear();
 }
 
 function assertFloatingMenuFitsPlayer(menu, player) {
@@ -897,6 +984,49 @@ async function testSelectPlayStatusClearsWhenPlaybackStarts() {
   rejectPlay(new Error('A stale play attempt failed.'));
   await nextTick();
   assert.equal(status.textContent, '');
+}
+
+async function testFrameToggleMatchesVideoStateAndFrameSize() {
+  const {frameToggle, player, video} = createPlayer();
+  video.bounds = {bottom: 300, height: 300, left: 0, right: 480, top: 0, width: 480};
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(
+    frameToggle.style.getPropertyValue('--k-player-frame-toggle-size'),
+    '150px'
+  );
+  assert.equal(frameToggle.getAttribute('aria-label'), 'Play');
+  assert.equal(frameToggle.dataset.playerIconState, 'default');
+
+  frameToggle.emit('click', {target: frameToggle});
+  assert.equal(video.playCalls, 1);
+
+  video.paused = false;
+  video.emit('play');
+  assert.equal(frameToggle.getAttribute('aria-label'), 'Pause');
+  assert.equal(frameToggle.dataset.playerIconState, 'alternate');
+
+  frameToggle.emit('click', {target: frameToggle});
+  assert.equal(video.pauseCalls, 1);
+  assert.equal(frameToggle.getAttribute('aria-label'), 'Play');
+  assert.equal(frameToggle.dataset.playerIconState, 'default');
+}
+
+async function testFrameToggleListenerDoesNotSurviveAReconnect() {
+  const {frameToggle, player, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  player.disconnectedCallback();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  frameToggle.emit('click', {target: frameToggle});
+  assert.equal(video.playCalls, 1);
 }
 
 async function testWebVttSettingsApplyWithoutReloadingTheTrack() {
@@ -1474,9 +1604,12 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testMobileOverflowKeepsSecondaryPlaybackControlsTogether();
   await testTheatreModeExpandsThePlayerAndUpdatesBothControls();
   await testPlayerTooltipsFollowTheCurrentButtonState();
+  await testFrameToggleUsesTheSharedPlayerControlsTimer();
   await testFloatingMenusStayWithinTheFullscreenPlayer();
   await testFullscreenFrameAlignmentPillAppearsAtOrAboveFivePercentDifference();
   await testSelectPlayStatusClearsWhenPlaybackStarts();
+  await testFrameToggleMatchesVideoStateAndFrameSize();
+  await testFrameToggleListenerDoesNotSurviveAReconnect();
   await testWebVttSettingsApplyWithoutReloadingTheTrack();
   await testSubtitleSettingsSavesCollapseToTheLatestState();
   await testBackwardSeekSavesAsASeekWhenPaused();

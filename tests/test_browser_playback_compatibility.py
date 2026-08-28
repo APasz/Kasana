@@ -755,6 +755,16 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if _element_props(element).get("data-player-action") == "toggle"
         ]
+        frame_toggle_controls = [
+            element
+            for element in toggle_controls
+            if "data-player-frame-toggle" in _element_props(element)
+        ]
+        transport_toggle_controls = [
+            element
+            for element in toggle_controls
+            if "data-player-frame-toggle" not in _element_props(element)
+        ]
         overflow_controls = [
             element
             for element in client.elements.values()
@@ -820,8 +830,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert player_elements[0]._props["play-on-load"] == "false"  # pyright: ignore[reportPrivateUsage]
     assert len(fallback_links) == 1
     assert queues == []
-    assert len(toggle_controls) == 1
-    assert "k-player__control--toggle" in toggle_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
+    assert len(toggle_controls) == 2
+    assert len(transport_toggle_controls) == 1
+    assert "k-player__control--toggle" in transport_toggle_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
+    assert len(frame_toggle_controls) == 1
+    assert "k-player__frame-toggle" in frame_toggle_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
     assert len(overflow_controls) == 1
     assert len(theatre_controls) == 2
     assert all(
