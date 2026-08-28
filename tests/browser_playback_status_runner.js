@@ -92,6 +92,8 @@ class FakeVideo extends FakeElement {
     this.muted = false;
     this.paused = true;
     this.playbackRate = 1;
+    this.videoHeight = 1080;
+    this.videoWidth = 1920;
     this.volume = 1;
     this.buffered = new FakeTimeRanges();
     this.children = [];
@@ -385,6 +387,7 @@ function createPlayer({
   const audioControl = playerAction('audio');
   const subtitlesControl = playerAction('subtitles');
   const toggleControl = playerAction('toggle');
+  const theatreControl = playerAction('theatre');
   const fullscreenQueueNext = hasFullscreenQueueNext ? new FakeElement() : null;
   if (fullscreenQueueNext) {
     fullscreenQueueNext.setAttribute('data-player-action', 'next');
@@ -396,6 +399,7 @@ function createPlayer({
   controls.appendChild(settingsControl);
   controls.appendChild(audioControl);
   controls.appendChild(subtitlesControl);
+  controls.appendChild(theatreControl);
   controls.querySelector = (selector) => {
     if (selector === '[data-player-action="next"]') return fullscreenQueueNext;
     if (selector === '[data-player-action="overflow"]') return overflowControl;
@@ -417,17 +421,22 @@ function createPlayer({
   const mobileSubtitles = playerAction('subtitles');
   const mobileAudio = playerAction('audio');
   const mobileMute = playerAction('mute');
+  const mobileTheatre = playerAction('theatre');
   const mobileFullscreen = playerAction('fullscreen');
   const mobileMuteLabel = new FakeElement();
   mobileMuteLabel.setAttribute('data-player-action-label', 'mute');
   const mobileFullscreenLabel = new FakeElement();
   mobileFullscreenLabel.setAttribute('data-player-action-label', 'fullscreen');
+  const mobileTheatreLabel = new FakeElement();
+  mobileTheatreLabel.setAttribute('data-player-action-label', 'theatre');
   mobileMenu.appendChild(mobileSettings);
   mobileMenu.appendChild(mobileSubtitles);
   mobileMenu.appendChild(mobileAudio);
   mobileMenu.appendChild(mobileMute);
+  mobileMenu.appendChild(mobileTheatre);
   mobileMenu.appendChild(mobileFullscreen);
   mobileMute.appendChild(mobileMuteLabel);
+  mobileTheatre.appendChild(mobileTheatreLabel);
   mobileFullscreen.appendChild(mobileFullscreenLabel);
   const subtitleTimingLabel = new FakeElement();
   const subtitleFontScaleLabel = new FakeElement();
@@ -440,6 +449,25 @@ function createPlayer({
   const fullscreenTitle = new FakeElement();
   const fullscreenSpecialInfo = new FakeElement();
   const fullscreenTime = new FakeElement();
+  const fullscreenFrameAlignment = new FakeElement();
+  const frameAlignmentOption = (alignment, label) => {
+    const option = new FakeElement();
+    option.setAttribute('data-player-frame-alignment-option', alignment);
+    option.setAttribute('aria-label', label);
+    option.setAttribute('aria-pressed', String(alignment === 'centred'));
+    option.closest = (selector) => (
+      selector === '[data-player-frame-alignment-option]' ? option : null
+    );
+    return option;
+  };
+  const frameAlignmentStart = frameAlignmentOption('start', 'Left');
+  const frameAlignmentCentred = frameAlignmentOption('centred', 'Centred');
+  const frameAlignmentEnd = frameAlignmentOption('end', 'Right');
+  const frameAlignmentOptions = [frameAlignmentStart, frameAlignmentCentred, frameAlignmentEnd];
+  frameAlignmentOptions.forEach((option) => fullscreenFrameAlignment.appendChild(option));
+  fullscreenFrameAlignment.querySelectorAll = (selector) => (
+    selector === '[data-player-frame-alignment-option]' ? frameAlignmentOptions : []
+  );
   const kestrelLink = new HTMLAnchorElement();
   const elements = new Map([
     ['video', video],
@@ -463,6 +491,7 @@ function createPlayer({
     ['[data-player-fullscreen-title]', fullscreenTitle],
     ['[data-player-fullscreen-special-info]', fullscreenSpecialInfo],
     ['[data-player-fullscreen-time]', fullscreenTime],
+    ['[data-player-frame-alignment-controls]', fullscreenFrameAlignment],
     ['[data-player-kestrel]', kestrelLink]
   ]);
   const subtitleTrack = new FakeElement();
@@ -507,11 +536,13 @@ function createPlayer({
   const actionControls = [
     overflowControl,
     toggleControl,
+    theatreControl,
     fullscreenQueueNext,
     mobileMute,
+    mobileTheatre,
     mobileFullscreen,
   ].filter(Boolean);
-  const actionLabels = [mobileMuteLabel, mobileFullscreenLabel];
+  const actionLabels = [mobileMuteLabel, mobileTheatreLabel, mobileFullscreenLabel];
   player.querySelectorAll = (selector) => {
     const action = selector.match(/^\[data-player-action="(.+)"\]$/)?.[1];
     if (action) return actionControls.filter((control) => control.getAttribute('data-player-action') === action);
@@ -543,12 +574,18 @@ function createPlayer({
     fullscreenSpecialInfo,
     fullscreenTime,
     fullscreenTitle,
+    fullscreenFrameAlignment,
     fullscreenQueueNext,
+    frameAlignmentCentred,
+    frameAlignmentEnd,
+    frameAlignmentStart,
     mobileFullscreen,
     mobileFullscreenLabel,
     mobileMenu,
     mobileMute,
     mobileMuteLabel,
+    mobileTheatre,
+    mobileTheatreLabel,
     mobileVolume,
     overflowControl,
     player,
@@ -564,6 +601,7 @@ function createPlayer({
     timeline,
     timelinePreview,
     timingEarlier,
+    theatreControl,
     toggleControl,
     video
   };
@@ -665,6 +703,37 @@ async function testMobileOverflowKeepsSecondaryPlaybackControlsTogether() {
   assert.equal(overflowControl.getAttribute('aria-expanded'), 'false');
 }
 
+async function testTheatreModeExpandsThePlayerAndUpdatesBothControls() {
+  const {
+    controls,
+    mobileMenu,
+    mobileTheatre,
+    mobileTheatreLabel,
+    player,
+    theatreControl,
+  } = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(player.hasAttribute('data-player-theatre-mode'), false);
+  assert.equal(theatreControl.getAttribute('aria-label'), 'Theatre mode');
+  assert.equal(theatreControl.getAttribute('aria-pressed'), 'false');
+
+  controls.emit('click', {target: theatreControl});
+  assert.equal(player.hasAttribute('data-player-theatre-mode'), true);
+  assert.equal(theatreControl.getAttribute('aria-label'), 'Exit theatre mode');
+  assert.equal(theatreControl.getAttribute('aria-pressed'), 'true');
+  assert.equal(theatreControl.dataset.playerIconState, 'alternate');
+  assert.equal(mobileTheatreLabel.textContent, 'Exit theatre mode');
+
+  mobileMenu.hidden = false;
+  mobileMenu.emit('click', {target: mobileTheatre});
+  assert.equal(player.hasAttribute('data-player-theatre-mode'), false);
+  assert.equal(mobileMenu.hidden, true);
+  assert.equal(mobileTheatre.dataset.playerIconState, 'default');
+}
+
 async function testPlayerTooltipsFollowTheCurrentButtonState() {
   const {player, playerTooltip, timingEarlier, toggleControl, video} = createPlayer();
   player.bounds = {bottom: 410, height: 360, left: 100, right: 740, top: 50, width: 640};
@@ -745,6 +814,57 @@ async function testFloatingMenusStayWithinTheFullscreenPlayer() {
   } finally {
     document.fullscreenElement = null;
   }
+}
+
+async function testFullscreenFrameAlignmentPillAppearsAtOrAboveFivePercentDifference() {
+  const {
+    frameAlignmentCentred,
+    frameAlignmentEnd,
+    frameAlignmentStart,
+    fullscreenFrameAlignment,
+    player,
+  } = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  document.fullscreenElement = player;
+  document.emit('fullscreenchange');
+  assert.equal(fullscreenFrameAlignment.hidden, true);
+
+  player.bounds = {bottom: 348, height: 348, left: 0, right: 640, top: 0, width: 640};
+  window.emit('resize');
+  assert.equal(fullscreenFrameAlignment.hidden, true);
+
+  player.bounds = {bottom: 342, height: 342, left: 0, right: 640, top: 0, width: 640};
+  window.emit('resize');
+  assert.equal(fullscreenFrameAlignment.hidden, false);
+  assert.equal(frameAlignmentCentred.getAttribute('aria-pressed'), 'true');
+  assert.equal(frameAlignmentStart.getAttribute('aria-label'), 'Left');
+  assert.equal(frameAlignmentCentred.getAttribute('aria-label'), 'Centred');
+  assert.equal(frameAlignmentEnd.getAttribute('aria-label'), 'Right');
+
+  fullscreenFrameAlignment.emit('click', {target: frameAlignmentStart});
+  assert.equal(player.getAttribute('data-player-frame-axis'), 'horizontal');
+  assert.equal(player.getAttribute('data-player-frame-alignment'), 'start');
+  assert.equal(frameAlignmentStart.getAttribute('aria-pressed'), 'true');
+  assert.equal(frameAlignmentCentred.getAttribute('aria-pressed'), 'false');
+
+  player.bounds = {bottom: 320, height: 320, left: 0, right: 360, top: 0, width: 360};
+  window.emit('resize');
+  assert.equal(player.getAttribute('data-player-frame-axis'), 'vertical');
+  assert.equal(player.getAttribute('data-player-frame-alignment'), 'centred');
+  assert.equal(frameAlignmentCentred.getAttribute('aria-label'), 'Centred');
+  assert.equal(frameAlignmentStart.getAttribute('aria-label'), 'Top');
+  assert.equal(frameAlignmentEnd.getAttribute('aria-label'), 'Bottom');
+
+  player.bounds = {bottom: 360, height: 360, left: 0, right: 640, top: 0, width: 640};
+  window.emit('resize');
+  assert.equal(fullscreenFrameAlignment.hidden, true);
+  assert.equal(player.hasAttribute('data-player-frame-axis'), false);
+  assert.equal(player.hasAttribute('data-player-frame-alignment'), false);
+  document.fullscreenElement = null;
+  document.emit('fullscreenchange');
 }
 
 async function testSelectPlayStatusClearsWhenPlaybackStarts() {
@@ -1352,8 +1472,10 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testBufferedRangeMarksTheTimelineEdges();
   await testTimelinePreviewTracksHoverAndDrag();
   await testMobileOverflowKeepsSecondaryPlaybackControlsTogether();
+  await testTheatreModeExpandsThePlayerAndUpdatesBothControls();
   await testPlayerTooltipsFollowTheCurrentButtonState();
   await testFloatingMenusStayWithinTheFullscreenPlayer();
+  await testFullscreenFrameAlignmentPillAppearsAtOrAboveFivePercentDifference();
   await testSelectPlayStatusClearsWhenPlaybackStarts();
   await testWebVttSettingsApplyWithoutReloadingTheTrack();
   await testSubtitleSettingsSavesCollapseToTheLatestState();

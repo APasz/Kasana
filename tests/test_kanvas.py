@@ -815,6 +815,54 @@ def test_fullscreen_player_shows_play_next_only_in_its_controls() -> None:
     assert ".k-player:fullscreen .k-player__control--next { display: grid; }" in stylesheet
 
 
+def test_fullscreen_player_can_align_a_contained_video_frame() -> None:
+    repository_root = Path(__file__).parents[1]
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'data-player-frame-alignment-controls role="group"' in player
+    assert "_FullscreenFrameAlignment.CENTRED" in player
+    assert "IconName.FRAME_ALIGN_CENTRE" in player
+    assert "const fullscreenFrameAxis" in script
+    assert "synchroniseFullscreenFrameAlignment" in script
+    assert ".k-player__frame-alignment" in stylesheet
+    assert 'data-player-frame-axis="horizontal"' in stylesheet
+    assert (
+        'data-player-frame-axis="vertical"] .k-player__frame-alignment-option .k-icon'
+        in stylesheet
+    )
+    assert (
+        'data-player-frame-axis="vertical"] .k-player__frame-alignment:not([hidden]) '
+        "{ flex-direction: column; }" in stylesheet
+    )
+    assert "object-position: left center;" in stylesheet
+    assert "object-position: center top;" in stylesheet
+
+
+def test_theatre_player_mode_expands_the_playback_card() -> None:
+    repository_root = Path(__file__).parents[1]
+    player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
+        encoding="utf-8"
+    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "_PlayerControlAction.THEATRE" in player
+    assert "data-player-theatre-mode" in script
+    assert "width: 100%;" in stylesheet
+    assert "width: calc(100dvw - var(--k-rail-width));" in stylesheet
+    assert "height: calc(100dvh - var(--k-main-padding-block-start)" in stylesheet
+    assert ".k-player[data-player-theatre-mode] .k-player__video" in stylesheet
+    assert "object-fit: contain;" in stylesheet
+
+
 def test_poster_statuses_use_an_accessible_completion_triangle_and_unavailable_badge() -> None:
     static_root = Path(__file__).parents[1] / "src" / "kasana" / "kanvas" / "static"
     javascript = (static_root / "kanvas.js").read_text(encoding="utf-8")
@@ -3268,7 +3316,7 @@ def test_shell_clears_nicegui_default_padding_that_causes_phantom_scrollbars() -
 
     assert root_layout in stylesheet
     assert "html { scrollbar-gutter: stable; }" in stylesheet
-    assert ".k-main--home { padding-bottom: 16px; }" in stylesheet
+    assert ".k-main--home { --k-main-padding-block-end: 16px; }" in stylesheet
 
 
 def test_home_shell_uses_compact_bottom_padding() -> None:

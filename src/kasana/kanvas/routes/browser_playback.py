@@ -30,8 +30,17 @@ class _PlayerControlAction(StrEnum):
     SUBTITLES = "subtitles"
     AUDIO = "audio"
     MUTE = "mute"
+    THEATRE = "theatre"
     FULLSCREEN = "fullscreen"
     OVERFLOW = "overflow"
+
+
+class _FullscreenFrameAlignment(StrEnum):
+    """Physical placement choices for a contained fullscreen video frame."""
+
+    CENTRED = "centred"
+    START = "start"
+    END = "end"
 
 
 def _player_icon(icon: IconName, alternate_icon: IconName | None = None) -> None:
@@ -64,6 +73,8 @@ def _player_action_button(
     )
     if action is _PlayerControlAction.OVERFLOW:
         button.props('aria-haspopup="true" aria-expanded="false"')
+    if action is _PlayerControlAction.THEATRE:
+        button.props('aria-pressed="false"')
     return button
 
 
@@ -85,6 +96,22 @@ def _player_control(
     )
     with button:
         _player_icon(icon, alternate_icon)
+
+
+def _fullscreen_frame_alignment_option(
+    alignment: _FullscreenFrameAlignment,
+    label: str,
+    icon: IconName,
+) -> None:
+    """Render one icon option in the fullscreen video-frame alignment control."""
+
+    escaped_label = escape(label, quote=True)
+    with ui.element("button").classes("k-player__frame-alignment-option").props(
+        f'type="button" data-player-frame-alignment-option="{alignment.value}" '
+        f'aria-label="{escaped_label}" '
+        f'aria-pressed="{str(alignment is _FullscreenFrameAlignment.CENTRED).lower()}"'
+    ):
+        icon_svg(icon)
 
 
 def _mobile_player_menu_option(
@@ -344,6 +371,19 @@ def render_browser_playback_card(
             ui.label("").classes("k-player__fullscreen-time").props(
                 'data-player-fullscreen-time aria-label="Current time"'
             )
+        with ui.element("div").classes("k-player__frame-alignment").props(
+            'data-player-frame-alignment-controls role="group" '
+            'aria-label="Video alignment" hidden'
+        ):
+            _fullscreen_frame_alignment_option(
+                _FullscreenFrameAlignment.START, "Left", IconName.FRAME_ALIGN_START
+            )
+            _fullscreen_frame_alignment_option(
+                _FullscreenFrameAlignment.CENTRED, "Centred", IconName.FRAME_ALIGN_CENTRE
+            )
+            _fullscreen_frame_alignment_option(
+                _FullscreenFrameAlignment.END, "Right", IconName.FRAME_ALIGN_END
+            )
         with ui.element("span").props('data-player-ass-fonts hidden'):
             for font in entry.subtitle_font_attachments:
                 ui.element("span").props(f'data-player-ass-font="{font.id}"')
@@ -423,6 +463,12 @@ def render_browser_playback_card(
                         'data-player-volume aria-label="Volume"'
                     )
                     _player_control(
+                        IconName.THEATRE,
+                        _PlayerControlAction.THEATRE,
+                        "Theatre mode",
+                        alternate_icon=IconName.THEATRE_EXIT,
+                    )
+                    _player_control(
                         IconName.FULLSCREEN,
                         _PlayerControlAction.FULLSCREEN,
                         "Fullscreen",
@@ -451,6 +497,13 @@ def render_browser_playback_card(
                     _PlayerControlAction.MUTE,
                     "Mute",
                     alternate_icon=IconName.VOLUME_MUTED,
+                    dynamic_label=True,
+                )
+                _mobile_player_menu_option(
+                    IconName.THEATRE,
+                    _PlayerControlAction.THEATRE,
+                    "Theatre mode",
+                    alternate_icon=IconName.THEATRE_EXIT,
                     dynamic_label=True,
                 )
                 _mobile_player_menu_option(

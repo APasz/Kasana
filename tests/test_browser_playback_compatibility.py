@@ -760,6 +760,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if _element_props(element).get("data-player-action") == "overflow"
         ]
+        theatre_controls = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-player-action") == "theatre"
+        ]
         timeline_previews = [
             element
             for element in client.elements.values()
@@ -795,6 +800,16 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "k-player__fullscreen-time" in element._classes  # pyright: ignore[reportPrivateUsage]
         )
+        frame_alignment_controls = [
+            element
+            for element in client.elements.values()
+            if "data-player-frame-alignment-controls" in _element_props(element)
+        ]
+        frame_alignment_options = [
+            element
+            for element in client.elements.values()
+            if "data-player-frame-alignment-option" in _element_props(element)
+        ]
 
     assert len(video_elements) == 1
     assert "src" not in video_elements[0]._props  # pyright: ignore[reportPrivateUsage]
@@ -808,6 +823,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert len(toggle_controls) == 1
     assert "k-player__control--toggle" in toggle_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
     assert len(overflow_controls) == 1
+    assert len(theatre_controls) == 2
+    assert all(
+        _element_props(theatre_control)["aria-pressed"] == "false"
+        for theatre_control in theatre_controls
+    )
     assert len(timeline_previews) == 1
     assert len(mobile_menus) == 1
     assert toggle_controls[0]._props["data-player-tooltip"] == "Play"  # pyright: ignore[reportPrivateUsage]
@@ -818,6 +838,23 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_time._props["aria-label"] == "Current time"  # pyright: ignore[reportPrivateUsage]
     assert "data-player-fullscreen-time" in fullscreen_time._props  # pyright: ignore[reportPrivateUsage]
+    assert len(frame_alignment_controls) == 1
+    assert "hidden" in _element_props(frame_alignment_controls[0])
+    assert _element_props(frame_alignment_controls[0])["aria-label"] == "Video alignment"
+    alignment_values = [
+        _element_props(option)["data-player-frame-alignment-option"]
+        for option in frame_alignment_options
+    ]
+    assert alignment_values == [
+        "start",
+        "centred",
+        "end",
+    ]
+    assert [_element_props(option)["aria-pressed"] for option in frame_alignment_options] == [
+        "false",
+        "true",
+        "false",
+    ]
 
     with Client(page("")) as client:
         render_browser_playback_card(session, play_on_load=True)

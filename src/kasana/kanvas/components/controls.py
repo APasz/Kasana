@@ -49,6 +49,11 @@ class IconName(StrEnum):
     AUDIO = "audio"
     VOLUME = "volume"
     VOLUME_MUTED = "volume_muted"
+    THEATRE = "theatre"
+    THEATRE_EXIT = "theatre_exit"
+    FRAME_ALIGN_START = "frame_align_start"
+    FRAME_ALIGN_CENTRE = "frame_align_centre"
+    FRAME_ALIGN_END = "frame_align_end"
     FULLSCREEN = "fullscreen"
     FULLSCREEN_EXIT = "fullscreen_exit"
     MORE = "more"
@@ -88,6 +93,11 @@ _ICON_PATHS: dict[IconName, str] = {
     IconName.AUDIO: "M4 13a8 8 0 0 1 16 0v5h-3v-5 M4 13v5h3v-5",
     IconName.VOLUME: "M4 10h4l5-4v12l-5-4H4z M16 9a4 4 0 0 1 0 6 M18 6a8 8 0 0 1 0 12",
     IconName.VOLUME_MUTED: "M4 10h4l5-4v12l-5-4H4z M17 10l4 4 M21 10l-4 4",
+    IconName.THEATRE: "M3 5h18v14H3z M7 9h10v6H7z",
+    IconName.THEATRE_EXIT: "M3 5h18v14H3z M9 9h6v6H9z",
+    IconName.FRAME_ALIGN_START: "M4 5h16 M4 9h11 M4 13h14 M4 17h8",
+    IconName.FRAME_ALIGN_CENTRE: "M5 5h14 M7 9h10 M5 13h14 M7 17h10",
+    IconName.FRAME_ALIGN_END: "M4 5h16 M9 9h11 M6 13h14 M12 17h8",
     IconName.FULLSCREEN: "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
     IconName.FULLSCREEN_EXIT: "M9 4v5H4 M15 4v5h5 M20 15h-5v5 M4 15h5v5",
     IconName.MORE: "M12 5v2 M12 11v2 M12 17v2",

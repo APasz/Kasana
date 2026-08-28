@@ -2977,6 +2977,7 @@
       const fullscreenTitle = this.querySelector('[data-player-fullscreen-title]');
       const fullscreenSpecialInfo = this.querySelector('[data-player-fullscreen-special-info]');
       const fullscreenTime = this.querySelector('[data-player-fullscreen-time]');
+      const fullscreenFrameAlignment = this.querySelector('[data-player-frame-alignment-controls]');
       const sessionId = this.getAttribute('session-id');
       const queueNext = document.querySelector('[data-player-next]');
       const fullscreenQueueNext = controls?.querySelector('[data-player-action="next"]');
@@ -2993,7 +2994,11 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !fullscreenFrameAlignment || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      const frameAlignmentOptions = Array.from(
+        fullscreenFrameAlignment.querySelectorAll('[data-player-frame-alignment-option]')
+      ).filter((option) => option instanceof Element);
+      if (frameAlignmentOptions.length !== 3) return;
       video.loop = false;
       video.removeAttribute('loop');
       let lastReportedPosition = -1;
@@ -3031,6 +3036,8 @@
       let webkitFullscreenActive = false;
       let timelinePointerDown = false;
       let activePlayerTooltipButton = null;
+      let selectedFrameAlignment = 'centred';
+      let activeFullscreenFrameAxis = null;
       let hasQueuedNextItem = autoplayNextControl instanceof HTMLInputElement;
       let autoplayNext = hasQueuedNextItem && autoplayNextControl.checked;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
@@ -3689,6 +3696,7 @@
         return duration * ratio;
       };
       const volumeControls = [volume, mobileVolume];
+      const isTheatreMode = () => this.hasAttribute('data-player-theatre-mode');
       const updateControls = () => {
         const duration = playbackDuration();
         const position = playbackPosition();
@@ -3704,6 +3712,13 @@
         updateActionPresentation('toggle', video.paused ? 'Play' : 'Pause', !video.paused);
         const muted = video.muted || video.volume === 0;
         updateActionPresentation('mute', muted ? 'Unmute' : 'Mute', muted);
+        const theatreMode = isTheatreMode();
+        updateActionPresentation(
+          'theatre', theatreMode ? 'Exit theatre mode' : 'Theatre mode', theatreMode
+        );
+        actionButtons('theatre').forEach((button) => {
+          button.setAttribute('aria-pressed', String(theatreMode));
+        });
         const isFullscreen = document.fullscreenElement === this || document.fullscreenElement === video;
         updateActionPresentation('fullscreen', isFullscreen ? 'Exit fullscreen' : 'Fullscreen', isFullscreen);
         contextMenu.querySelectorAll('[data-player-rate]').forEach((option) => {
@@ -3720,6 +3735,52 @@
       const isPlayerFullscreen = () => (
         webkitFullscreenActive || document.fullscreenElement === this || document.fullscreenElement === video
       );
+      const isFrameAlignment = (alignment) => (
+        alignment === 'centred' || alignment === 'start' || alignment === 'end'
+      );
+      const fullscreenFrameAxis = () => {
+        if (!isCardFullscreen() || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+        const {height, width} = this.getBoundingClientRect();
+        if (width <= 0 || height <= 0) return null;
+        const frameAspectRatio = width / height;
+        const videoAspectRatio = video.videoWidth / video.videoHeight;
+        const minimumUnusedFrameSpaceRatio = 0.05;
+        const unusedFrameSpaceRatio = Math.abs(frameAspectRatio - videoAspectRatio)
+          / Math.max(frameAspectRatio, videoAspectRatio);
+        if (unusedFrameSpaceRatio < minimumUnusedFrameSpaceRatio) return null;
+        return frameAspectRatio > videoAspectRatio ? 'horizontal' : 'vertical';
+      };
+      const frameAlignmentLabel = (axis, alignment) => {
+        if (alignment === 'centred') return 'Centred';
+        if (axis === 'horizontal') return alignment === 'start' ? 'Left' : 'Right';
+        return alignment === 'start' ? 'Top' : 'Bottom';
+      };
+      const resetFullscreenFrameAlignment = () => {
+        selectedFrameAlignment = 'centred';
+        activeFullscreenFrameAxis = null;
+        fullscreenFrameAlignment.hidden = true;
+        this.removeAttribute('data-player-frame-axis');
+        this.removeAttribute('data-player-frame-alignment');
+      };
+      const synchroniseFullscreenFrameAlignment = () => {
+        const frameAxis = fullscreenFrameAxis();
+        if (frameAxis === null) {
+          resetFullscreenFrameAlignment();
+          return;
+        }
+        if (activeFullscreenFrameAxis !== frameAxis) selectedFrameAlignment = 'centred';
+        activeFullscreenFrameAxis = frameAxis;
+        this.setAttribute('data-player-frame-axis', frameAxis);
+        this.setAttribute('data-player-frame-alignment', selectedFrameAlignment);
+        frameAlignmentOptions.forEach((option) => {
+          const alignment = option.getAttribute('data-player-frame-alignment-option');
+          if (!isFrameAlignment(alignment)) return;
+          const label = frameAlignmentLabel(frameAxis, alignment);
+          option.setAttribute('aria-label', label);
+          option.setAttribute('aria-pressed', String(alignment === selectedFrameAlignment));
+        });
+        fullscreenFrameAlignment.hidden = false;
+      };
       const fullscreenClockFormatter = new Intl.DateTimeFormat(undefined, {
         hour: '2-digit',
         hourCycle: 'h23',
@@ -3790,6 +3851,9 @@
           preferredTop,
           preferredTop - menuBounds.height - floatingMenuInset
         );
+      };
+      const toggleTheatreMode = () => {
+        this.toggleAttribute('data-player-theatre-mode', !isTheatreMode());
       };
       const toggleFullscreen = async () => {
         try {
@@ -4067,6 +4131,9 @@
           video.muted = !video.muted;
         } else if (action === 'next') {
           void completeAndAdvancePlayback();
+        } else if (action === 'theatre') {
+          closeMobileMenu();
+          toggleTheatreMode();
         } else if (action === 'fullscreen') {
           closeMobileMenu();
           void toggleFullscreen();
@@ -4082,6 +4149,16 @@
       };
       controls.addEventListener('click', onPlayerControlClick);
       mobileMenu.addEventListener('click', onPlayerControlClick);
+      const onFullscreenFrameAlignmentClick = (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        const option = element?.closest('[data-player-frame-alignment-option]');
+        const alignment = option?.getAttribute('data-player-frame-alignment-option');
+        if (!isFrameAlignment(alignment)) return;
+        selectedFrameAlignment = alignment;
+        synchroniseFullscreenFrameAlignment();
+        showFullscreenControls();
+      };
+      fullscreenFrameAlignment.addEventListener('click', onFullscreenFrameAlignmentClick);
       audioMenu.addEventListener('click', (event) => {
         const element = event.target instanceof Element ? event.target : null;
         const option = element?.closest('[data-player-audio-stream]');
@@ -4298,10 +4375,13 @@
         clearFullscreenClock();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        fullscreenFrameAlignment.removeEventListener('click', onFullscreenFrameAlignmentClick);
         video.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
         video.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen);
+        video.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
         if (queueNext instanceof Element) queueNext.removeEventListener('click', onQueueNext);
         window.removeEventListener('pagehide', flushProgressOnPageHide);
+        window.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
         clearNativeSubtitle();
         disposeAssRenderer();
       };
@@ -4323,6 +4403,7 @@
         releaseVideoHeight();
         status.textContent = '';
         updateControls();
+        synchroniseFullscreenFrameAlignment();
         if (generatedStreamSeekPending) {
           generatedStreamSeekPending = false;
           void reportProgress(true, true);
@@ -4343,6 +4424,7 @@
       const onFullscreenChange = () => {
         updateControls();
         synchroniseFullscreenClock();
+        synchroniseFullscreenFrameAlignment();
         if (isCardFullscreen()) showFullscreenControls();
         else {
           clearFullscreenHideTimer();
@@ -4354,14 +4436,17 @@
       const onWebkitBeginFullscreen = () => {
         webkitFullscreenActive = true;
         updateControls();
+        synchroniseFullscreenFrameAlignment();
       };
       const onWebkitEndFullscreen = () => {
         webkitFullscreenActive = false;
         updateControls();
+        synchroniseFullscreenFrameAlignment();
         void navigateToPendingItemPage();
       };
       video.addEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
       video.addEventListener('webkitendfullscreen', onWebkitEndFullscreen);
+      video.addEventListener('resize', synchroniseFullscreenFrameAlignment);
       video.addEventListener('timeupdate', () => {
         updateControls();
         void reportProgress(false, false);
@@ -4436,6 +4521,8 @@
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
       updateControls();
+      synchroniseFullscreenFrameAlignment();
+      window.addEventListener('resize', synchroniseFullscreenFrameAlignment);
       const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);
       void loadEntry(entryPosition, resumePosition, catalogueDuration, shouldPlayOnLoad).catch(() => {
         status.textContent = 'Playback compatibility could not be checked.';
