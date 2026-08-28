@@ -407,6 +407,8 @@ function createPlayer({
   frameToggle.setAttribute('data-player-frame-toggle', '');
   const frameTogglePlayIcon = new FakeElement();
   const frameTogglePauseIcon = new FakeElement();
+  frameTogglePlayIcon.closest = (selector) => selector === 'button' ? frameToggle : null;
+  frameTogglePauseIcon.closest = (selector) => selector === 'button' ? frameToggle : null;
   frameToggle.querySelector = (selector) => {
     if (selector === '.k-player__control-icon--default .k-icon') return frameTogglePlayIcon;
     if (selector === '.k-player__control-icon--alternate .k-icon') return frameTogglePauseIcon;
@@ -799,10 +801,25 @@ async function testPlayerTooltipsFollowTheCurrentButtonState() {
   video.emit('play');
   assert.equal(playerTooltip.textContent, 'Pause');
 
+  player.emit('pointerout', {target: toggleControl, relatedTarget: frameToggle});
+  assert.equal(playerTooltip.hidden, true);
+
   player.emit('pointerover', {target: frameToggle});
+  assert.equal(playerTooltip.hidden, true);
+
+  player.emit('focusin', {target: frameToggle});
+  assert.equal(playerTooltip.hidden, false);
+  player.emit('focusout', {target: frameToggle, relatedTarget: new FakeElement()});
+  assert.equal(playerTooltip.hidden, true);
+
+  player.emit('pointerover', {target: frameTogglePauseIcon});
+  assert.equal(playerTooltip.hidden, false);
   assert.equal(playerTooltip.textContent, 'Pause');
   assert.equal(playerTooltip.style.left, '320px');
   assert.equal(playerTooltip.style.top, '148px');
+
+  player.emit('pointerout', {target: frameTogglePauseIcon, relatedTarget: frameToggle});
+  assert.equal(playerTooltip.hidden, true);
 
   player.emit('pointerover', {target: timingEarlier});
   assert.equal(playerTooltip.textContent, 'Show subtitles 0.5 seconds earlier');

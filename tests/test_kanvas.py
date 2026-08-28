@@ -762,8 +762,15 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert ".k-player__control-icon" in stylesheet
     assert ".k-player__frame-toggle" in stylesheet
     assert "clip-path: circle(50%);" in stylesheet
+    frame_toggle_style = stylesheet.split(".k-player__frame-toggle {", maxsplit=1)[1].split(
+        "}", maxsplit=1
+    )[0]
+    assert "opacity: 0;" in frame_toggle_style
+    assert "pointer-events: none;" in frame_toggle_style
     assert "opacity: 0.25;" in stylesheet
-    assert ".k-player__frame-toggle:hover { color: var(--k-text); opacity: 1;" in stylesheet
+    assert ".k-player__frame:hover .k-player__frame-toggle" in stylesheet
+    assert ".k-player__frame:hover .k-player__frame-toggle:hover" in stylesheet
+    assert "transition: none;" in stylesheet
     assert "playerIconState" in script
     assert "updateFrameToggleSize" in script
     assert "showPlayerControls" in script

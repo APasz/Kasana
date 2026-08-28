@@ -3312,13 +3312,16 @@
         playerTooltip.hidden = true;
         showPlayerControls();
       };
-      const playerTooltipAnchor = (button) => {
-        if (button !== frameToggle) return button;
-        const iconSelector = button.dataset.playerIconState === 'alternate'
+      const frameToggleIcon = () => {
+        const iconSelector = frameToggle.dataset.playerIconState === 'alternate'
           ? '.k-player__control-icon--alternate .k-icon'
           : '.k-player__control-icon--default .k-icon';
-        return button.querySelector(iconSelector) || button;
+        const icon = frameToggle.querySelector(iconSelector);
+        return icon instanceof Element ? icon : null;
       };
+      const playerTooltipAnchor = (button) => (
+        button === frameToggle ? frameToggleIcon() || button : button
+      );
       const showPlayerTooltip = (button) => {
         if (button.hasAttribute('disabled')) return;
         const text = playerTooltipText(button);
@@ -4347,18 +4350,20 @@
           showPlayerControls();
         });
       }
-      const playerTooltipButton = (target) => {
+      const playerTooltipButton = (target, frameToggleIconOnly = false) => {
         const element = target instanceof Element ? target : null;
         const button = element?.closest('button');
-        return button instanceof Element ? button : null;
+        if (!(button instanceof Element)) return null;
+        if (!frameToggleIconOnly || button !== frameToggle) return button;
+        return frameToggleIcon()?.contains(element) ? button : null;
       };
       this.addEventListener('pointerover', (event) => {
-        const button = playerTooltipButton(event.target);
+        const button = playerTooltipButton(event.target, true);
         if (button) showPlayerTooltip(button);
       });
       this.addEventListener('pointerout', (event) => {
-        const button = playerTooltipButton(event.target);
-        if (button && playerTooltipButton(event.relatedTarget) !== button) hidePlayerTooltip();
+        const button = playerTooltipButton(event.target, true);
+        if (button && playerTooltipButton(event.relatedTarget, true) !== button) hidePlayerTooltip();
       });
       this.addEventListener('focusin', (event) => {
         showPlayerControls();
