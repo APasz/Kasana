@@ -462,7 +462,8 @@ def _episode_title(
     episode_end_number: int | None,
 ) -> str:
     stripped = _EPISODE_MARKER_PATTERN.sub(" ", filename_stem)
-    normalised = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
+    normalised = _normalise_filename_title(stripped)
+    title = _without_series_title_prefix(normalised, series_title)
     episode_label = f"S{season_number:02d}E{episode_number:02d}"
     if episode_end_season_number is not None and episode_end_number is not None:
         end_label = (
@@ -471,17 +472,33 @@ def _episode_title(
             else f"E{episode_end_number:02d}"
         )
         episode_label = f"{episode_label}-{end_label}"
-        if normalised and normalised.casefold() != series_title.casefold():
-            return f"{episode_label} - {normalised}"
+        if title:
+            return f"{episode_label} - {title}"
         return episode_label
-    if normalised and normalised.casefold() != series_title.casefold():
-        return normalised
+    if title:
+        return title
     return episode_label
 
 
 def _special_title(filename_stem: str, *, series_title: str) -> str:
     stripped = _EPISODE_MARKER_PATTERN.sub(" ", filename_stem)
-    normalised = " ".join(stripped.replace(".", " ").replace("_", " ").split()).strip("- ")
+    normalised = _normalise_filename_title(stripped)
     if normalised and normalised.casefold() != series_title.casefold():
         return normalised
     return filename_stem
+
+
+def _normalise_filename_title(value: str) -> str:
+    return " ".join(value.replace(".", " ").replace("_", " ").split()).strip("- ")
+
+
+def _without_series_title_prefix(title: str, series_title: str) -> str:
+    """Remove a filename's repeated series prefix and its separators."""
+
+    prefix_length = len(series_title)
+    if title[:prefix_length].casefold() != series_title.casefold():
+        return title
+    remainder = title[prefix_length:]
+    if remainder and remainder[0] not in {" ", "-"}:
+        return title
+    return remainder.strip("- ")

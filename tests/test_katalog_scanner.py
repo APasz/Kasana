@@ -543,6 +543,14 @@ def test_episode_parsing_uses_season_directory_context() -> None:
     assert alternate.episode_number == 3
     assert alternate.title == "The Test"
 
+    repeated_series_title = parse_media_path(
+        Path("/library/TVShows"),
+        LibraryLayout.TV_SHOWS,
+        Path("/library/TVShows/The Rookie/Season 7/The Rookie - S07E10 - Chaos Agent.mkv"),
+    )
+    assert not isinstance(repeated_series_title, ParseFailure)
+    assert repeated_series_title.title == "Chaos Agent"
+
     combined = parse_media_path(
         Path("/library/TVShows"),
         LibraryLayout.TV_SHOWS,
