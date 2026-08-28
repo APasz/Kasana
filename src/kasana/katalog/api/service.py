@@ -125,7 +125,10 @@ from kasana.katalog.api.contracts import (
 )
 from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
-from kasana.katalog.limits import MAX_ARTWORK_PER_ITEM
+from kasana.katalog.limits import (
+    MAX_ARTWORK_PER_ITEM,
+    PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS,
+)
 from kasana.katalog.models import (
     AuditCategory,
     AuditIssue,
@@ -2404,6 +2407,10 @@ class KatalogQueryService:
             duration = _progress_duration(media_file, existing_state, update.position_seconds)
             if update.position_seconds > duration:
                 raise CatalogueValidationError("Playback position exceeds the media duration.")
+            if _is_within_session_progress_start_grace_period(update.position_seconds):
+                return PlaybackProgressResult(
+                    session=self._playback_session_response(session, playback_session, now)
+                )
             if (
                 not update.seek
                 and existing_state is not None
@@ -2414,6 +2421,9 @@ class KatalogQueryService:
                 raise CatalogueValidationError(
                     "Playback progress must be monotonic unless seek is true."
                 )
+            completed = _is_within_session_progress_completion_grace_period(
+                update.position_seconds, media_file.duration_seconds
+            )
             try:
                 record_playback_progress(
                     session,
@@ -2421,7 +2431,10 @@ class KatalogQueryService:
                     library_item_id=entry.library_item_id,
                     position_seconds=update.position_seconds,
                     duration_seconds=duration,
-                    completed=False,
+                    completed=completed,
+                    increment_play_count=(
+                        completed and (existing_state is None or not existing_state.completed)
+                    ),
                     played_at=now,
                 )
             except ValueError as error:
@@ -3432,6 +3445,23 @@ def _progress_duration(
     if state is not None:
         return max(state.duration_seconds, position_seconds)
     return position_seconds
+
+
+def _is_within_session_progress_start_grace_period(position_seconds: float) -> bool:
+    """Keep brief playback starts out of a user's saved viewing state."""
+
+    return position_seconds < PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS
+
+
+def _is_within_session_progress_completion_grace_period(
+    position_seconds: float, duration_seconds: float | None
+) -> bool:
+    """Treat an eligible position near a known media end as completed."""
+
+    return (
+        duration_seconds is not None
+        and duration_seconds - position_seconds <= PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS
+    )
 
 
 def _completion_duration(media_file: MediaFile, state: PlaybackState | None) -> float:
