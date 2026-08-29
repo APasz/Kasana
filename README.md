@@ -1,20 +1,20 @@
 # Kasana
 
 Kasana is a self-hosted personal media catalogue for a trusted LAN. It scans local films
-and series, tracks each profile's progress, provides a browser dashboard, and can launch
-local playback through mpv.
+and series, tracks each profile's progress, and provides browser-first playback with an
+optional local mpv launcher.
 
 | Component | Responsibility |
 | --- | --- |
 | Katalog | SQLite catalogue, scanning, metadata, artwork, playback state, and the HTTP API. |
-| Kanvas | NiceGUI browser dashboard for profiles, libraries, collections, administration, and playback. |
-| Kestrel | Local mpv playback agent and `kasana://` URI handler. |
+| Kanvas | NiceGUI browser dashboard and primary in-browser player. |
+| Kestrel | Optional local mpv playback agent and `kasana://` URI handler. |
 | Kourier | TMDB and optional Fanart.tv provider adapters. |
 
 ## Quick start
 
 Kasana requires [uv](https://docs.astral.sh/uv/) and Python 3.14. Install FFmpeg so
-`ffprobe` is on `PATH` for scans; install mpv if using Kestrel.
+`ffprobe` is on `PATH` for scans; mpv is needed only for Kestrel.
 
 ```bash
 git clone <repository-url> kasana
@@ -80,7 +80,11 @@ or manually select uncertain matches with `kasana-katalog metadata --help`.
 
 ## Playback
 
-With Katalog running and mpv installed, find an item and play it through Kestrel:
+Kanvas is the primary player. Open the dashboard, select a profile, and choose a title to
+play it in the browser. Playback uses the browser's native media support, so container and
+codec compatibility depends on the browser and host.
+
+Use optional Kestrel when you prefer mpv or the browser cannot play a file:
 
 ```bash
 uv run kasana-katalog item search Cars --year 2006 --kind movie
