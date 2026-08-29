@@ -28,6 +28,7 @@ from kasana.katalog.models import (
     ZaisanKind,
 )
 from kasana.katalog.services import create_library_item, create_library_root
+from kasana.kourier.errors import KourierError
 from kasana.shared.metadata import (
     ArtworkContent,
     ArtworkKind,
@@ -38,6 +39,7 @@ from kasana.shared.metadata import (
     PosterListing,
     PosterLookup,
     ProviderCapability,
+    ProviderErrorCategory,
     ProviderMediaKind,
     ProviderReference,
     SearchQuery,
@@ -68,6 +70,7 @@ class _FakeProvider:
         self.poster_list_calls = 0
         self.season_details = season_details or {}
         self.season_calls: list[tuple[ProviderReference, int]] = []
+        self.missing_seasons: set[tuple[str, int]] = set()
 
     @property
     def capabilities(self) -> frozenset[ProviderCapability]:
@@ -100,6 +103,13 @@ class _FakeProvider:
         self, series_reference: ProviderReference, season_number: int
     ) -> SeasonDetails:
         self.season_calls.append((series_reference, season_number))
+        if (series_reference.raw_id, season_number) in self.missing_seasons:
+            raise KourierError(
+                ProviderErrorCategory.NOT_FOUND,
+                "Provider season is unavailable.",
+                provider=self.provider_name,
+                status_code=404,
+            )
         return self.season_details[(series_reference.raw_id, season_number)]
 
     async def get_artwork(self, reference: ArtworkReference) -> ArtworkContent:
@@ -750,6 +760,19 @@ async def test_artwork_cache_fetches_season_posters_from_a_matched_series(
         (first_season_id, "fanart", fanart_poster.raw_path),
     }
 
+    metadata_provider.missing_seasons.add(("series-1", 1))
+    assert await workflow.fetch_posters((metadata_provider,), item_id=first_season_id) == ()
+    cached_records = database.run_transaction(records)
+    assert {
+        (record.library_item_id, record.provider, record.provider_revision)
+        for record in cached_records
+    } == {
+        (first_season_id, "fake", fresh_first_poster.raw_path),
+        (second_season_id, "fake", second_poster.raw_path),
+        (first_season_id, "fanart", fanart_poster.raw_path),
+    }
+
+    metadata_provider.missing_seasons.clear()
     metadata_provider.season_details[("series-1", 1)] = _season_details(
         "series-1", "season-1", 1, poster=None
     )

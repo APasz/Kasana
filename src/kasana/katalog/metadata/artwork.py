@@ -35,6 +35,7 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
+from kasana.kourier.errors import KourierError
 from kasana.shared.concurrency import run_blocking
 from kasana.shared.metadata import (
     ArtworkContent,
@@ -46,6 +47,7 @@ from kasana.shared.metadata import (
     PosterListing,
     PosterLookup,
     ProviderCapability,
+    ProviderErrorCategory,
     ProviderMediaKind,
     ProviderReference,
 )
@@ -474,8 +476,15 @@ class ArtworkCache:
             series_reference = ProviderReference(
                 provider=target.provider, raw_id=target.series_provider_id
             )
-            async with semaphore:
-                details = await season_provider.get_season(series_reference, target.season_number)
+            try:
+                async with semaphore:
+                    details = await season_provider.get_season(
+                        series_reference, target.season_number
+                    )
+            except KourierError as error:
+                if error.category is ProviderErrorCategory.NOT_FOUND:
+                    return SeasonArtworkBatch()
+                raise
             if details.reference.provider != target.provider:
                 msg = f"Provider {target.provider!r} returned season details from another provider."
                 raise ValueError(msg)
