@@ -31,9 +31,23 @@ class FanartImagePayload(BaseModel):
         return value
 
 
+class FanartSeasonPosterPayload(FanartImagePayload):
+    """One season-specific TV poster from Fanart.tv."""
+
+    season: int = Field(ge=0)
+
+
 class FanartMoviePayload(BaseModel):
     """The movie-specific artwork fields needed by Kasana's poster picker."""
 
     model_config = ConfigDict(extra="ignore")
 
     movieposter: tuple[FanartImagePayload, ...] = ()
+
+
+class FanartTVPayload(BaseModel):
+    """The season-poster subset of Fanart.tv's TV artwork response."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    seasonposter: tuple[FanartSeasonPosterPayload, ...] = ()

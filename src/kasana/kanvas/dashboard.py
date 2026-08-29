@@ -597,7 +597,7 @@ async def item_metadata_match_action(item_id: int, request: Request) -> JSONResp
 
 @app.post("/kanvas/actions/items/{item_id}/artwork-fetch", include_in_schema=False)
 async def item_artwork_fetch_action(item_id: int, request: Request) -> JSONResponse:
-    """Fetch cached poster artwork for this item's accepted metadata match."""
+    """Fetch cached artwork for this item or its matched parent series hierarchy."""
 
     profile = await _data_profile(request)
     if profile is None:

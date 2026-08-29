@@ -63,8 +63,15 @@ class PosterAction(StrEnum):
     PLAY_NEXT = "play_next"
 
 
+class ArtworkShape(StrEnum):
+    """The aspect ratio used to present a card's selected artwork."""
+
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+
 class PosterView(BaseModel):
-    """Safe identity, artwork, context, and state for one reusable poster card."""
+    """Safe identity, artwork, context, and state for one reusable artwork card."""
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
@@ -74,6 +81,7 @@ class PosterView(BaseModel):
     detail: str | None = Field(default=None, max_length=200)
     href: str = Field(pattern=_POSTER_HREF_PATTERN)
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    artwork_shape: ArtworkShape = Field(default=ArtworkShape.PORTRAIT, alias="artworkShape")
     mosaic_urls: tuple[str, ...] = Field(default=(), max_length=4, alias="mosaicUrls")
     placeholder: PlaceholderArtView = Field(
         default_factory=lambda: PlaceholderArtView(lines=("Untitled",))

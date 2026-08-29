@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from enum import StrEnum
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 
 
 class ProviderMediaKind(StrEnum):
@@ -91,6 +91,18 @@ class PosterLookup(BaseModel):
     reference: ProviderReference
     media_kind: ProviderMediaKind
     external_ids: tuple[ExternalIdentifier, ...] = ()
+    season_number: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def season_context_is_consistent(self) -> PosterLookup:
+        """Require the precise local season whenever a provider needs one."""
+
+        if self.media_kind is ProviderMediaKind.SEASON:
+            if self.season_number is None:
+                raise ValueError("Season poster lookups require a season number.")
+        elif self.season_number is not None:
+            raise ValueError("Only season poster lookups may include a season number.")
+        return self
 
 
 class PosterListing(BaseModel):

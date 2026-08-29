@@ -259,6 +259,20 @@ function testPosterPartialWatchNormalisation() {
   );
 }
 
+function testLandscapePosterMarkup() {
+  const poster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(24),
+    artworkShape: 'landscape'
+  });
+
+  assert.equal(poster.artworkShape, 'landscape');
+  assert.match(globalThis.__libraryTest.posterMarkup(poster), /k-poster--landscape/);
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(25), artworkShape: 'square'}),
+    null
+  );
+}
+
 function testPosterMosaicAndHomeActionNormalisation() {
   const poster = globalThis.__libraryTest.normalisePoster({
     ...validPoster(18),
@@ -664,9 +678,10 @@ function testItemEditorUsesTaskFocusedTabs() {
   assert.match(editor.renderOrganiseTab('movie', {}, ''), /Library organisation/);
   assert.match(
     editor.renderArtworkTab('', 'series', {provider: 'tmdb', provider_id: '63712'}),
-    /Load poster choices/
+    /Load artwork choices/
   );
-  assert.doesNotMatch(editor.renderArtworkTab('', 'episode', null), /Load poster choices/);
+  assert.match(editor.renderArtworkTab('', 'season', null), /Load artwork choices/);
+  assert.match(editor.renderArtworkTab('', 'episode', null), /Load artwork choices/);
 }
 
 function testMetadataProviderLinksSupportDirectReassignment() {
@@ -851,6 +866,7 @@ async function main() {
   await testValidPageRetainsAvailable();
   testPosterPlaceholderNormalisation();
   testPosterPartialWatchNormalisation();
+  testLandscapePosterMarkup();
   testPosterMosaicAndHomeActionNormalisation();
   testPosterStatusBadgeMarkup();
   testRailControlsHideWhenViewportDoesNotOverflow();

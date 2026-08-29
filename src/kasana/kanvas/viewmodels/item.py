@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterView
+from kasana.kanvas.viewmodels.library import ArtworkShape, PlaceholderArtView, PosterView
 
 
 class IncludedCollectionView(BaseModel):
@@ -50,6 +50,7 @@ class ItemDetailView(BaseModel):
     year: int | None = Field(default=None, ge=1, le=9999)
     overview: str | None = Field(default=None, max_length=20_000)
     poster_url: str | None = Field(default=None, alias="posterUrl")
+    artwork_shape: ArtworkShape = Field(default=ArtworkShape.PORTRAIT, alias="artworkShape")
     poster_placeholder: PlaceholderArtView = Field(alias="posterPlaceholder")
     backdrop_url: str | None = Field(default=None, alias="backdropUrl")
     runtime_label: str | None = Field(default=None, max_length=100, alias="runtimeLabel")

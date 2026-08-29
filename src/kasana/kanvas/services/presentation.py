@@ -12,7 +12,12 @@ from kasana.kanvas.viewmodels.collections import (
     WatchOrderRowView,
 )
 from kasana.kanvas.viewmodels.item import DownloadOptionView
-from kasana.kanvas.viewmodels.library import PlaceholderArtView, PosterState, PosterView
+from kasana.kanvas.viewmodels.library import (
+    ArtworkShape,
+    PlaceholderArtView,
+    PosterState,
+    PosterView,
+)
 from kasana.katalog.public import (
     NUMERAL_TOKEN_PATTERN,
     ArtworkKind,
@@ -149,7 +154,7 @@ def item_picker_view(item: LibraryItemSummary, *, already_member: bool) -> ItemP
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
         alreadyMember=already_member,
-        posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+        posterUrl=primary_artwork_url(item),
     )
 
 
@@ -165,7 +170,7 @@ def watch_order_row(entry: WatchOrderEntryDetail) -> WatchOrderRowView:
         kind=item.kind.value,
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
-        posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+        posterUrl=primary_artwork_url(item),
         poster=poster_from_summary(item),
     )
 
@@ -181,7 +186,7 @@ def generated_row(item: LibraryItemSummary, position: int) -> WatchOrderRowView:
         kind=item.kind.value,
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
-        posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+        posterUrl=primary_artwork_url(item),
     )
 
 
@@ -243,7 +248,7 @@ def poster_from_summary(
     """
 
     title = display_title(item)
-    poster_url = artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER)
+    poster_url = primary_artwork_url(item)
     state = poster_state(
         available=item.availability is Availability.AVAILABLE,
         has_artwork=poster_url is not None,
@@ -263,6 +268,7 @@ def poster_from_summary(
         detail=detail if detail is not None else default_detail or None,
         href=href if href is not None else f"/item/{item.id}",
         posterUrl=poster_url,
+        artworkShape=artwork_shape_for_summary(item),
         placeholder=placeholder_art_for_summary(item, title=title),
         progressPercent=progress_percent(playback),
         state=state,
@@ -325,6 +331,28 @@ def artwork_proxy_url(
 
     selected = next((entry for entry in artwork if entry.kind is kind), None)
     return f"/kanvas/artwork/{item_id}/{selected.id}" if selected is not None else None
+
+
+def primary_artwork_kind(item: LibraryItemSummary) -> ArtworkKind:
+    """Choose the artwork role that matches the local item's visual convention."""
+
+    return ArtworkKind.STILL if item.kind is LibraryItemKind.EPISODE else ArtworkKind.POSTER
+
+
+def artwork_shape_for_summary(item: LibraryItemSummary) -> ArtworkShape:
+    """Describe the aspect ratio used by the item's primary artwork."""
+
+    return (
+        ArtworkShape.LANDSCAPE
+        if primary_artwork_kind(item) is ArtworkKind.STILL
+        else ArtworkShape.PORTRAIT
+    )
+
+
+def primary_artwork_url(item: LibraryItemSummary) -> str | None:
+    """Return the selected portrait poster or landscape episode still for one item."""
+
+    return artwork_proxy_url(item.id, item.artwork, primary_artwork_kind(item))
 
 
 def placeholder_art_for_summary(

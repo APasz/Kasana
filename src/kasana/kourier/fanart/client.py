@@ -15,7 +15,7 @@ from yarl import URL
 from kasana.kourier.errors import KourierError
 from kasana.kourier.fanart.constants import FANART_PROVIDER
 from kasana.kourier.fanart.mapping import poster_artwork
-from kasana.kourier.fanart.payloads import FanartMoviePayload
+from kasana.kourier.fanart.payloads import FanartImagePayload, FanartMoviePayload, FanartTVPayload
 from kasana.kourier.http import (
     KASANA_USER_AGENT,
     AsyncSleeper,
@@ -47,6 +47,13 @@ class _MovieLookup:
     provider_id: str
 
 
+@dataclass(frozen=True)
+class _SeasonLookup:
+    identifier: str
+    provider_id: str
+    season_number: int
+
+
 _FANART_CAPABILITIES: Final[frozenset[ProviderCapability]] = frozenset(
     {
         ProviderCapability.GET_ARTWORK,
@@ -56,7 +63,7 @@ _FANART_CAPABILITIES: Final[frozenset[ProviderCapability]] = frozenset(
 
 
 class FanartProvider(BoundedHttpProvider):
-    """Retrieves Fanart.tv movie posters without participating in metadata matching."""
+    """Retrieves supplemental movie and season posters without metadata matching."""
 
     def __init__(
         self,
@@ -107,25 +114,33 @@ class FanartProvider(BoundedHttpProvider):
         raise self._unsupported_metadata_operation()
 
     async def list_posters_by_external_id(self, lookup: PosterLookup) -> PosterListing | None:
-        """Return Fanart.tv movie posters for a matched title when it has a usable ID."""
+        """Return Fanart.tv posters for a matched movie or a precise local season."""
 
         movie = self._movie_lookup(lookup)
-        if movie is None:
+        if movie is not None:
+            response = await self._listing_payload(("movies", movie.identifier), FanartMoviePayload)
+            return self._poster_listing(
+                movie.provider_id, response.movieposter if response is not None else ()
+            )
+        season = self._season_lookup(lookup)
+        if season is None:
             return None
-        try:
-            payload = await self._request_json(("movies", movie.identifier))
-        except KourierError as error:
-            if error.category is ProviderErrorCategory.NOT_FOUND:
-                return PosterListing(
-                    provider=self.provider_name, provider_id=movie.provider_id, posters=()
-                )
-            raise
-        response: FanartMoviePayload = self._parse_payload(FanartMoviePayload, payload)
+        response = await self._listing_payload(("tv", season.identifier), FanartTVPayload)
+        images = (
+            tuple(image for image in response.seasonposter if image.season == season.season_number)
+            if response is not None
+            else ()
+        )
+        return self._poster_listing(season.provider_id, images)
+
+    def _poster_listing(
+        self, provider_id: str, images: tuple[FanartImagePayload, ...]
+    ) -> PosterListing:
         preferred_language = self.settings.language.partition("-")[0].lower()
-        posters = tuple(poster_artwork(image) for image in response.movieposter)
+        posters = tuple(poster_artwork(image) for image in images)
         return PosterListing(
             provider=self.provider_name,
-            provider_id=movie.provider_id,
+            provider_id=provider_id,
             posters=tuple(
                 sorted(
                     posters,
@@ -161,6 +176,17 @@ class FanartProvider(BoundedHttpProvider):
     async def _request_json(self, path_parts: tuple[str, ...]) -> Mapping[str, object]:
         return await self._fetch_json(self._endpoint_url(path_parts), self._api_headers())
 
+    async def _listing_payload[Payload: BaseModel](
+        self, path_parts: tuple[str, ...], model: type[Payload]
+    ) -> Payload | None:
+        try:
+            payload = await self._request_json(path_parts)
+        except KourierError as error:
+            if error.category is ProviderErrorCategory.NOT_FOUND:
+                return None
+            raise
+        return self._parse_payload(model, payload)
+
     def _movie_lookup(self, lookup: PosterLookup) -> _MovieLookup | None:
         if lookup.media_kind is not ProviderMediaKind.MOVIE:
             return None
@@ -178,9 +204,28 @@ class FanartProvider(BoundedHttpProvider):
             )
         return _MovieLookup(identifier=imdb_id, provider_id=f"imdb:{imdb_id}")
 
+    def _season_lookup(self, lookup: PosterLookup) -> _SeasonLookup | None:
+        if lookup.media_kind is not ProviderMediaKind.SEASON:
+            return None
+        assert lookup.season_number is not None
+        # A season reference may itself be from TVDB, but Fanart's TV endpoint
+        # is keyed by the parent series' TVDB identity.
+        tvdb_id = self._external_identifier(lookup, "tvdb", include_reference=False)
+        if tvdb_id is None:
+            return None
+        if not tvdb_id.isdecimal():
+            raise request_error(self.provider_name, "TVDB identifiers must be decimal numbers.")
+        return _SeasonLookup(
+            identifier=tvdb_id,
+            provider_id=f"tvdb:{tvdb_id}:season:{lookup.season_number}",
+            season_number=lookup.season_number,
+        )
+
     @staticmethod
-    def _external_identifier(lookup: PosterLookup, namespace: str) -> str | None:
-        if lookup.reference.provider == namespace:
+    def _external_identifier(
+        lookup: PosterLookup, namespace: str, *, include_reference: bool = True
+    ) -> str | None:
+        if include_reference and lookup.reference.provider == namespace:
             return lookup.reference.raw_id
         for identifier in lookup.external_ids:
             if identifier.namespace == namespace:

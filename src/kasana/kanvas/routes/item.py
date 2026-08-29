@@ -57,8 +57,9 @@ async def render_item(
                 play_on_load=play_on_load,
             )
 
-        with ui.element("article").classes("k-item"):
-            with ui.element("div").classes("k-item__art"):
+        with ui.element("article").classes(f"k-item k-item--{detail.artwork_shape.value}"):
+            artwork_classes = f"k-item__art k-item__art--{detail.artwork_shape.value}"
+            with ui.element("div").classes(artwork_classes):
                 if detail.poster_url is not None:
                     ui.element("img").classes("k-item__poster").props(
                         f'src="{detail.poster_url}" alt="" loading="eager"'

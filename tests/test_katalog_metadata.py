@@ -18,6 +18,7 @@ from kasana.katalog.metadata import (
 )
 from kasana.katalog.models import (
     CachedArtwork,
+    CachedArtworkKind,
     MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
@@ -31,6 +32,7 @@ from kasana.shared.metadata import (
     ArtworkContent,
     ArtworkKind,
     ArtworkReference,
+    EpisodeDetails,
     ExternalIdentifier,
     MovieDetails,
     PosterListing,
@@ -40,6 +42,7 @@ from kasana.shared.metadata import (
     ProviderReference,
     SearchQuery,
     SearchResult,
+    SeasonDetails,
     SeriesDetails,
 )
 
@@ -53,6 +56,7 @@ class _FakeProvider:
         details: dict[str, MovieDetails | SeriesDetails],
         artwork: ArtworkContent | None = None,
         posters: tuple[ArtworkReference, ...] = (),
+        season_details: dict[tuple[str, int], SeasonDetails] | None = None,
     ) -> None:
         self.results = results
         self.details = details
@@ -62,6 +66,8 @@ class _FakeProvider:
         self.last_search_query: SearchQuery | None = None
         self.artwork_calls = 0
         self.poster_list_calls = 0
+        self.season_details = season_details or {}
+        self.season_calls: list[tuple[ProviderReference, int]] = []
 
     @property
     def capabilities(self) -> frozenset[ProviderCapability]:
@@ -89,6 +95,12 @@ class _FakeProvider:
         details = self.details[reference.raw_id]
         assert isinstance(details, SeriesDetails)
         return details
+
+    async def get_season(
+        self, series_reference: ProviderReference, season_number: int
+    ) -> SeasonDetails:
+        self.season_calls.append((series_reference, season_number))
+        return self.season_details[(series_reference.raw_id, season_number)]
 
     async def get_artwork(self, reference: ArtworkReference) -> ArtworkContent:
         del reference
@@ -177,6 +189,41 @@ def _movie_details(
         overview=overview,
         poster=poster,
         external_ids=external_ids,
+    )
+
+
+def _series_details(
+    provider_id: str,
+    title: str,
+    *,
+    poster: ArtworkReference | None = None,
+    external_ids: tuple[ExternalIdentifier, ...] = (),
+) -> SeriesDetails:
+    return SeriesDetails(
+        reference=ProviderReference(provider="fake", raw_id=provider_id),
+        title=title,
+        original_title=title,
+        translated_title=title,
+        poster=poster,
+        external_ids=external_ids,
+    )
+
+
+def _season_details(
+    series_provider_id: str,
+    season_provider_id: str,
+    season_number: int,
+    *,
+    poster: ArtworkReference | None,
+    episodes: tuple[EpisodeDetails, ...] = (),
+) -> SeasonDetails:
+    return SeasonDetails(
+        reference=ProviderReference(provider="fake", raw_id=season_provider_id),
+        series_reference=ProviderReference(provider="fake", raw_id=series_provider_id),
+        season_number=season_number,
+        title=f"Season {season_number}",
+        poster=poster,
+        episodes=episodes,
     )
 
 
@@ -504,6 +551,33 @@ def _poster_reference(revision: str = "/poster-v1.png") -> ArtworkReference:
     )
 
 
+def _still_reference(revision: str = "/still-v1.png") -> ArtworkReference:
+    return ArtworkReference(
+        provider="fake",
+        kind=ArtworkKind.STILL,
+        raw_path=revision,
+        source_url=AnyHttpUrl(f"https://images.example.test{revision}"),
+    )
+
+
+def _episode_details(
+    series_provider_id: str,
+    episode_provider_id: str,
+    season_number: int,
+    episode_number: int,
+    *,
+    still: ArtworkReference | None,
+) -> EpisodeDetails:
+    return EpisodeDetails(
+        reference=ProviderReference(provider="fake", raw_id=episode_provider_id),
+        series_reference=ProviderReference(provider="fake", raw_id=series_provider_id),
+        season_number=season_number,
+        episode_number=episode_number,
+        title=f"Episode {episode_number}",
+        still=still,
+    )
+
+
 async def test_artwork_cache_deduplicates_and_prunes_unmatched_records(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -537,6 +611,310 @@ async def test_artwork_cache_deduplicates_and_prunes_unmatched_records(
     assert (removed_files, removed_bytes) == (1, len(artwork_content.content))
     assert not cache_path.exists()
     assert database.run_transaction(lambda session: session.scalar(select(CachedArtwork))) is None
+
+
+async def test_artwork_cache_fetches_season_posters_from_a_matched_series(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create() -> tuple[int, int, int, int]:
+        def create_items(session: Session) -> tuple[int, int, int, int]:
+            root = create_library_root(
+                session,
+                path=tmp_path / "Shows",
+                expected_media_kind=ZaisanKind.SERIES,
+            )
+            series = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SERIES,
+                title="Example Show",
+            )
+            first_season = create_library_item(
+                session,
+                library_root_id=root.id,
+                parent_id=series.id,
+                item_kind=ZaisanKind.SEASON,
+                title="Season 1",
+                season_number=1,
+            )
+            second_season = create_library_item(
+                session,
+                library_root_id=root.id,
+                parent_id=series.id,
+                item_kind=ZaisanKind.SEASON,
+                title="Season 2",
+                season_number=2,
+            )
+            return root.id, series.id, first_season.id, second_season.id
+
+        return database.run_transaction(create_items)
+
+    root_id, series_id, first_season_id, second_season_id = create()
+    first_poster = _poster_reference("/season-one.png")
+    second_poster = _poster_reference("/season-two.png")
+    fanart_poster = ArtworkReference(
+        provider="fanart",
+        kind=ArtworkKind.POSTER,
+        raw_path="fanart-season-one",
+        source_url=AnyHttpUrl("https://fanart.example.test/season-one.png"),
+        language="en",
+        width=1000,
+        height=1426,
+        vote_count=20,
+    )
+    image = b"\x89PNG\r\n\x1a\nminimal"
+    metadata_provider = _FakeProvider(
+        (),
+        {
+            "series-1": _series_details(
+                "series-1",
+                "Example Show",
+                external_ids=(ExternalIdentifier(namespace="tvdb", value="81189"),),
+            )
+        },
+        ArtworkContent(reference=first_poster, content=image, media_type="image/png"),
+        season_details={
+            ("series-1", 1): _season_details("series-1", "season-1", 1, poster=first_poster),
+            ("series-1", 2): _season_details("series-1", "season-2", 2, poster=second_poster),
+        },
+    )
+    fanart_provider = _SupplementalPosterProvider(
+        ArtworkContent(reference=fanart_poster, content=image, media_type="image/png"),
+        (fanart_poster,),
+        provider_id="tvdb:81189:season:1",
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.match_item(series_id, metadata_provider, "series-1")
+    root_cached = await workflow.fetch_posters((metadata_provider,), root_id=root_id)
+
+    assert {record.library_item_id for record in root_cached} == {
+        first_season_id,
+        second_season_id,
+    }
+    assert metadata_provider.season_calls == [
+        (ProviderReference(provider="fake", raw_id="series-1"), 1),
+        (ProviderReference(provider="fake", raw_id="series-1"), 2),
+    ]
+
+    selected_cached = await workflow.fetch_posters(
+        (metadata_provider, fanart_provider), item_id=first_season_id, include_variants=True
+    )
+
+    assert len(selected_cached) == 2
+    assert metadata_provider.poster_list_calls == 0
+    assert fanart_provider.lookups == [
+        PosterLookup(
+            reference=ProviderReference(provider="fake", raw_id="season-1"),
+            media_kind=ProviderMediaKind.SEASON,
+            external_ids=(
+                ExternalIdentifier(namespace="fake", value="series-1"),
+                ExternalIdentifier(namespace="tvdb", value="81189"),
+            ),
+            season_number=1,
+        )
+    ]
+
+    fresh_first_poster = _poster_reference("/season-one-fresh.png")
+    metadata_provider.season_details[("series-1", 1)] = _season_details(
+        "series-1", "season-1", 1, poster=fresh_first_poster
+    )
+    await workflow.fetch_posters((metadata_provider,), item_id=first_season_id)
+
+    def records(session: Session) -> tuple[CachedArtwork, ...]:
+        return tuple(session.scalars(select(CachedArtwork).order_by(CachedArtwork.id)))
+
+    cached_records = database.run_transaction(records)
+    assert sorted(
+        (
+            record.library_item_id,
+            record.provider,
+            record.provider_id,
+            record.owner_provider,
+            record.owner_provider_id,
+        )
+        for record in cached_records
+    ) == sorted(
+        (
+            (first_season_id, "fake", "season-1", "fake", "series-1"),
+            (second_season_id, "fake", "season-2", "fake", "series-1"),
+            (first_season_id, "fanart", "tvdb:81189:season:1", "fake", "series-1"),
+        )
+    )
+    assert {
+        (record.library_item_id, record.provider, record.provider_revision)
+        for record in cached_records
+    } == {
+        (first_season_id, "fake", fresh_first_poster.raw_path),
+        (second_season_id, "fake", second_poster.raw_path),
+        (first_season_id, "fanart", fanart_poster.raw_path),
+    }
+
+    metadata_provider.season_details[("series-1", 1)] = _season_details(
+        "series-1", "season-1", 1, poster=None
+    )
+    await workflow.fetch_posters((metadata_provider,), item_id=first_season_id)
+
+    cached_records = database.run_transaction(records)
+    assert {
+        (record.library_item_id, record.provider, record.provider_revision)
+        for record in cached_records
+    } == {
+        (second_season_id, "fake", second_poster.raw_path),
+        (first_season_id, "fanart", fanart_poster.raw_path),
+    }
+    assert await workflow.prune_artwork() == (0, 0)
+
+    await workflow.unmatch_item(series_id)
+
+    assert await workflow.prune_artwork() == (2, len(image) * 2)
+
+
+async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create() -> tuple[int, int, int, int, int]:
+        def create_items(session: Session) -> tuple[int, int, int, int, int]:
+            root = create_library_root(
+                session,
+                path=tmp_path / "Shows",
+                expected_media_kind=ZaisanKind.SERIES,
+            )
+            series = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SERIES,
+                title="Example Show",
+            )
+            season = create_library_item(
+                session,
+                library_root_id=root.id,
+                parent_id=series.id,
+                item_kind=ZaisanKind.SEASON,
+                title="Season 1",
+                season_number=1,
+            )
+            first_episode = create_library_item(
+                session,
+                library_root_id=root.id,
+                parent_id=season.id,
+                item_kind=ZaisanKind.EPISODE,
+                title="Episode 1",
+                season_number=1,
+                episode_number=1,
+            )
+            second_episode = create_library_item(
+                session,
+                library_root_id=root.id,
+                parent_id=season.id,
+                item_kind=ZaisanKind.EPISODE,
+                title="Episode 2",
+                season_number=1,
+                episode_number=2,
+            )
+            return root.id, series.id, season.id, first_episode.id, second_episode.id
+
+        return database.run_transaction(create_items)
+
+    root_id, series_id, season_id, first_episode_id, second_episode_id = create()
+    first_still = _still_reference("/episode-one.png")
+    second_still = _still_reference("/episode-two.png")
+    image = b"\x89PNG\r\n\x1a\nminimal"
+    provider = _FakeProvider(
+        (),
+        {"series-1": _series_details("series-1", "Example Show")},
+        ArtworkContent(reference=first_still, content=image, media_type="image/png"),
+        season_details={
+            ("series-1", 1): _season_details(
+                "series-1",
+                "season-1",
+                1,
+                poster=None,
+                episodes=(
+                    _episode_details("series-1", "episode-1", 1, 1, still=first_still),
+                    _episode_details("series-1", "episode-2", 1, 2, still=second_still),
+                ),
+            )
+        },
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.match_item(series_id, provider, "series-1")
+    cached = await workflow.fetch_posters((provider,), root_id=root_id)
+
+    assert {(record.library_item_id, record.kind) for record in cached} == {
+        (first_episode_id, CachedArtworkKind.STILL),
+        (second_episode_id, CachedArtworkKind.STILL),
+    }
+    assert provider.season_calls == [(ProviderReference(provider="fake", raw_id="series-1"), 1)]
+    assert provider.artwork_calls == 2
+
+    selected = await workflow.fetch_posters(
+        (provider,), item_id=first_episode_id, include_variants=True
+    )
+
+    assert [(record.library_item_id, record.kind) for record in selected] == [
+        (first_episode_id, CachedArtworkKind.STILL)
+    ]
+    assert provider.poster_list_calls == 0
+
+    fresh_still = _still_reference("/episode-one-fresh.png")
+    provider.season_details[("series-1", 1)] = _season_details(
+        "series-1",
+        "season-1",
+        1,
+        poster=None,
+        episodes=(
+            _episode_details("series-1", "episode-1", 1, 1, still=fresh_still),
+            _episode_details("series-1", "episode-2", 1, 2, still=second_still),
+        ),
+    )
+    await workflow.fetch_posters((provider,), item_id=first_episode_id)
+
+    def records(session: Session) -> tuple[CachedArtwork, ...]:
+        return tuple(session.scalars(select(CachedArtwork).order_by(CachedArtwork.id)))
+
+    cached_records = database.run_transaction(records)
+    assert sorted(
+        (
+            record.library_item_id,
+            record.owner_provider,
+            record.owner_provider_id,
+            record.artwork_kind,
+        )
+        for record in cached_records
+    ) == sorted(
+        (
+            (first_episode_id, "fake", "series-1", CachedArtworkKind.STILL),
+            (second_episode_id, "fake", "series-1", CachedArtworkKind.STILL),
+        )
+    )
+    assert {(record.library_item_id, record.provider_revision) for record in cached_records} == {
+        (first_episode_id, fresh_still.raw_path),
+        (second_episode_id, second_still.raw_path),
+    }
+    assert season_id not in {record.library_item_id for record in cached_records}
+
+    provider.season_details[("series-1", 1)] = _season_details(
+        "series-1",
+        "season-1",
+        1,
+        poster=None,
+        episodes=(
+            _episode_details("series-1", "episode-1", 1, 1, still=None),
+            _episode_details("series-1", "episode-2", 1, 2, still=second_still),
+        ),
+    )
+    await workflow.fetch_posters((provider,), item_id=first_episode_id)
+
+    cached_records = database.run_transaction(records)
+    assert {(record.library_item_id, record.provider_revision) for record in cached_records} == {
+        (second_episode_id, second_still.raw_path)
+    }
+
+    await workflow.unmatch_item(series_id)
+
+    assert await workflow.prune_artwork() == (1, len(image))
 
 
 async def test_artwork_cache_fetches_ordered_poster_variants_for_one_shared_picker(

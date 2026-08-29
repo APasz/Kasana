@@ -178,7 +178,8 @@ uv run kasana-katalog artwork fetch --root 1
 ```
 
 Fanart.tv is optional and adds independently cached movie-poster alternatives
-to the picker while TMDB remains the metadata and primary-artwork provider:
+and season-specific TV posters to the picker. TMDB remains the metadata and
+primary-artwork provider, including landscape stills for local TV episodes:
 
 ```bash
 export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
@@ -186,9 +187,8 @@ export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
 export KASANA_KOURIER_FANART_CLIENT_KEY='your-fanart-personal-key'
 ```
 
-Fanart.tv support is intentionally limited to movie posters: its TV endpoint
-returns season-specific poster artwork rather than a generic series-poster
-collection, which does not fit Kasana's series poster picker.
+Fanart.tv's TV artwork is used only for matching local seasons. Its
+season-specific posters are never presented as generic series-poster choices.
 
 Matching is reviewable and conservative; fuzzy title similarity alone cannot
 auto-match. Downloaded artwork uses the configured `katalog.artwork_cache_path`

@@ -172,7 +172,7 @@ class KatalogApiRuntime:
         return await self._with_provider(operation)
 
     async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
-        """Fetch bounded poster choices for one matched library item."""
+        """Fetch bounded artwork choices for one item or its matched series hierarchy."""
 
         async def operation(
             workflow: MetadataWorkflow, providers: tuple[MetadataProvider, ...]
@@ -226,9 +226,7 @@ class KatalogApiRuntime:
                 )
                 try:
                     outcomes = await self._with_provider(
-                        lambda workflow, providers: workflow.auto_match(
-                            providers, root_id=root_id
-                        )
+                        lambda workflow, providers: workflow.auto_match(providers, root_id=root_id)
                     )
                 except MetadataProviderConfigurationError:
                     message += " Metadata matching skipped because TMDB is not configured."
@@ -495,10 +493,10 @@ class KatalogApiRuntime:
             for action in plan.actions
             for action_id in (action.item_id, action.target_item_id)
             if action_id is not None
-        ) | frozenset(review.item_id for review in plan.manual_reviews if review.item_id is not None)
-        item_labels = await run_blocking(
-            _hierarchy_item_labels, self.database, action_item_ids
+        ) | frozenset(
+            review.item_id for review in plan.manual_reviews if review.item_id is not None
         )
+        item_labels = await run_blocking(_hierarchy_item_labels, self.database, action_item_ids)
         return HierarchyRepairPreview(
             actions=tuple(
                 HierarchyRepairActionSummary(
@@ -611,17 +609,13 @@ def _provider(name: str, providers: tuple[MetadataProvider, ...]) -> MetadataPro
     raise MetadataProviderConfigurationError(msg)
 
 
-def _hierarchy_item_labels(
-    database: KatalogDatabase, item_ids: frozenset[int]
-) -> dict[int, str]:
+def _hierarchy_item_labels(database: KatalogDatabase, item_ids: frozenset[int]) -> dict[int, str]:
     """Return compact, path-free labels for hierarchy-preview item links."""
 
     if not item_ids:
         return {}
     items = database.run_transaction(
-        lambda session: tuple(
-            session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids))).all()
-        )
+        lambda session: tuple(session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids))).all())
     )
     return {item.id: hierarchy_item_label(item) for item in items}
 
@@ -639,9 +633,7 @@ def hierarchy_item_label(item: Zaisan) -> str:
     return f"{kind}: {item.title}"
 
 
-def hierarchy_target_label(
-    action: RepairAction, item_labels: dict[int, str]
-) -> str | None:
+def hierarchy_target_label(action: RepairAction, item_labels: dict[int, str]) -> str | None:
     if action.target_item_id is not None:
         return item_labels.get(action.target_item_id)
     if action.target_kind is ZaisanKind.SEASON:
@@ -672,9 +664,7 @@ def _scan_issue_summary(result: ScanResult) -> str | None:
     if result.totals.failed:
         parts.append(_plural(result.totals.failed, "scan issue", "scan issues"))
     if result.totals.unavailable:
-        parts.append(
-            f"marked {_plural(result.totals.unavailable, 'file', 'files')} unavailable"
-        )
+        parts.append(f"marked {_plural(result.totals.unavailable, 'file', 'files')} unavailable")
     if not parts:
         return None
     return f"Recorded {' and '.join(parts)}."
@@ -709,7 +699,9 @@ def _directory_listing(path: str | None, limit: int) -> DirectoryListing:
                 break
             try:
                 if child.is_dir():
-                    entries.append(DirectoryEntry(name=child.name, path=str(child.resolve(strict=True))))
+                    entries.append(
+                        DirectoryEntry(name=child.name, path=str(child.resolve(strict=True)))
+                    )
             except OSError:
                 continue
     except OSError as error:

@@ -238,6 +238,8 @@ kanvas-poster {
     scroll-snap-align: start;
 }
 
+kanvas-poster:has(.k-poster--landscape) { width: clamp(190px, 22vw, 320px); }
+
 .k-poster {
     position: relative;
     display: block;
@@ -255,6 +257,8 @@ kanvas-poster {
     background: var(--k-surface-2);
     transition: border-color var(--k-motion-fast), transform var(--k-motion-fast), opacity var(--k-motion-fast);
 }
+
+.k-poster--landscape .k-poster__art { aspect-ratio: 16 / 9; }
 
 .k-poster__image {
     display: block;
@@ -677,6 +681,10 @@ kanvas-poster {
 .k-grid > kanvas-poster,
 .k-child-grid > kanvas-poster,
 .k-design-poster-grid > kanvas-poster { width: 100%; }
+@media (min-width: 360px) {
+    .k-grid > kanvas-poster:has(.k-poster--landscape),
+    .k-child-grid > kanvas-poster:has(.k-poster--landscape) { grid-column: span 2; }
+}
 .k-grid-sentinel { width: 100%; height: 1px; }
 .k-grid-retry { margin-top: 10px; }
 .k-grid-diagnostic {
@@ -721,6 +729,8 @@ kanvas-poster {
     align-items: start;
 }
 
+.k-item--landscape { grid-template-columns: minmax(260px, 460px) minmax(0, 650px); }
+
 .k-item__art {
     position: relative;
     overflow: hidden;
@@ -728,6 +738,8 @@ kanvas-poster {
     border: 1px solid var(--k-border-subtle);
     background: var(--k-surface-2);
 }
+
+.k-item__art--landscape { aspect-ratio: 16 / 9; }
 
 .k-item__art > .k-poster__fallback-host {
     display: block;
@@ -1321,7 +1333,12 @@ a.k-item-editor__match-title:hover, a.k-item-editor__match-title:focus-visible {
 .k-item-editor__artwork:hover .k-item-editor__artwork-card { border-color: var(--k-border-strong); background: var(--k-surface-active); }
 .k-item-editor__artwork:has(input:checked) .k-item-editor__artwork-card { border-color: var(--k-accent); box-shadow: inset 0 0 0 1px var(--k-accent); color: var(--k-text); }
 .k-item-editor__artwork:focus-within .k-item-editor__artwork-card { outline: 2px solid var(--k-accent); outline-offset: 2px; }
-.k-item-editor__artwork img, .k-item-editor__artwork-placeholder { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; background: var(--k-surface-2); }
+.k-item-editor__artwork-image,
+.k-item-editor__artwork-placeholder { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; background: var(--k-surface-2); }
+.k-item-editor__artwork-image--landscape { aspect-ratio: 16 / 9; }
+@media (min-width: 480px) {
+    .k-item-editor__artwork:has(.k-item-editor__artwork-image--landscape) { grid-column: span 2; }
+}
 .k-item-editor__artwork-title { overflow: hidden; color: var(--k-text); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .k-item-editor__artwork-card small { display: block; min-height: 2.2em; overflow: hidden; color: var(--k-text-faint); font-size: 0.66rem; line-height: 1.1; }
 .k-item-editor__audit { display: grid; gap: 4px; margin: 10px 0 0; padding-left: 18px; }
@@ -1417,6 +1434,7 @@ kanvas-watch-order-workspace { display: block; width: 100%; max-width: 100%; min
 .k-watch-workspace__order { display: flex; width: 100%; min-width: 0; min-height: 224px; max-width: none; align-items: flex-start; overflow-x: auto; overflow-y: hidden; padding: 10px 8px 14px; border-top: 0; overscroll-behavior-inline: contain; scrollbar-color: var(--k-border-strong) transparent; scroll-snap-type: x proximity; }
 .k-watch-workspace__order:empty::before { display: grid; width: 100%; min-height: 198px; place-items: center; padding: 0 16px; color: var(--k-text-muted); content: 'Drop an item, show, or season here'; font-size: 0.78rem; }
 .k-watch-order-poster { position: relative; width: clamp(108px, 12.2vw, 174px); flex: 0 0 auto; scroll-snap-align: start; transition: opacity var(--k-motion-fast), filter var(--k-motion-fast); }
+.k-watch-order-poster:has(.k-poster--landscape) { width: clamp(190px, 22vw, 320px); }
 .k-watch-order-poster[draggable="true"] { cursor: grab; }
 .k-watch-order-poster:focus-visible { z-index: 1; outline: 2px solid var(--k-accent); outline-offset: 3px; }
 .k-watch-order-poster--dragging { opacity: 0.35; filter: saturate(0.7); cursor: grabbing; }
@@ -1522,6 +1540,7 @@ kanvas-profile-menu { position: relative; display: block; width: 100%; min-heigh
     .k-rail + .k-rail { margin-top: 12px; }
     .k-rail__viewport { min-height: 190px; }
     kanvas-poster { width: 116px; }
+    kanvas-poster:has(.k-poster--landscape) { width: min(66vw, 260px); }
     .k-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px 8px; }
     .k-collection-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px 8px; }
     .k-collection-detail { grid-template-columns: 110px minmax(0, 1fr); gap: 14px; }
@@ -1537,6 +1556,8 @@ kanvas-profile-menu { position: relative; display: block; width: 100%; min-heigh
     .k-item-editor__field > .k-select { grid-column: 1; }
     .k-item-editor__field-label { text-align: left; }
     .k-item { grid-template-columns: 110px minmax(0, 1fr); gap: 14px; }
+    .k-item--landscape { grid-template-columns: 1fr; }
+    .k-item--landscape .k-item__art { width: min(100%, 480px); }
     .k-item__overview { font-size: 0.82rem; }
     .k-filter-strip { gap: 6px; }
     .k-filter-strip .k-input-shell:not(.k-input-shell--year) {

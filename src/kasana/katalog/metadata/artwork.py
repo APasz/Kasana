@@ -22,6 +22,7 @@ from kasana.katalog.metadata.refresh import (
     ExternalPosterArtworkProvider,
     MetadataProvider,
     PosterArtworkProvider,
+    SeasonArtworkProvider,
     provider_for,
 )
 from kasana.katalog.models import (
@@ -32,6 +33,7 @@ from kasana.katalog.models import (
     MetadataCandidateStatus,
     MetadataMatchStatus,
     Zaisan,
+    ZaisanKind,
 )
 from kasana.shared.concurrency import run_blocking
 from kasana.shared.metadata import (
@@ -39,6 +41,7 @@ from kasana.shared.metadata import (
     ArtworkDownload,
     ArtworkKind,
     ArtworkReference,
+    EpisodeDetails,
     ExternalIdentifier,
     PosterListing,
     PosterLookup,
@@ -82,9 +85,11 @@ class ArtworkRequest:
     owner_provider: str
     owner_provider_id: str
     media_kind: ProviderMediaKind
+    artwork_kind: ArtworkKind
     source_url: str
     revision: str
     external_ids: tuple[ExternalIdentifier, ...] = ()
+    season_number: int | None = None
     language: str | None = None
     width: int | None = None
     height: int | None = None
@@ -93,6 +98,18 @@ class ArtworkRequest:
     is_primary: bool = False
     display_order: int = 0
     has_variant_metadata: bool = False
+
+    @property
+    def cached_kind(self) -> CachedArtworkKind:
+        """Return the database representation of this provider-neutral artwork kind."""
+
+        return CachedArtworkKind(self.artwork_kind.value)
+
+    @property
+    def cache_identity(self) -> tuple[str, str, CachedArtworkKind, str]:
+        """Return the immutable source identity used by the artwork cache."""
+
+        return self.provider, self.provider_id, self.cached_kind, self.revision
 
 
 @dataclass(frozen=True)
@@ -104,6 +121,45 @@ class PosterVariantBatch:
     provider_id: str
     requests: tuple[ArtworkRequest, ...]
     variants_listed: bool
+
+
+@dataclass(frozen=True)
+class EpisodeArtworkTarget:
+    """A local episode that receives a still from its parent season response."""
+
+    library_item_id: int
+    episode_number: int
+
+
+@dataclass(frozen=True)
+class SeasonArtworkTarget:
+    """A local season and its episodes that inherit identity from a matched series."""
+
+    library_item_id: int
+    provider: str
+    series_provider_id: str
+    season_number: int
+    external_ids: tuple[ExternalIdentifier, ...]
+    episodes: tuple[EpisodeArtworkTarget, ...]
+
+
+@dataclass(frozen=True)
+class PrimaryArtworkRefreshTarget:
+    """A primary season poster or episode still reconciled from one season response."""
+
+    library_item_id: int
+    provider: str
+    owner_provider_id: str
+    artwork_kind: ArtworkKind
+    current_request: ArtworkRequest | None
+
+
+@dataclass(frozen=True)
+class SeasonArtworkBatch:
+    """Artwork resolved from one successful provider season response."""
+
+    requests: tuple[ArtworkRequest, ...] = ()
+    refresh_targets: tuple[PrimaryArtworkRefreshTarget, ...] = ()
 
 
 class ArtworkCache:
@@ -133,19 +189,36 @@ class ArtworkCache:
         item_id: int | None = None,
         include_variants: bool = False,
     ) -> tuple[ArtworkCacheView, ...]:
-        """Cache accepted posters, with variants only for an explicit item picker."""
+        """Cache accepted posters plus matched season posters and episode stills."""
 
         if root_id is not None and item_id is not None:
             msg = "Artwork fetch accepts either a library root or an item, not both."
             raise ValueError(msg)
-        primary_requests = await run_blocking(self._poster_requests, root_id, item_id)
+        accepted_requests = await run_blocking(self._poster_requests, root_id, item_id)
+        season_targets = await run_blocking(self._season_artwork_targets, root_id, item_id)
+        season_batches = await self._season_artwork_batches(providers, season_targets)
+        season_requests = tuple(request for batch in season_batches for request in batch.requests)
+        refresh_targets = tuple(
+            target for batch in season_batches for target in batch.refresh_targets
+        )
+        primary_requests = unique_artwork_requests((*accepted_requests, *season_requests))
+        primary_poster_requests = tuple(
+            request for request in primary_requests if request.artwork_kind is ArtworkKind.POSTER
+        )
+        primary_still_requests = tuple(
+            request for request in primary_requests if request.artwork_kind is ArtworkKind.STILL
+        )
         batches: tuple[PosterVariantBatch, ...] = ()
         if include_variants:
             batch_groups = await asyncio.gather(
-                *(self._poster_variant_batches(providers, request) for request in primary_requests)
+                *(
+                    self._poster_variant_batches(providers, request)
+                    for request in primary_poster_requests
+                )
             )
             batches = tuple(batch for group in batch_groups for batch in group)
-            requests = tuple(request for batch in batches for request in batch.requests)
+            variant_requests = tuple(request for batch in batches for request in batch.requests)
+            requests = unique_artwork_requests((*primary_still_requests, *variant_requests))
         else:
             requests = primary_requests
         semaphore = asyncio.Semaphore(self.concurrency)
@@ -156,14 +229,28 @@ class ArtworkCache:
                 return await self._cache_artwork(provider, request)
 
         results = await asyncio.gather(*(fetch(request) for request in requests))
+        successful_cache_identities = {
+            request.cache_identity
+            for request, result in zip(requests, results, strict=True)
+            if result is not None
+        }
+        refreshed_targets = tuple(
+            target
+            for target in refresh_targets
+            if target.current_request is None
+            or target.current_request.cache_identity in successful_cache_identities
+        )
+        cleanup_tasks = (
+            (self._remove_stale_primary_artwork(refreshed_targets),) if refreshed_targets else ()
+        )
         if include_variants and all(result is not None for result in results):
-            await asyncio.gather(
-                *(
-                    self._remove_stale_poster_variants(batch)
-                    for batch in batches
-                    if batch.variants_listed
-                )
+            cleanup_tasks += tuple(
+                self._remove_stale_poster_variants(batch)
+                for batch in batches
+                if batch.variants_listed
             )
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks)
         return tuple(result for result in results if result is not None)
 
     async def prune(self) -> tuple[int, int]:
@@ -185,6 +272,14 @@ class ArtworkCache:
         """Drop superseded poster choices while preserving the library's saved choice."""
 
         records = await run_blocking(self._stale_poster_variants, batch)
+        await self._remove_artwork_records(records)
+
+    async def _remove_stale_primary_artwork(
+        self, targets: tuple[PrimaryArtworkRefreshTarget, ...]
+    ) -> None:
+        """Drop superseded automatic artwork after its replacement is cached."""
+
+        records = await run_blocking(self._stale_primary_artwork, targets)
         await self._remove_artwork_records(records)
 
     def _poster_requests(
@@ -237,6 +332,7 @@ class ArtworkCache:
                         owner_provider=candidate.provider,
                         owner_provider_id=candidate.provider_id,
                         media_kind=ProviderMediaKind(candidate.provider_media_kind.value),
+                        artwork_kind=ArtworkKind.POSTER,
                         source_url=candidate.poster_source_url or "",
                         revision=candidate.poster_revision or "",
                         external_ids=external_identifiers(
@@ -249,11 +345,260 @@ class ArtworkCache:
 
         return self.database.run_transaction(load)
 
+    def _season_artwork_targets(
+        self, root_id: int | None, item_id: int | None
+    ) -> tuple[SeasonArtworkTarget, ...]:
+        """Find local seasons and episodes backed by a matched parent series."""
+
+        def load(session: Session) -> tuple[SeasonArtworkTarget, ...]:
+            statement = select(Zaisan).where(
+                Zaisan.item_kind == ZaisanKind.SEASON,
+                Zaisan.season_number.is_not(None),
+            )
+            if root_id is not None:
+                statement = statement.where(Zaisan.library_root_id == root_id)
+            selected_episode_id: int | None = None
+            if item_id is not None:
+                item = session.get(Zaisan, item_id)
+                if item is None:
+                    return ()
+                if item.item_kind is ZaisanKind.SERIES:
+                    statement = statement.where(Zaisan.parent_id == item.id)
+                elif item.item_kind is ZaisanKind.SEASON:
+                    statement = statement.where(Zaisan.id == item.id)
+                elif item.item_kind is ZaisanKind.EPISODE:
+                    if item.parent_id is None:
+                        return ()
+                    season = session.get(Zaisan, item.parent_id)
+                    if season is None or season.item_kind is not ZaisanKind.SEASON:
+                        return ()
+                    statement = statement.where(Zaisan.id == season.id)
+                    selected_episode_id = item.id
+                else:
+                    return ()
+            seasons = tuple(
+                session.scalars(
+                    statement.order_by(Zaisan.parent_id, Zaisan.season_number, Zaisan.id)
+                )
+            )
+            series_ids = tuple(
+                season.parent_id for season in seasons if season.parent_id is not None
+            )
+            if not series_ids:
+                return ()
+            series = {
+                item.id: item
+                for item in session.scalars(
+                    select(Zaisan).where(
+                        Zaisan.id.in_(series_ids), Zaisan.item_kind == ZaisanKind.SERIES
+                    )
+                )
+            }
+            bindings: dict[int, MetadataBinding] = {}
+            for binding in session.scalars(
+                select(MetadataBinding)
+                .where(
+                    MetadataBinding.library_item_id.in_(tuple(series)),
+                    MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                )
+                .order_by(MetadataBinding.manual_decision.desc(), MetadataBinding.id)
+            ):
+                bindings.setdefault(binding.library_item_id, binding)
+            season_ids = tuple(season.id for season in seasons)
+            episode_targets: dict[int, list[EpisodeArtworkTarget]] = {
+                season_id: [] for season_id in season_ids
+            }
+            if season_ids:
+                episode_statement = select(Zaisan).where(
+                    Zaisan.parent_id.in_(season_ids),
+                    Zaisan.item_kind == ZaisanKind.EPISODE,
+                    Zaisan.episode_number.is_not(None),
+                )
+                if selected_episode_id is not None:
+                    episode_statement = episode_statement.where(Zaisan.id == selected_episode_id)
+                seasons_by_id = {season.id: season for season in seasons}
+                for episode in session.scalars(
+                    episode_statement.order_by(Zaisan.parent_id, Zaisan.episode_number, Zaisan.id)
+                ):
+                    if episode.parent_id is None or episode.episode_number is None:
+                        continue
+                    season = seasons_by_id[episode.parent_id]
+                    if episode.season_number != season.season_number:
+                        continue
+                    episode_targets[season.id].append(
+                        EpisodeArtworkTarget(
+                            library_item_id=episode.id,
+                            episode_number=episode.episode_number,
+                        )
+                    )
+            targets: list[SeasonArtworkTarget] = []
+            for season in seasons:
+                if season.parent_id not in series or season.season_number is None:
+                    continue
+                binding = bindings.get(season.parent_id)
+                if binding is None:
+                    continue
+                targets.append(
+                    SeasonArtworkTarget(
+                        library_item_id=season.id,
+                        provider=binding.provider,
+                        series_provider_id=binding.provider_id,
+                        season_number=season.season_number,
+                        external_ids=external_identifiers_for_source(
+                            binding.provider, binding.provider_id, binding
+                        ),
+                        episodes=tuple(episode_targets[season.id]),
+                    )
+                )
+            return tuple(targets)
+
+        return self.database.run_transaction(load)
+
+    async def _season_artwork_batches(
+        self,
+        providers: tuple[MetadataProvider, ...],
+        targets: tuple[SeasonArtworkTarget, ...],
+    ) -> tuple[SeasonArtworkBatch, ...]:
+        """Resolve and reconcile primary season posters and episode stills."""
+
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def resolve(target: SeasonArtworkTarget) -> SeasonArtworkBatch:
+            provider = provider_for(target.provider, providers)
+            if not provider.supports(ProviderCapability.GET_SEASON):
+                return SeasonArtworkBatch()
+            if not hasattr(provider, "get_season"):
+                msg = f"Provider {target.provider!r} advertises unsupported season details."
+                raise ValueError(msg)
+            season_provider = cast(SeasonArtworkProvider, provider)
+            series_reference = ProviderReference(
+                provider=target.provider, raw_id=target.series_provider_id
+            )
+            async with semaphore:
+                details = await season_provider.get_season(series_reference, target.season_number)
+            if details.reference.provider != target.provider:
+                msg = f"Provider {target.provider!r} returned season details from another provider."
+                raise ValueError(msg)
+            if details.series_reference != series_reference:
+                msg = f"Provider {target.provider!r} returned season details for another series."
+                raise ValueError(msg)
+            if details.season_number != target.season_number:
+                msg = f"Provider {target.provider!r} returned a different season number."
+                raise ValueError(msg)
+            requests: list[ArtworkRequest] = []
+            refresh_targets: list[PrimaryArtworkRefreshTarget] = []
+            poster = details.poster
+            poster_request: ArtworkRequest | None = None
+            if poster is not None:
+                if poster.provider != target.provider or poster.kind is not ArtworkKind.POSTER:
+                    msg = f"Provider {target.provider!r} returned invalid season poster artwork."
+                    raise ValueError(msg)
+                if poster.source_url is None:
+                    msg = (
+                        f"Provider {target.provider!r} returned a season poster without "
+                        "a source URL."
+                    )
+                    raise ValueError(msg)
+                poster_request = ArtworkRequest(
+                    library_item_id=target.library_item_id,
+                    provider=target.provider,
+                    provider_id=details.reference.raw_id,
+                    owner_provider=target.provider,
+                    owner_provider_id=target.series_provider_id,
+                    media_kind=ProviderMediaKind.SEASON,
+                    artwork_kind=ArtworkKind.POSTER,
+                    source_url=str(poster.source_url),
+                    revision=poster.raw_path,
+                    external_ids=target.external_ids,
+                    season_number=target.season_number,
+                    language=poster.language,
+                    width=poster.width,
+                    height=poster.height,
+                    vote_average=poster.vote_average,
+                    vote_count=poster.vote_count,
+                    is_primary=True,
+                )
+                requests.append(poster_request)
+            refresh_targets.append(
+                PrimaryArtworkRefreshTarget(
+                    library_item_id=target.library_item_id,
+                    provider=target.provider,
+                    owner_provider_id=target.series_provider_id,
+                    artwork_kind=ArtworkKind.POSTER,
+                    current_request=poster_request,
+                )
+            )
+            remote_episodes: dict[int, EpisodeDetails] = {}
+            for episode in details.episodes:
+                if episode.reference.provider != target.provider:
+                    msg = f"Provider {target.provider!r} returned an episode from another provider."
+                    raise ValueError(msg)
+                if episode.series_reference != series_reference:
+                    msg = f"Provider {target.provider!r} returned an episode for another series."
+                    raise ValueError(msg)
+                if episode.season_number != target.season_number:
+                    msg = f"Provider {target.provider!r} returned an episode from another season."
+                    raise ValueError(msg)
+                if episode.episode_number in remote_episodes:
+                    msg = f"Provider {target.provider!r} returned duplicate episode details."
+                    raise ValueError(msg)
+                remote_episodes[episode.episode_number] = episode
+            for episode_target in target.episodes:
+                episode = remote_episodes.get(episode_target.episode_number)
+                still_request: ArtworkRequest | None = None
+                if episode is not None and episode.still is not None:
+                    still = episode.still
+                    if still.provider != target.provider or still.kind is not ArtworkKind.STILL:
+                        msg = (
+                            f"Provider {target.provider!r} returned invalid episode still artwork."
+                        )
+                        raise ValueError(msg)
+                    if still.source_url is None:
+                        msg = (
+                            f"Provider {target.provider!r} returned an episode still without "
+                            "a source URL."
+                        )
+                        raise ValueError(msg)
+                    still_request = ArtworkRequest(
+                        library_item_id=episode_target.library_item_id,
+                        provider=target.provider,
+                        provider_id=episode.reference.raw_id,
+                        owner_provider=target.provider,
+                        owner_provider_id=target.series_provider_id,
+                        media_kind=ProviderMediaKind.EPISODE,
+                        artwork_kind=ArtworkKind.STILL,
+                        source_url=str(still.source_url),
+                        revision=still.raw_path,
+                        season_number=target.season_number,
+                        language=still.language,
+                        width=still.width,
+                        height=still.height,
+                        vote_average=still.vote_average,
+                        vote_count=still.vote_count,
+                        is_primary=True,
+                    )
+                    requests.append(still_request)
+                refresh_targets.append(
+                    PrimaryArtworkRefreshTarget(
+                        library_item_id=episode_target.library_item_id,
+                        provider=target.provider,
+                        owner_provider_id=target.series_provider_id,
+                        artwork_kind=ArtworkKind.STILL,
+                        current_request=still_request,
+                    )
+                )
+            return SeasonArtworkBatch(tuple(requests), tuple(refresh_targets))
+
+        return tuple(await asyncio.gather(*(resolve(target) for target in targets)))
+
     async def _poster_variant_batches(
         self, providers: tuple[MetadataProvider, ...], primary: ArtworkRequest
     ) -> tuple[PosterVariantBatch, ...]:
         """Load primary and supplemental poster sources for one matched item."""
 
+        if primary.artwork_kind is not ArtworkKind.POSTER:
+            msg = "Poster variants require a primary poster request."
+            raise ValueError(msg)
         primary_provider = provider_for(primary.provider, providers)
         primary_batch = await self._primary_poster_variant_batch(primary_provider, primary)
         supplemental_batches = await asyncio.gather(
@@ -275,13 +620,16 @@ class ArtworkCache:
 
         primary_reference = ArtworkReference(
             provider=primary.provider,
-            kind=ArtworkKind.POSTER,
+            kind=primary.artwork_kind,
             raw_path=primary.revision,
             source_url=AnyHttpUrl(primary.source_url),
             is_primary=True,
         )
         variants: tuple[ArtworkReference, ...] = ()
-        variants_listed = provider.supports(ProviderCapability.LIST_POSTERS)
+        variants_listed = primary.media_kind in {
+            ProviderMediaKind.MOVIE,
+            ProviderMediaKind.SERIES,
+        } and provider.supports(ProviderCapability.LIST_POSTERS)
         if variants_listed:
             if not hasattr(provider, "list_posters"):
                 msg = f"Provider {primary.provider!r} advertises unsupported poster variants."
@@ -340,6 +688,7 @@ class ArtworkCache:
                 reference=ProviderReference(provider=primary.provider, raw_id=primary.provider_id),
                 media_kind=primary.media_kind,
                 external_ids=primary.external_ids,
+                season_number=primary.season_number,
             )
         )
         if listing is None:
@@ -417,7 +766,11 @@ class ArtworkCache:
         self, provider: MetadataProvider, request: ArtworkRequest
     ) -> ArtworkCacheView | None:
         existing = await run_blocking(
-            self._cached_artwork, request.provider, request.provider_id, request.revision
+            self._cached_artwork,
+            request.provider,
+            request.provider_id,
+            request.cached_kind,
+            request.revision,
         )
         if existing is not None:
             return await run_blocking(self._update_cached_artwork, existing.id, request)
@@ -425,7 +778,7 @@ class ArtworkCache:
             return None
         reference = ArtworkReference(
             provider=request.provider,
-            kind=ArtworkKind.POSTER,
+            kind=request.artwork_kind,
             raw_path=request.revision,
             source_url=AnyHttpUrl(request.source_url),
             language=request.language,
@@ -438,7 +791,7 @@ class ArtworkCache:
         relative_path = artwork_relative_path(
             request.provider,
             request.provider_id,
-            CachedArtworkKind.POSTER,
+            request.cached_kind,
             request.revision,
             "image/jpeg",
         )
@@ -452,7 +805,7 @@ class ArtworkCache:
             final_relative_path = artwork_relative_path(
                 request.provider,
                 request.provider_id,
-                CachedArtworkKind.POSTER,
+                request.cached_kind,
                 request.revision,
                 content_type,
             )
@@ -496,14 +849,14 @@ class ArtworkCache:
         return content_type, len(content.content)
 
     def _cached_artwork(
-        self, provider: str, provider_id: str, revision: str
+        self, provider: str, provider_id: str, kind: CachedArtworkKind, revision: str
     ) -> ArtworkCacheView | None:
         def load(session: Session) -> ArtworkCacheView | None:
             record = session.scalar(
                 select(CachedArtwork).where(
                     CachedArtwork.provider == provider,
                     CachedArtwork.provider_id == provider_id,
-                    CachedArtwork.artwork_kind == CachedArtworkKind.POSTER,
+                    CachedArtwork.artwork_kind == kind,
                     CachedArtwork.provider_revision == revision,
                 )
             )
@@ -538,7 +891,7 @@ class ArtworkCache:
                 select(CachedArtwork).where(
                     CachedArtwork.provider == request.provider,
                     CachedArtwork.provider_id == request.provider_id,
-                    CachedArtwork.artwork_kind == CachedArtworkKind.POSTER,
+                    CachedArtwork.artwork_kind == request.cached_kind,
                     CachedArtwork.provider_revision == request.revision,
                 )
             )
@@ -549,7 +902,7 @@ class ArtworkCache:
                     provider_id=request.provider_id,
                     owner_provider=request.owner_provider,
                     owner_provider_id=request.owner_provider_id,
-                    artwork_kind=CachedArtworkKind.POSTER,
+                    artwork_kind=request.cached_kind,
                     provider_revision=request.revision,
                     source_url=request.source_url,
                     attribution=request.provider,
@@ -584,11 +937,10 @@ class ArtworkCache:
         def load(session: Session) -> tuple[CachedArtwork, ...]:
             records = session.scalars(select(CachedArtwork)).all()
             referenced = {
-                (candidate.provider, candidate.provider_id)
-                for candidate in session.scalars(
-                    select(MetadataCandidate).where(
-                        MetadataCandidate.status == MetadataCandidateStatus.ACCEPTED,
-                        MetadataCandidate.poster_revision.is_not(None),
+                (binding.provider, binding.provider_id)
+                for binding in session.scalars(
+                    select(MetadataBinding).where(
+                        MetadataBinding.status == MetadataMatchStatus.MATCHED,
                     )
                 ).all()
             }
@@ -631,6 +983,67 @@ class ArtworkCache:
 
         return self.database.run_transaction(load)
 
+    def _stale_primary_artwork(
+        self, targets: tuple[PrimaryArtworkRefreshTarget, ...]
+    ) -> tuple[CachedArtwork, ...]:
+        current_requests = {
+            (
+                target.library_item_id,
+                target.provider,
+                target.owner_provider_id,
+                CachedArtworkKind(target.artwork_kind.value),
+            ): target.current_request
+            for target in targets
+        }
+        item_ids = tuple({target.library_item_id for target in targets})
+        artwork_kinds = tuple({CachedArtworkKind(target.artwork_kind.value) for target in targets})
+
+        def load(session: Session) -> tuple[CachedArtwork, ...]:
+            selected_ids = {
+                item.id: item.selected_artwork_ids
+                for item in session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids)))
+            }
+            records = session.scalars(
+                select(CachedArtwork).where(
+                    CachedArtwork.library_item_id.in_(item_ids),
+                    CachedArtwork.artwork_kind.in_(artwork_kinds),
+                    CachedArtwork.is_primary.is_(True),
+                )
+            ).all()
+            stale: list[CachedArtwork] = []
+            for record in records:
+                if (
+                    record.library_item_id is None
+                    or record.owner_provider is None
+                    or record.owner_provider_id is None
+                    or record.owner_provider != record.provider
+                ):
+                    continue
+                key = (
+                    record.library_item_id,
+                    record.provider,
+                    record.owner_provider_id,
+                    record.artwork_kind,
+                )
+                if key not in current_requests:
+                    continue
+                request = current_requests[key]
+                if (
+                    request is not None
+                    and record.provider_id == request.provider_id
+                    and record.provider_revision == request.revision
+                ):
+                    continue
+                if record.id != selected_ids.get(record.library_item_id, {}).get(
+                    record.artwork_kind.value
+                ):
+                    stale.append(record)
+            for record in stale:
+                session.expunge(record)
+            return tuple(stale)
+
+        return self.database.run_transaction(load)
+
     def _delete_artwork_record(self, record_id: int) -> None:
         def delete(session: Session) -> None:
             record = session.get(CachedArtwork, record_id)
@@ -645,12 +1058,20 @@ def external_identifiers(
 ) -> tuple[ExternalIdentifier, ...]:
     """Combine the candidate's identity with validated IDs from its active binding."""
 
+    return external_identifiers_for_source(candidate.provider, candidate.provider_id, binding)
+
+
+def external_identifiers_for_source(
+    provider: str, provider_id: str, binding: MetadataBinding | None
+) -> tuple[ExternalIdentifier, ...]:
+    """Combine one metadata source identity with its active binding identifiers."""
+
     identifiers: dict[tuple[str, str], ExternalIdentifier] = {}
 
     def add(identifier: ExternalIdentifier) -> None:
         identifiers.setdefault((identifier.namespace, identifier.value), identifier)
 
-    add(ExternalIdentifier(namespace=candidate.provider, value=candidate.provider_id))
+    add(ExternalIdentifier(namespace=provider, value=provider_id))
     if binding is not None:
         for raw_identifier in binding.provider_external_ids:
             try:
@@ -659,6 +1080,15 @@ def external_identifiers(
                 msg = f"Metadata binding {binding.id} has an invalid external identifier."
                 raise ValueError(msg) from error
     return tuple(identifiers.values())
+
+
+def unique_artwork_requests(requests: tuple[ArtworkRequest, ...]) -> tuple[ArtworkRequest, ...]:
+    """Preserve the cache's global source identity before concurrent downloads begin."""
+
+    unique: dict[tuple[str, str, CachedArtworkKind, str], ArtworkRequest] = {}
+    for request in requests:
+        unique.setdefault(request.cache_identity, request)
+    return tuple(unique.values())
 
 
 def artwork_request(
@@ -672,7 +1102,10 @@ def artwork_request(
     """Map one validated provider reference to Katalog's cache request shape."""
 
     if reference.source_url is None:
-        msg = f"Provider {provider!r} returned a poster without a source URL."
+        msg = f"Provider {provider!r} returned artwork without a source URL."
+        raise ValueError(msg)
+    if reference.kind is not primary.artwork_kind:
+        msg = f"Provider {provider!r} returned artwork of the wrong kind."
         raise ValueError(msg)
     return ArtworkRequest(
         library_item_id=primary.library_item_id,
@@ -681,8 +1114,11 @@ def artwork_request(
         owner_provider=primary.owner_provider,
         owner_provider_id=primary.owner_provider_id,
         media_kind=primary.media_kind,
+        artwork_kind=reference.kind,
         source_url=str(reference.source_url),
         revision=reference.raw_path,
+        external_ids=primary.external_ids,
+        season_number=primary.season_number,
         language=reference.language,
         width=reference.width,
         height=reference.height,
@@ -722,6 +1158,7 @@ def apply_artwork_request(
     record.attribution = request.provider
     record.owner_provider = request.owner_provider
     record.owner_provider_id = request.owner_provider_id
+    record.artwork_kind = request.cached_kind
     if request.has_variant_metadata or request.language is not None:
         record.language = request.language
     if request.has_variant_metadata or request.width is not None:

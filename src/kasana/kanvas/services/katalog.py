@@ -14,6 +14,7 @@ from kasana.kanvas.services.presentation import (
     PLAYABLE_KINDS,
     artwork_proxy_from_api_url,
     artwork_proxy_url,
+    artwork_shape_for_summary,
     collection_artwork,
     collection_member,
     collection_tile,
@@ -29,6 +30,7 @@ from kasana.kanvas.services.presentation import (
     placeholder_title_lines,
     poster_from_summary,
     poster_state,
+    primary_artwork_url,
     progress_percent,
     runtime_label,
     watch_order_card,
@@ -221,9 +223,7 @@ class KanvasKatalogService:
 
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[KatalogClient]:
-        async with katalog_client_context(
-            self._settings, client_factory=KatalogClient
-        ) as client:
+        async with katalog_client_context(self._settings, client_factory=KatalogClient) as client:
             yield client
 
     async def home_rails(self) -> tuple[MediaRailView, ...]:
@@ -335,7 +335,7 @@ class KanvasKatalogService:
                     title=item.title,
                     year=item.year,
                     kind=item.kind.value,
-                    posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+                    posterUrl=primary_artwork_url(item),
                     candidates=tuple(
                         metadata_candidate_view(candidate) for candidate in candidates
                     ),
@@ -374,7 +374,7 @@ class KanvasKatalogService:
             return await client.search_metadata(item_id, query=query)
 
     async def fetch_item_artwork(self, item_id: int) -> tuple[ArtworkSelection, ...]:
-        """Fetch shared poster choices and return the item's cached artwork."""
+        """Fetch matching artwork choices and return the item's cached artwork."""
 
         async with self._client() as client:
             return await client.fetch_library_item_artwork(item_id)
@@ -538,7 +538,8 @@ class KanvasKatalogService:
             kind=item.kind.value,
             year=item.year,
             overview=item.overview,
-            posterUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.POSTER),
+            posterUrl=primary_artwork_url(item),
+            artworkShape=artwork_shape_for_summary(item),
             posterPlaceholder=placeholder_art_for_summary(item),
             backdropUrl=artwork_proxy_url(item.id, item.artwork, ArtworkKind.BACKDROP),
             runtimeLabel=runtime_label(media_page.items[0].duration_seconds)

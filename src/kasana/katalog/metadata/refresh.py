@@ -21,6 +21,7 @@ from kasana.shared.metadata import (
     ProviderReference,
     SearchQuery,
     SearchResult,
+    SeasonDetails,
     SeriesDetails,
 )
 
@@ -63,6 +64,14 @@ class PosterArtworkProvider(MetadataProvider, Protocol):
     async def list_posters(
         self, reference: ProviderReference, media_kind: ProviderMediaKind
     ) -> tuple[ArtworkReference, ...]: ...
+
+
+class SeasonArtworkProvider(MetadataProvider, Protocol):
+    """Optional provider capability for season posters and episode stills."""
+
+    async def get_season(
+        self, series_reference: ProviderReference, season_number: int
+    ) -> SeasonDetails: ...
 
 
 class ExternalPosterArtworkProvider(MetadataProvider, Protocol):

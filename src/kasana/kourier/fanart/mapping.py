@@ -8,7 +8,7 @@ from kasana.shared.metadata import ArtworkKind, ArtworkReference
 
 
 def poster_artwork(image: FanartImagePayload) -> ArtworkReference:
-    """Map one Fanart.tv movie poster while retaining picker metadata."""
+    """Map one Fanart.tv poster while retaining picker metadata."""
 
     return ArtworkReference(
         provider=FANART_PROVIDER,

@@ -181,6 +181,62 @@ async def test_movie_posters_use_tmdb_identity_and_retain_picker_metadata() -> N
     assert session.calls[0][1]["client-key"] == "personal-key"
 
 
+async def test_season_posters_use_tvdb_identity_and_filter_to_the_local_season() -> None:
+    provider, session = _provider(
+        [
+            _json_response(
+                {
+                    "seasonposter": [
+                        {
+                            "id": "season-five-japanese",
+                            "url": "https://assets.fanart.test/season-five-ja.jpg",
+                            "lang": "ja",
+                            "likes": "100",
+                            "season": "5",
+                            "width": "1000",
+                            "height": "1426",
+                        },
+                        {
+                            "id": "season-five-english",
+                            "url": "https://assets.fanart.test/season-five-en.jpg",
+                            "lang": "en",
+                            "likes": "10",
+                            "season": "5",
+                            "width": "2000",
+                            "height": "2852",
+                        },
+                        {
+                            "id": "season-four",
+                            "url": "https://assets.fanart.test/season-four.jpg",
+                            "lang": "en",
+                            "likes": "500",
+                            "season": "4",
+                        },
+                    ]
+                }
+            )
+        ]
+    )
+
+    listing = await provider.list_posters_by_external_id(
+        PosterLookup(
+            reference=ProviderReference(provider="tvdb", raw_id="season-250142"),
+            media_kind=ProviderMediaKind.SEASON,
+            external_ids=(ExternalIdentifier(namespace="tvdb", value="81189"),),
+            season_number=5,
+        )
+    )
+
+    assert listing is not None
+    assert (listing.provider, listing.provider_id) == ("fanart", "tvdb:81189:season:5")
+    assert [poster.raw_path for poster in listing.posters] == [
+        "season-five-english",
+        "season-five-japanese",
+    ]
+    assert (listing.posters[0].width, listing.posters[0].height) == (2000, 2852)
+    assert session.calls[0][0].path == "/v3.2/tv/81189"
+
+
 async def test_missing_movie_is_an_authoritative_empty_listing() -> None:
     provider, _ = _provider([_json_response({"status": "not found"}, status=404)])
 
@@ -334,18 +390,8 @@ async def test_blank_image_id_is_a_typed_error() -> None:
         {"id": "x" * 501, "url": "https://assets.fanart.test/poster.jpg"},
     ),
 )
-async def test_out_of_contract_poster_metadata_is_a_typed_error(
-    poster: dict[str, object]
-) -> None:
-    provider, _ = _provider(
-        [
-            _json_response(
-                {
-                    "movieposter": [poster]
-                }
-            )
-        ]
-    )
+async def test_out_of_contract_poster_metadata_is_a_typed_error(poster: dict[str, object]) -> None:
+    provider, _ = _provider([_json_response({"movieposter": [poster]})])
 
     with pytest.raises(KourierError) as error:
         await provider.list_posters_by_external_id(

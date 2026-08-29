@@ -141,6 +141,7 @@ from kasana.kanvas.viewmodels.item import (
     ItemDetailView,
 )
 from kasana.kanvas.viewmodels.library import (
+    ArtworkShape,
     CursorPager,
     LibraryFilters,
     LibraryPageEnvelope,
@@ -288,6 +289,7 @@ def _summary_with_title(
     episode_number: int | None = None,
     series_title: str | None = None,
     context_label: str | None = None,
+    artwork: tuple[ArtworkSelection, ...] = (),
 ) -> LibraryItemSummary:
     return LibraryItemSummary(
         id=9,
@@ -299,6 +301,7 @@ def _summary_with_title(
         series_title=series_title,
         context_label=context_label,
         availability=Availability.AVAILABLE,
+        artwork=artwork,
     )
 
 
@@ -340,6 +343,7 @@ def _library_detail(
     parent_id: int | None = None,
     season_number: int | None = None,
     episode_number: int | None = None,
+    artwork: tuple[ArtworkSelection, ...] = (),
 ) -> LibraryItemDetail:
     """Build a public item detail for route and service contracts."""
 
@@ -353,7 +357,7 @@ def _library_detail(
             "parent_id": parent_id,
             "availability": Availability.AVAILABLE,
             "tags": (),
-            "artwork": (),
+            "artwork": artwork,
             "season_number": season_number,
             "episode_number": episode_number,
             "playback_url": f"/api/v1/playback/items/{item_id}",
@@ -552,15 +556,25 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert poster.poster_url == "/kanvas/artwork/7/8"
     assert poster.progress_percent == 25
     assert poster.state is PosterState.IN_PROGRESS
+    episode_still = ArtworkSelection(
+        id=9,
+        kind=ArtworkKind.STILL,
+        url="/api/v1/library/items/9/artwork/9",
+        content_type="image/jpeg",
+        size_bytes=4,
+    )
     episode_poster = poster_from_summary(
         _summary_with_title(
             "The Door to Summer",
             kind=LibraryItemKind.EPISODE,
             series_title="Aldnoah Zero",
+            artwork=(episode_still,),
         )
     )
     assert episode_poster.context == "Aldnoah Zero"
     assert episode_poster.detail is None
+    assert episode_poster.poster_url == "/kanvas/artwork/9/9"
+    assert episode_poster.artwork_shape is ArtworkShape.LANDSCAPE
     repeated_context_poster = poster_from_summary(
         _summary_with_title(
             "The Rookie",
@@ -571,6 +585,34 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert repeated_context_poster.context is None
     assert "playback_url" not in json.dumps(poster.model_dump(mode="json"))
     assert "/tmp/" not in json.dumps(poster.model_dump(mode="json"))
+
+
+async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: MonkeyPatch) -> None:
+    still = ArtworkSelection(
+        id=8,
+        kind=ArtworkKind.STILL,
+        url="/api/v1/library/items/7/artwork/8",
+        content_type="image/jpeg",
+        size_bytes=4,
+    )
+    episode = _library_detail(
+        item_id=7,
+        title="Pilot",
+        kind=LibraryItemKind.EPISODE,
+        season_number=1,
+        episode_number=1,
+        artwork=(still,),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(episode, {7: ()}, child_requests),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.poster_url == "/kanvas/artwork/7/8"
+    assert detail.artwork_shape is ArtworkShape.LANDSCAPE
 
 
 def test_home_artwork_onboarding_uses_the_recently_added_rail_kind() -> None:
@@ -807,8 +849,7 @@ def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
     assert "var(--k-surface-1) var(--progress-percent, 0%) 100%" in stylesheet
     assert (
         ".k-player:fullscreen .k-player__progress { z-index: 3; "
-        "bottom: env(safe-area-inset-bottom);"
-        in stylesheet
+        "bottom: env(safe-area-inset-bottom);" in stylesheet
     )
     assert "background: rgba(16, 16, 16, 0.78);" in stylesheet
     assert "rgba(0, 0, 0, 0.84), rgba(0, 0, 0, 0.58)" in stylesheet
@@ -876,8 +917,7 @@ def test_fullscreen_player_can_align_a_contained_video_frame() -> None:
     assert ".k-player__frame-alignment" in stylesheet
     assert 'data-player-frame-axis="horizontal"' in stylesheet
     assert (
-        'data-player-frame-axis="vertical"] .k-player__frame-alignment-option .k-icon'
-        in stylesheet
+        'data-player-frame-axis="vertical"] .k-player__frame-alignment-option .k-icon' in stylesheet
     )
     assert (
         'data-player-frame-axis="vertical"] .k-player__frame-alignment:not([hidden]) '
@@ -1020,9 +1060,7 @@ async def test_download_grant_proxies_attachment_content_and_forwards_validators
 
     response = await dashboard.download_grant(grant_token, request)
     assert isinstance(response, dashboard.PlaybackStreamingResponse)
-    body = b"".join(
-        [chunk async for chunk in cast(AsyncIterator[bytes], response.body_iterator)]
-    )
+    body = b"".join([chunk async for chunk in cast(AsyncIterator[bytes], response.body_iterator)])
 
     assert body == b"download"
     assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''Item.mkv"
@@ -1043,9 +1081,7 @@ async def test_create_item_download_requires_csrf_and_redirects_to_an_opaque_gra
         def __init__(self, _settings: Kanvas_Settings, user_id: int) -> None:
             assert user_id == 1
 
-        async def create_download_grant(
-            self, item_id: int, media_file_id: int
-        ) -> SimpleNamespace:
+        async def create_download_grant(self, item_id: int, media_file_id: int) -> SimpleNamespace:
             created.append((1, item_id, media_file_id))
             return SimpleNamespace(token="g" * 32)
 
@@ -4607,10 +4643,11 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "data-item-editor-tab-panel" in javascript
     assert "metadata-search-source" in javascript
     assert "artwork-fetch-source" in javascript
-    assert "Load poster choices" in javascript
+    assert "Load artwork choices" in javascript
     assert "data-item-artwork-fetch" in javascript
     assert "Provider default" in javascript
     assert "k-item-editor__artwork-group" in css
+    assert ".k-poster--landscape .k-poster__art" in css
     assert "Apply selected match" in javascript
     assert "tmdbEntryReferenceFromUrl" in javascript
     assert "selectMetadataMatchResult" in javascript
