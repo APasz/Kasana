@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 
 def empty_string_to_none(value: object) -> object:
@@ -90,6 +90,16 @@ class TMDBImagePayload(BaseModel):
     vote_average: float = Field(ge=0, le=10)
     vote_count: int = Field(ge=0)
 
+    @field_validator("file_path")
+    @classmethod
+    def file_path_is_not_blank(cls, value: str) -> str:
+        """Reject artwork records that cannot form a valid source URL."""
+
+        value = value.strip()
+        if not value:
+            raise ValueError("TMDB image paths must not be blank.")
+        return value
+
 
 class TMDBImagesPayload(BaseModel):
     """Poster variants associated with one movie or series."""
@@ -97,6 +107,38 @@ class TMDBImagesPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     posters: tuple[TMDBImagePayload, ...] = ()
+
+
+class TMDBImageConfiguration(BaseModel):
+    """The image URL components returned by TMDB's configuration endpoint."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    secure_base_url: AnyHttpUrl
+    poster_sizes: tuple[str, ...]
+    backdrop_sizes: tuple[str, ...]
+    still_sizes: tuple[str, ...]
+
+    @field_validator("poster_sizes", "backdrop_sizes", "still_sizes")
+    @classmethod
+    def image_sizes_are_valid(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if not values:
+            raise ValueError("TMDB image size lists must not be empty.")
+        for value in values:
+            if value == "original":
+                continue
+            width = value.removeprefix("w")
+            if width == value or not width.isdecimal() or int(width) < 1:
+                raise ValueError("TMDB image sizes must be widths or 'original'.")
+        return values
+
+
+class TMDBConfigurationPayload(BaseModel):
+    """The subset of TMDB's general configuration used to build image URLs."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    images: TMDBImageConfiguration
 
 
 class TMDBMoviePayload(BaseModel):

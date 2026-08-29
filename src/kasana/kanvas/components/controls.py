@@ -40,6 +40,7 @@ class IconName(StrEnum):
     COLLECTIONS = "collections"
     SEARCH = "search"
     ADMINISTRATION = "admin"
+    INFO = "info"
     PLAY = "play"
     PAUSE = "pause"
     REWIND = "rewind"
@@ -84,6 +85,7 @@ _ICON_PATHS: dict[IconName, str] = {
         "M12 3v3 M12 18v3 M3 12h3 M18 12h3 M5.6 5.6l2.1 2.1 M16.3 16.3l2.1 2.1 "
         "M18.4 5.6l-2.1 2.1 M7.7 16.3l-2.1 2.1 M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"
     ),
+    IconName.INFO: "M12 17v-6 M12 7.5v.01 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z",
     IconName.PLAY: "M8 5v14l11-7z",
     IconName.PAUSE: "M8 5v14 M16 5v14",
     IconName.REWIND: "M20 5v14l-7-7z M11 5v14l-7-7z",

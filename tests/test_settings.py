@@ -62,11 +62,15 @@ def test_shared_logging_writes_to_configured_file(tmp_path: Path) -> None:
 def test_tmdb_settings_read_typed_provider_environment(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("KASANA_KOURIER_TMDB_API_TOKEN", "test-token")
     monkeypatch.setenv("KASANA_KOURIER_TMDB_CONCURRENCY", "6")
+    monkeypatch.setenv("KASANA_KOURIER_TMDB_IMAGE_TARGET_WIDTH", "500")
+    monkeypatch.setenv("KASANA_KOURIER_TMDB_REQUESTS_PER_SECOND", "8")
 
     settings = cast(Callable[[], TMDBSettings], TMDBSettings)()
 
     assert settings.api_token.get_secret_value() == "test-token"
     assert settings.concurrency == 6
+    assert settings.image_target_width == 500
+    assert settings.requests_per_second == 8
 
 
 def test_fanart_settings_activate_when_a_credential_is_configured(
@@ -77,6 +81,7 @@ def test_fanart_settings_activate_when_a_credential_is_configured(
     monkeypatch.setenv("KASANA_KOURIER_FANART_API_KEY", "project-key")
     monkeypatch.setenv("KASANA_KOURIER_FANART_CLIENT_KEY", "personal-key")
     monkeypatch.setenv("KASANA_KOURIER_FANART_CONCURRENCY", "6")
+    monkeypatch.setenv("KASANA_KOURIER_FANART_REQUESTS_PER_SECOND", "3")
 
     settings = FanartSettings()
 
@@ -86,15 +91,14 @@ def test_fanart_settings_activate_when_a_credential_is_configured(
     assert settings.api_key.get_secret_value() == "project-key"
     assert settings.client_key.get_secret_value() == "personal-key"
     assert settings.concurrency == 6
+    assert settings.requests_per_second == 3
 
 
 @pytest.mark.parametrize(
     "variable",
     ("KASANA_KOURIER_FANART_API_KEY", "KASANA_KOURIER_FANART_CLIENT_KEY"),
 )
-def test_fanart_settings_reject_blank_credentials(
-    monkeypatch: MonkeyPatch, variable: str
-) -> None:
+def test_fanart_settings_reject_blank_credentials(monkeypatch: MonkeyPatch, variable: str) -> None:
     monkeypatch.setenv(variable, " \t ")
 
     with pytest.raises(ValidationError, match="credentials must not be blank"):

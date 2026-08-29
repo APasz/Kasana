@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from itertools import chain
 from pathlib import Path
 from typing import Final
 
@@ -17,12 +18,15 @@ from kasana.kourier.http import (
     AsyncSleeper,
     BoundedHttpProvider,
     Clock,
+    RequestPacer,
     request_error,
 )
 from kasana.kourier.settings import TMDBSettings
 from kasana.kourier.tmdb.constants import TMDB_PROVIDER
 from kasana.kourier.tmdb.mapping import (
+    TMDBImageUrls,
     artwork,
+    configured_image_urls,
     countries,
     episode_details,
     external_ids,
@@ -33,6 +37,7 @@ from kasana.kourier.tmdb.mapping import (
     series_search_result,
 )
 from kasana.kourier.tmdb.payloads import (
+    TMDBConfigurationPayload,
     TMDBEpisodePayload,
     TMDBImagesPayload,
     TMDBMoviePayload,
@@ -82,6 +87,8 @@ class TMDBProvider(BoundedHttpProvider):
         session: aiohttp.ClientSession | None = None,
         sleeper: AsyncSleeper = asyncio.sleep,
         clock: Clock | None = None,
+        request_pacer: RequestPacer | None = None,
+        image_urls: TMDBImageUrls | None = None,
     ) -> None:
         super().__init__(
             settings,
@@ -90,8 +97,11 @@ class TMDBProvider(BoundedHttpProvider):
             session=session,
             sleeper=sleeper,
             clock=clock,
+            request_pacer=request_pacer,
         )
         self.settings = settings
+        self._configured_image_urls = image_urls
+        self._image_urls_lock = asyncio.Lock()
 
     @property
     def capabilities(self) -> frozenset[ProviderCapability]:
@@ -109,23 +119,26 @@ class TMDBProvider(BoundedHttpProvider):
             ("search", "movie"), self._search_params(query, movie=True)
         )
         page: TMDBMovieSearchPage = self._parse_payload(TMDBMovieSearchPage, payload)
-        return tuple(
-            movie_search_result(entry, self.settings.image_base_url) for entry in page.results
+        image_urls = await self._image_urls_for(
+            path for entry in page.results for path in (entry.poster_path, entry.backdrop_path)
         )
+        return tuple(movie_search_result(entry, image_urls) for entry in page.results)
 
     async def search_series(self, query: SearchQuery) -> tuple[SearchResult, ...]:
         payload = await self._request_json(
             ("search", "tv"), self._search_params(query, movie=False)
         )
         page: TMDBSeriesSearchPage = self._parse_payload(TMDBSeriesSearchPage, payload)
-        return tuple(
-            series_search_result(entry, self.settings.image_base_url) for entry in page.results
+        image_urls = await self._image_urls_for(
+            path for entry in page.results for path in (entry.poster_path, entry.backdrop_path)
         )
+        return tuple(series_search_result(entry, image_urls) for entry in page.results)
 
     async def get_movie(self, item_reference: ProviderReference) -> MovieDetails:
         raw_id = self._tmdb_id(item_reference)
         payload = await self._request_json(("movie", raw_id), self._details_params())
         movie: TMDBMoviePayload = self._parse_payload(TMDBMoviePayload, payload)
+        image_urls = await self._image_urls_for((movie.poster_path, movie.backdrop_path))
         return MovieDetails(
             reference=reference(movie.id),
             title=movie.title,
@@ -133,10 +146,8 @@ class TMDBProvider(BoundedHttpProvider):
             translated_title=movie.title,
             overview=movie.overview,
             release_date=movie.release_date,
-            poster=artwork(movie.poster_path, ArtworkKind.POSTER, self.settings.image_base_url),
-            backdrop=artwork(
-                movie.backdrop_path, ArtworkKind.BACKDROP, self.settings.image_base_url
-            ),
+            poster=artwork(movie.poster_path, ArtworkKind.POSTER, image_urls),
+            backdrop=artwork(movie.backdrop_path, ArtworkKind.BACKDROP, image_urls),
             genres=genres(movie.genres),
             original_language=movie.original_language,
             countries=countries(movie.production_countries),
@@ -148,6 +159,7 @@ class TMDBProvider(BoundedHttpProvider):
         raw_id = self._tmdb_id(item_reference)
         payload = await self._request_json(("tv", raw_id), self._details_params())
         series: TMDBSeriesPayload = self._parse_payload(TMDBSeriesPayload, payload)
+        image_urls = await self._image_urls_for((series.poster_path, series.backdrop_path))
         return SeriesDetails(
             reference=reference(series.id),
             title=series.name,
@@ -155,10 +167,8 @@ class TMDBProvider(BoundedHttpProvider):
             translated_title=series.name,
             overview=series.overview,
             release_date=series.first_air_date,
-            poster=artwork(series.poster_path, ArtworkKind.POSTER, self.settings.image_base_url),
-            backdrop=artwork(
-                series.backdrop_path, ArtworkKind.BACKDROP, self.settings.image_base_url
-            ),
+            poster=artwork(series.poster_path, ArtworkKind.POSTER, image_urls),
+            backdrop=artwork(series.backdrop_path, ArtworkKind.BACKDROP, image_urls),
             genres=genres(series.genres),
             original_language=series.original_language,
             countries=countries(series.production_countries, series.origin_country),
@@ -177,6 +187,9 @@ class TMDBProvider(BoundedHttpProvider):
             ("tv", series_id, "season", str(season_number)), self._details_params()
         )
         season: TMDBSeasonPayload = self._parse_payload(TMDBSeasonPayload, payload)
+        image_urls = await self._image_urls_for(
+            chain((season.poster_path,), (episode.still_path for episode in season.episodes))
+        )
         series = reference(series_id)
         return SeasonDetails(
             reference=reference(season.id),
@@ -185,10 +198,9 @@ class TMDBProvider(BoundedHttpProvider):
             title=season.name,
             overview=season.overview,
             air_date=season.air_date,
-            poster=artwork(season.poster_path, ArtworkKind.POSTER, self.settings.image_base_url),
+            poster=artwork(season.poster_path, ArtworkKind.POSTER, image_urls),
             episodes=tuple(
-                episode_details(episode, series, self.settings.image_base_url)
-                for episode in season.episodes
+                episode_details(episode, series, image_urls) for episode in season.episodes
             ),
             external_ids=external_ids(season.id, season.external_ids),
         )
@@ -209,7 +221,8 @@ class TMDBProvider(BoundedHttpProvider):
             self._details_params(),
         )
         episode: TMDBEpisodePayload = self._parse_payload(TMDBEpisodePayload, payload)
-        return episode_details(episode, reference(series_id), self.settings.image_base_url)
+        image_urls = await self._image_urls_for((episode.still_path,))
+        return episode_details(episode, reference(series_id), image_urls)
 
     async def list_posters(
         self, item_reference: ProviderReference, media_kind: ProviderMediaKind
@@ -225,15 +238,15 @@ class TMDBProvider(BoundedHttpProvider):
             raise request_error(
                 self.provider_name, "TMDB poster variants require a movie or series reference."
             )
-        payload = await self._request_json((endpoint, raw_id, "images"), self._common_params())
+        payload = await self._request_json((endpoint, raw_id, "images"), self._image_params())
         images: TMDBImagesPayload = self._parse_payload(TMDBImagesPayload, payload)
+        if not images.posters:
+            return ()
+        image_urls = await self._image_urls()
         preferred_language = self.settings.language.partition("-")[0].lower()
-        variants = tuple(
-            poster_artwork(image, self.settings.image_base_url) for image in images.posters
-        )
         return tuple(
             sorted(
-                variants,
+                (poster_artwork(image, image_urls) for image in images.posters),
                 key=lambda artwork: (
                     0 if artwork.language == preferred_language else 1,
                     -(artwork.vote_count or 0),
@@ -269,6 +282,33 @@ class TMDBProvider(BoundedHttpProvider):
             self._endpoint_url(path_parts), self._api_headers(), parameters
         )
 
+    async def _image_urls(self) -> TMDBImageUrls:
+        if self._configured_image_urls is not None:
+            return self._configured_image_urls
+        async with self._image_urls_lock:
+            if self._configured_image_urls is None:
+                payload = await self._request_json(("configuration",), {})
+                configuration = self._parse_payload(TMDBConfigurationPayload, payload)
+                try:
+                    self._configured_image_urls = configured_image_urls(
+                        configuration.images,
+                        target_width=self.settings.image_target_width,
+                        use_original_images=self.settings.use_original_images,
+                    )
+                except ValueError as error:
+                    raise KourierError(
+                        ProviderErrorCategory.MALFORMED_RESPONSE,
+                        "TMDB returned unusable image configuration.",
+                        provider=self.provider_name,
+                    ) from error
+            image_urls = self._configured_image_urls
+        return image_urls
+
+    async def _image_urls_for(self, paths: Iterable[str | None]) -> TMDBImageUrls | None:
+        if not any(path is not None and path.strip() for path in paths):
+            return None
+        return await self._image_urls()
+
     def _api_headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.settings.api_token.get_secret_value()}",
@@ -288,6 +328,13 @@ class TMDBProvider(BoundedHttpProvider):
         parameters = self._common_params()
         parameters["append_to_response"] = "external_ids"
         return parameters
+
+    def _image_params(self) -> dict[str, str]:
+        preferred_language = self.settings.language.partition("-")[0].lower()
+        return {
+            "language": self.settings.language,
+            "include_image_language": f"{preferred_language},null",
+        }
 
     def _common_params(self) -> dict[str, str]:
         return {"language": self.settings.language, "region": self.settings.region}

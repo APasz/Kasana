@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -21,6 +21,7 @@ from kasana.kourier.http import (
     AsyncSleeper,
     BoundedHttpProvider,
     Clock,
+    RequestPacer,
     request_error,
 )
 from kasana.kourier.settings import FanartSettings
@@ -72,6 +73,7 @@ class FanartProvider(BoundedHttpProvider):
         session: aiohttp.ClientSession | None = None,
         sleeper: AsyncSleeper = asyncio.sleep,
         clock: Clock | None = None,
+        request_pacer: RequestPacer | None = None,
     ) -> None:
         if not settings.is_configured:
             msg = "Fanart.tv requires an API key or personal client key."
@@ -83,6 +85,7 @@ class FanartProvider(BoundedHttpProvider):
             session=session,
             sleeper=sleeper,
             clock=clock,
+            request_pacer=request_pacer,
         )
         self.settings = settings
 
@@ -126,24 +129,23 @@ class FanartProvider(BoundedHttpProvider):
         if season is None:
             return None
         response = await self._listing_payload(("tv", season.identifier), FanartTVPayload)
-        images = (
-            tuple(image for image in response.seasonposter if image.season == season.season_number)
-            if response is not None
-            else ()
+        return self._poster_listing(
+            season.provider_id,
+            ()
+            if response is None
+            else (image for image in response.seasonposter if image.season == season.season_number),
         )
-        return self._poster_listing(season.provider_id, images)
 
     def _poster_listing(
-        self, provider_id: str, images: tuple[FanartImagePayload, ...]
+        self, provider_id: str, images: Iterable[FanartImagePayload]
     ) -> PosterListing:
         preferred_language = self.settings.language.partition("-")[0].lower()
-        posters = tuple(poster_artwork(image) for image in images)
         return PosterListing(
             provider=self.provider_name,
             provider_id=provider_id,
             posters=tuple(
                 sorted(
-                    posters,
+                    (poster_artwork(image) for image in images),
                     key=lambda artwork: (
                         0 if artwork.language == preferred_language else 1,
                         -(artwork.vote_count or 0),

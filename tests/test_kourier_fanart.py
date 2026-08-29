@@ -15,6 +15,7 @@ from yarl import URL
 
 from kasana.kourier.errors import KourierError
 from kasana.kourier.fanart import FanartProvider
+from kasana.kourier.http import RequestPacer
 from kasana.kourier.settings import FanartSettings
 from kasana.shared.metadata import (
     ArtworkKind,
@@ -28,6 +29,14 @@ from kasana.shared.metadata import (
 
 type Sleeper = Callable[[float], Awaitable[None]]
 type Clock = Callable[[], datetime]
+
+
+async def _ignore_pacer_delay(delay: float) -> None:
+    del delay
+
+
+def _test_request_pacer() -> RequestPacer:
+    return RequestPacer(1_000_000_000.0, sleeper=_ignore_pacer_delay)
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,7 @@ def _settings(**changes: object) -> FanartSettings:
         "language": "en-AU",
         "timeout_seconds": 0.5,
         "concurrency": 2,
+        "requests_per_second": 4.0,
         "max_retries": 2,
         "retry_backoff_seconds": 0.1,
         "max_backoff_seconds": 1.0,
@@ -122,6 +132,7 @@ def _provider(
         session=cast(aiohttp.ClientSession, session),
         sleeper=sleeper,
         clock=clock,
+        request_pacer=_test_request_pacer(),
     )
     return provider, session
 

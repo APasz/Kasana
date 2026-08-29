@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from asyncio.locks import Lock, Semaphore
+import asyncio
+from asyncio.locks import Lock as AsyncLock
+from asyncio.locks import Semaphore
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from math import isfinite
 from pathlib import Path
+from threading import Lock as ThreadLock
+from time import monotonic
 from typing import Protocol, cast
 
 import aiohttp
@@ -19,6 +24,7 @@ from kasana.shared.metadata import ArtworkDownload, ProviderCapability, Provider
 
 type AsyncSleeper = Callable[[float], Awaitable[None]]
 type Clock = Callable[[], datetime]
+type MonotonicClock = Callable[[], float]
 
 KASANA_USER_AGENT = "Kasana/0.1 (+https://github.com/APasz/Kasana)"
 
@@ -36,6 +42,7 @@ class HttpSettings(RetrySettings, Protocol):
 
     timeout_seconds: float
     concurrency: int
+    requests_per_second: float
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,86 @@ class ArtworkDownloadResponse:
     size_bytes: int
 
 
+def _request_interval(requests_per_second: float) -> float:
+    if not isfinite(requests_per_second) or requests_per_second <= 0:
+        raise ValueError("Requests per second must be a finite positive number.")
+    interval_seconds = 1 / requests_per_second
+    if not isfinite(interval_seconds):
+        raise ValueError("Requests per second must be a finite positive number.")
+    return interval_seconds
+
+
+class RequestPacer:
+    """Serialise starts and provider-wide cooldowns at a bounded request rate."""
+
+    def __init__(
+        self,
+        requests_per_second: float,
+        *,
+        sleeper: AsyncSleeper = asyncio.sleep,
+        clock: MonotonicClock = monotonic,
+    ) -> None:
+        self._interval_seconds = _request_interval(requests_per_second)
+        self._sleeper = sleeper
+        self._clock = clock
+        self._lock = ThreadLock()
+        self._last_request_at: float | None = None
+        self._next_request_at = 0.0
+
+    async def wait(self) -> None:
+        """Wait until this request may start, including any shared cooldown."""
+
+        while True:
+            with self._lock:
+                now = self._clock()
+                delay = self._next_request_at - now
+                if delay <= 0:
+                    self._last_request_at = now
+                    self._next_request_at = now + self._interval_seconds
+                    return
+            await self._sleeper(delay)
+
+    async def defer(self, delay_seconds: float) -> None:
+        """Prevent new requests until a provider's rate-limit delay has elapsed."""
+
+        if not isfinite(delay_seconds):
+            raise ValueError("Request delay must be finite.")
+        if delay_seconds <= 0:
+            return
+        with self._lock:
+            self._next_request_at = max(self._next_request_at, self._clock() + delay_seconds)
+
+    def restrict_to(self, requests_per_second: float) -> None:
+        """Retain the strictest configured rate for a shared provider controller."""
+
+        interval_seconds = _request_interval(requests_per_second)
+        with self._lock:
+            if interval_seconds <= self._interval_seconds:
+                return
+            self._interval_seconds = interval_seconds
+            if self._last_request_at is not None:
+                self._next_request_at = max(
+                    self._next_request_at, self._last_request_at + interval_seconds
+                )
+
+
+_SHARED_REQUEST_PACERS: dict[str, RequestPacer] = {}
+_SHARED_REQUEST_PACERS_LOCK = ThreadLock()
+
+
+def shared_request_pacer(provider_name: str, requests_per_second: float) -> RequestPacer:
+    """Return the process-shared pace controller for a provider."""
+
+    with _SHARED_REQUEST_PACERS_LOCK:
+        pacer = _SHARED_REQUEST_PACERS.get(provider_name)
+        if pacer is None:
+            pacer = RequestPacer(requests_per_second)
+            _SHARED_REQUEST_PACERS[provider_name] = pacer
+        else:
+            pacer.restrict_to(requests_per_second)
+        return pacer
+
+
 class RetryPolicy:
     """Bounded exponential retry policy shared by JSON and artwork requests."""
 
@@ -68,11 +155,24 @@ class RetryPolicy:
         return True
 
     async def status(self, attempt: int, headers: Mapping[str, str]) -> bool:
-        if attempt >= self.settings.max_retries:
+        delay = self.status_delay(attempt, headers)
+        if delay is None:
             return False
-        retry_after = retry_after_seconds(headers, self.clock)
-        await self.sleeper(retry_after if retry_after is not None else self.backoff_delay(attempt))
+        await self.sleeper(delay)
         return True
+
+    def status_delay(self, attempt: int, headers: Mapping[str, str]) -> float | None:
+        """Return the required retry delay, or ``None`` when attempts are exhausted."""
+
+        if attempt >= self.settings.max_retries:
+            return None
+        return self.response_delay(attempt, headers)
+
+    def response_delay(self, attempt: int, headers: Mapping[str, str]) -> float:
+        """Return the server or bounded-backoff delay for an unsuccessful response."""
+
+        retry_after = retry_after_seconds(headers, self.clock)
+        return retry_after if retry_after is not None else self.backoff_delay(attempt)
 
     def backoff_delay(self, attempt: int) -> float:
         return min(
@@ -93,15 +193,18 @@ class BoundedHttpProvider:
         session: aiohttp.ClientSession | None,
         sleeper: AsyncSleeper,
         clock: Clock | None,
+        request_pacer: RequestPacer | None = None,
     ) -> None:
         self._provider_name = provider_name
         self._display_name = display_name
         self._session = session
         self._owns_session = session is None
-        self._session_lock = Lock()
+        self._session_lock = AsyncLock()
         self._semaphore = Semaphore(settings.concurrency)
         self._timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
         self._retry = RetryPolicy(settings, sleeper, clock or (lambda: datetime.now(UTC)))
+        self._requests_per_second = settings.requests_per_second
+        self._request_pacer = request_pacer
 
     @property
     def provider_name(self) -> str:
@@ -187,7 +290,7 @@ class BoundedHttpProvider:
                     provider=self.provider_name,
                 ) from error
             if 200 <= response.status < 300:
-                return response.body, response.headers.get("Content-Type")
+                return response.body, _header_value(response.headers, "Content-Type")
             if await self._retryable_status(attempt, response.status, response.headers):
                 continue
             raise self._response_error(response.status)
@@ -234,8 +337,17 @@ class BoundedHttpProvider:
         self, attempt: int, status: int, headers: Mapping[str, str]
     ) -> bool:
         if status == 429 or status >= 500:
+            if status == 429:
+                await self._pacer().defer(self._retry.response_delay(attempt, headers))
             return await self._retry.status(attempt, headers)
         return False
+
+    def _pacer(self) -> RequestPacer:
+        if self._request_pacer is None:
+            self._request_pacer = shared_request_pacer(
+                self.provider_name, self._requests_per_second
+            )
+        return self._request_pacer
 
     def _response_error(self, status: int) -> KourierError:
         if status == 429:
@@ -263,6 +375,7 @@ class BoundedHttpProvider:
     ) -> Response:
         session = await self._get_session()
         async with self._semaphore:
+            await self._pacer().wait()
             if parameters is None:
                 async with session.get(url, headers=headers, timeout=self._timeout) as reply:
                     return Response(reply.status, dict(reply.headers), await reply.read())
@@ -275,6 +388,7 @@ class BoundedHttpProvider:
         session = await self._get_session()
         headers = {"User-Agent": KASANA_USER_AGENT, "Accept": "image/*"}
         async with self._semaphore:
+            await self._pacer().wait()
             async with session.get(url, headers=headers, timeout=self._timeout) as reply:
                 return Response(reply.status, dict(reply.headers), await reply.read())
 
@@ -284,6 +398,7 @@ class BoundedHttpProvider:
         session = await self._get_session()
         headers = {"User-Agent": KASANA_USER_AGENT, "Accept": "image/*"}
         async with self._semaphore:
+            await self._pacer().wait()
             async with session.get(url, headers=headers, timeout=self._timeout) as reply:
                 response_headers = dict(reply.headers)
                 if not 200 <= reply.status < 300:
@@ -302,28 +417,47 @@ class BoundedHttpProvider:
                 return ArtworkDownloadResponse(
                     reply.status,
                     response_headers,
-                    response_headers.get("Content-Type"),
+                    _header_value(response_headers, "Content-Type"),
                     size_bytes,
                 )
 
 
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    value = headers.get(name)
+    if value is not None:
+        return value
+    folded_name = name.casefold()
+    return next(
+        (
+            header_value
+            for header_name, header_value in headers.items()
+            if header_name.casefold() == folded_name
+        ),
+        None,
+    )
+
+
 def retry_after_seconds(headers: Mapping[str, str], clock: Clock) -> float | None:
-    value = headers.get("Retry-After")
+    value = _header_value(headers, "Retry-After")
     if value is None:
         return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
+    value = value.strip()
+    if value.isascii() and value.isdecimal():
         try:
-            retry_time = parsedate_to_datetime(value)
-        except TypeError, ValueError:
+            delay_seconds = float(value)
+        except ValueError:
             return None
-        if retry_time.tzinfo is None:
-            retry_time = retry_time.replace(tzinfo=UTC)
-        now = clock()
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-        return max(0.0, (retry_time - now).total_seconds())
+        return delay_seconds if isfinite(delay_seconds) else None
+    try:
+        retry_time = parsedate_to_datetime(value)
+    except TypeError, ValueError:
+        return None
+    if retry_time.tzinfo is None:
+        retry_time = retry_time.replace(tzinfo=UTC)
+    now = clock()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return max(0.0, (retry_time - now).total_seconds())
 
 
 def decode_json(body: bytes, *, provider: str, display_name: str) -> Mapping[str, object]:

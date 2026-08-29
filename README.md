@@ -168,10 +168,10 @@ because restore replaces the local SQLite database and profile configuration.
 
 ## Metadata and artwork
 
-TMDB-backed commands need a v4 access token:
+TMDB-backed commands need an API Read Access Token:
 
 ```bash
-export KASANA_KOURIER_TMDB_API_TOKEN='your-tmdb-v4-access-token'
+export KASANA_KOURIER_TMDB_API_TOKEN='your-tmdb-api-read-access-token'
 uv run kasana-katalog metadata auto-match --root 1
 uv run kasana-katalog metadata review
 uv run kasana-katalog artwork fetch --root 1
@@ -189,6 +189,12 @@ export KASANA_KOURIER_FANART_CLIENT_KEY='your-fanart-personal-key'
 
 Fanart.tv's TV artwork is used only for matching local seasons. Its
 season-specific posters are never presented as generic series-poster choices.
+
+TMDB selects its configured scaled image variants for cache and picker downloads
+by default. Set `image_target_width` in `config.tmdb.json` to tune that target;
+set `use_original_images` only when full-resolution source files are required.
+Both providers pace requests process-wide and honour `Retry-After`; their
+`requests_per_second` defaults are 10 for TMDB and 4 for Fanart.tv.
 
 Matching is reviewable and conservative; fuzzy title similarity alone cannot
 auto-match. Downloaded artwork uses the configured `katalog.artwork_cache_path`

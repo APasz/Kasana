@@ -15,7 +15,7 @@ from kasana.kanvas.settings import Kanvas_Settings
 class NavigationItem:
     """One primary Kanvas destination."""
 
-    route: str | None
+    route: str
     label: str
     icon: IconName
 
@@ -26,6 +26,7 @@ _NAVIGATION = (
     NavigationItem("/collections", "Collections", IconName.COLLECTIONS),
     NavigationItem("/administration", "Administration", IconName.ADMINISTRATION),
 )
+_ABOUT_NAVIGATION = NavigationItem("/about", "About", IconName.INFO)
 
 
 def primary_navigation(
@@ -36,7 +37,7 @@ def primary_navigation(
     """Render desktop rail and mobile bottom navigation from one source of truth."""
 
     resolved_settings = settings or (Kanvas_Settings() if profile is not None else None)
-    _navigation("k-side-nav", active_route, profile, resolved_settings)
+    _navigation("k-side-nav", active_route, profile, resolved_settings, show_about=True)
     _navigation("k-bottom-nav", active_route, profile, resolved_settings)
 
 
@@ -45,6 +46,8 @@ def _navigation(
     active_route: str,
     profile: SessionProfile | None,
     settings: Kanvas_Settings | None = None,
+    *,
+    show_about: bool = False,
 ) -> None:
     with ui.element("nav").classes(class_name).props('aria-label="Primary navigation"'):
         for item in _NAVIGATION:
@@ -52,11 +55,7 @@ def _navigation(
                 profile is None or not profile.is_administrator
             ):
                 continue
-            active_class = " k-nav-link--active" if item.route == active_route else ""
-            properties = f'href="{item.route}" aria-label="{item.label}" title="{item.label}"'
-            with ui.element("a").classes(f"k-nav-link{active_class}").props(properties):
-                icon_svg(item.icon)
-                ui.label(item.label).classes("k-nav-link__label")
+            _navigation_link(item, active_route)
         if profile is not None and settings is not None:
             ui.element("kanvas-profile-menu").props(
                 " ".join(
@@ -76,3 +75,13 @@ def _navigation(
                     )
                 )
             )
+            if show_about:
+                _navigation_link(_ABOUT_NAVIGATION, active_route)
+
+
+def _navigation_link(item: NavigationItem, active_route: str) -> None:
+    active_class = " k-nav-link--active" if item.route == active_route else ""
+    properties = f'href="{item.route}" aria-label="{item.label}" title="{item.label}"'
+    with ui.element("a").classes(f"k-nav-link{active_class}").props(properties):
+        icon_svg(item.icon)
+        ui.label(item.label).classes("k-nav-link__label")

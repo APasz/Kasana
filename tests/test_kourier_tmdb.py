@@ -14,8 +14,11 @@ from pydantic import AnyHttpUrl
 from yarl import URL
 
 from kasana.kourier.errors import KourierError
+from kasana.kourier.http import RequestPacer
 from kasana.kourier.settings import TMDBSettings
 from kasana.kourier.tmdb import TMDBProvider
+from kasana.kourier.tmdb.mapping import TMDBImageUrls, configured_image_urls
+from kasana.kourier.tmdb.payloads import TMDBImageConfiguration
 from kasana.shared.metadata import (
     ArtworkKind,
     ArtworkReference,
@@ -28,6 +31,33 @@ from kasana.shared.metadata import (
 
 type Sleeper = Callable[[float], Awaitable[None]]
 type Clock = Callable[[], datetime]
+
+
+async def _ignore_pacer_delay(delay: float) -> None:
+    del delay
+
+
+_TEST_IMAGE_URLS = TMDBImageUrls(
+    poster=AnyHttpUrl("https://images.tmdb.test/w780"),
+    backdrop=AnyHttpUrl("https://images.tmdb.test/w780"),
+    still=AnyHttpUrl("https://images.tmdb.test/w300"),
+)
+
+
+def _test_request_pacer() -> RequestPacer:
+    return RequestPacer(1_000_000_000.0, sleeper=_ignore_pacer_delay)
+
+
+class _RecordingPacer(RequestPacer):
+    def __init__(self) -> None:
+        super().__init__(1.0)
+        self.deferred: list[float] = []
+
+    async def wait(self) -> None:
+        return None
+
+    async def defer(self, delay_seconds: float) -> None:
+        self.deferred.append(delay_seconds)
 
 
 @dataclass(frozen=True)
@@ -98,11 +128,13 @@ def _settings(**changes: object) -> TMDBSettings:
     values: dict[str, object] = {
         "api_token": "test-token",
         "base_url": "https://tmdb.test/3",
-        "image_base_url": "https://images.tmdb.test/original",
+        "image_target_width": 780,
+        "use_original_images": False,
         "language": "en-AU",
         "region": "AU",
         "timeout_seconds": 0.5,
         "concurrency": 2,
+        "requests_per_second": 10.0,
         "max_retries": 2,
         "retry_backoff_seconds": 0.1,
         "max_backoff_seconds": 1.0,
@@ -116,6 +148,8 @@ def _provider(
     *,
     sleeper: Sleeper = asyncio.sleep,
     clock: Clock | None = None,
+    request_pacer: RequestPacer | None = None,
+    image_urls: TMDBImageUrls | None = _TEST_IMAGE_URLS,
     **settings: object,
 ) -> tuple[TMDBProvider, _FakeSession]:
     session = _FakeSession(outcomes)
@@ -124,6 +158,8 @@ def _provider(
         session=cast(aiohttp.ClientSession, session),
         sleeper=sleeper,
         clock=clock,
+        request_pacer=request_pacer or _test_request_pacer(),
+        image_urls=image_urls,
     )
     return provider, session
 
@@ -226,7 +262,7 @@ async def test_successful_search_and_detail_mapping() -> None:
     assert movies[0].media_kind is ProviderMediaKind.MOVIE
     assert movies[0].poster is not None
     assert movies[0].poster.kind is ArtworkKind.POSTER
-    assert str(movies[0].poster.source_url) == "https://images.tmdb.test/original/poster.jpg"
+    assert str(movies[0].poster.source_url) == "https://images.tmdb.test/w780/poster.jpg"
     assert movie.release_date is not None
     assert movie.release_date.isoformat() == "2001-07-20"
     assert movie.countries[0].name == "Japan"
@@ -286,8 +322,96 @@ async def test_poster_variants_prefer_the_configured_language_and_keep_picker_me
     assert posters[0].language == "en"
     assert (posters[0].width, posters[0].height) == (2000, 3000)
     assert (posters[0].vote_average, posters[0].vote_count) == (7.5, 20)
-    assert str(posters[0].source_url) == "https://images.tmdb.test/original/english.jpg"
+    assert str(posters[0].source_url) == "https://images.tmdb.test/w780/english.jpg"
     assert session.calls[0][0].path == "/3/movie/11/images"
+    assert session.calls[0][1] == {
+        "language": "en-AU",
+        "include_image_language": "en,null",
+    }
+
+
+def test_configured_image_urls_choose_efficient_renditions_unless_original_is_opted_in() -> None:
+    configuration = TMDBImageConfiguration.model_validate(
+        {
+            "secure_base_url": "https://images.tmdb.test/t/p/",
+            "poster_sizes": ["w92", "w500", "original"],
+            "backdrop_sizes": ["w300", "w780", "original"],
+            "still_sizes": ["w92", "w300", "original"],
+        }
+    )
+
+    picker_urls = configured_image_urls(configuration, target_width=600, use_original_images=False)
+    original_urls = configured_image_urls(configuration, target_width=600, use_original_images=True)
+
+    assert str(picker_urls.poster) == "https://images.tmdb.test/t/p/w500"
+    assert str(picker_urls.backdrop) == "https://images.tmdb.test/t/p/w300"
+    assert str(picker_urls.still) == "https://images.tmdb.test/t/p/w300"
+    assert str(original_urls.poster) == "https://images.tmdb.test/t/p/original"
+
+
+async def test_image_urls_are_loaded_once_from_tmdb_configuration() -> None:
+    provider, session = _provider(
+        [
+            _json_response(
+                {
+                    "results": [
+                        {
+                            "id": 11,
+                            "title": "Spirited Away",
+                            "poster_path": "/poster.jpg",
+                            "backdrop_path": "/backdrop.jpg",
+                        }
+                    ]
+                }
+            ),
+            _json_response(
+                {
+                    "images": {
+                        "secure_base_url": "https://images.tmdb.test/t/p/",
+                        "poster_sizes": ["w92", "w500", "original"],
+                        "backdrop_sizes": ["w300", "w780", "original"],
+                        "still_sizes": ["w92", "w300", "original"],
+                    }
+                }
+            ),
+            _json_response({"results": []}),
+        ],
+        image_urls=None,
+        image_target_width=600,
+    )
+
+    results = await provider.search_movies(SearchQuery(query="Spirited Away"))
+    subsequent_results = await provider.search_movies(SearchQuery(query="Ponyo"))
+
+    assert results[0].poster is not None
+    assert results[0].backdrop is not None
+    assert subsequent_results == ()
+    assert str(results[0].poster.source_url) == "https://images.tmdb.test/t/p/w500/poster.jpg"
+    assert str(results[0].backdrop.source_url) == "https://images.tmdb.test/t/p/w300/backdrop.jpg"
+    assert [url.path for url, _, _ in session.calls] == [
+        "/3/search/movie",
+        "/3/configuration",
+        "/3/search/movie",
+    ]
+
+
+async def test_empty_search_does_not_request_image_configuration() -> None:
+    provider, session = _provider([_json_response({"results": []})], image_urls=None)
+
+    assert await provider.search_movies(SearchQuery(query="Missing")) == ()
+    assert [url.path for url, _, _ in session.calls] == ["/3/search/movie"]
+
+
+async def test_empty_poster_gallery_does_not_request_image_configuration() -> None:
+    provider, session = _provider([_json_response({"posters": []})], image_urls=None)
+
+    assert (
+        await provider.list_posters(
+            ProviderReference(provider="tmdb", raw_id="11"), ProviderMediaKind.MOVIE
+        )
+        == ()
+    )
+    assert [url.path for url, _, _ in session.calls] == ["/3/movie/11/images"]
 
 
 async def test_malformed_payload_is_a_typed_error() -> None:
@@ -303,10 +427,33 @@ async def test_malformed_payload_is_a_typed_error() -> None:
         await provider.search_movies(SearchQuery(query="Broken JSON"))
     assert invalid_json_error.value.category is ProviderErrorCategory.MALFORMED_RESPONSE
 
+    provider, _ = _provider(
+        [
+            _json_response(
+                {
+                    "posters": [
+                        {
+                            "file_path": "  ",
+                            "width": 1,
+                            "height": 1,
+                            "vote_average": 0,
+                            "vote_count": 0,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    with pytest.raises(KourierError) as blank_path_error:
+        await provider.list_posters(
+            ProviderReference(provider="tmdb", raw_id="11"), ProviderMediaKind.MOVIE
+        )
+    assert blank_path_error.value.category is ProviderErrorCategory.MALFORMED_RESPONSE
+
 
 async def test_artwork_reuses_the_provider_session_and_maps_bytes() -> None:
     provider, session = _provider(
-        [_FakeResponse(status=200, headers={"Content-Type": "image/jpeg"}, body=b"image")]
+        [_FakeResponse(status=200, headers={"content-type": "image/jpeg"}, body=b"image")]
     )
     reference = ArtworkReference(
         provider="tmdb",
@@ -326,7 +473,7 @@ async def test_artwork_reuses_the_provider_session_and_maps_bytes() -> None:
 
 async def test_artwork_streaming_uses_a_temporary_destination(tmp_path: Path) -> None:
     provider, _ = _provider(
-        [_FakeResponse(status=200, headers={"Content-Type": "image/png"}, body=b"chunked")]
+        [_FakeResponse(status=200, headers={"content-type": "image/png"}, body=b"chunked")]
     )
     reference = ArtworkReference(
         provider="tmdb",
@@ -394,6 +541,21 @@ async def test_rate_limiting_honours_retry_after() -> None:
         await provider.search_movies(SearchQuery(query="Still limited"))
     assert rate_limit_error.value.category is ProviderErrorCategory.RATE_LIMITED
     assert len(session.calls) == 2
+
+
+async def test_rate_limit_cooldown_is_shared_even_when_no_retry_remains() -> None:
+    pacer = _RecordingPacer()
+    provider, _ = _provider(
+        [_json_response({}, status=429, headers={"Retry-After": "3"})],
+        max_retries=0,
+        request_pacer=pacer,
+    )
+
+    with pytest.raises(KourierError) as error:
+        await provider.search_movies(SearchQuery(query="Still limited"))
+
+    assert error.value.category is ProviderErrorCategory.RATE_LIMITED
+    assert pacer.deferred == [3.0]
 
 
 async def test_transient_status_and_connection_errors_retry_with_bounded_backoff() -> None:

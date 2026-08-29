@@ -93,6 +93,7 @@ from kasana.kanvas.routes import collections as collections_route
 from kasana.kanvas.routes import home as home_route
 from kasana.kanvas.routes import item as item_route
 from kasana.kanvas.routes import library as library_route
+from kasana.kanvas.routes.about import render_about
 from kasana.kanvas.routes.administration import render_administration
 from kasana.kanvas.routes.library import render_library
 from kasana.kanvas.services.katalog import (
@@ -4216,6 +4217,11 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
             for element in owner_client.elements.values()
             if element.tag == "kanvas-profile-menu"
         ]
+        owner_about_links = [
+            element
+            for element in owner_client.elements.values()
+            if _element_props(element).get("href") == "/about"
+        ]
 
     with Client(page("")) as member_client:
         primary_navigation("/library", member)
@@ -4223,6 +4229,11 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
             element
             for element in member_client.elements.values()
             if "k-administration-shortcut" in _element_classes(element)
+        ]
+        member_about_links = [
+            element
+            for element in member_client.elements.values()
+            if _element_props(element).get("href") == "/about"
         ]
 
     assert owner_shortcuts == []
@@ -4238,6 +4249,56 @@ def test_profile_controls_do_not_duplicate_the_administration_navigation() -> No
         for profile_menu in owner_profile_menus
     } == {"false"}
     assert member_shortcuts == []
+    assert len(owner_about_links) == 1
+    assert len(member_about_links) == 1
+    assert _element_props(owner_about_links[0])["aria-label"] == "About"
+
+
+def test_about_navigation_is_active_only_in_the_desktop_sidebar() -> None:
+    with Client(page("")) as client:
+        primary_navigation("/about", _selected_profile(), Kanvas_Settings())
+        about_links = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("href") == "/about"
+        ]
+
+    assert len(about_links) == 1
+    assert "k-nav-link--active" in _element_classes(about_links[0])
+    assert "k-side-nav" in _element_classes(_parent_element(about_links[0]))
+
+
+def test_about_page_includes_project_and_required_notices() -> None:
+    with Client(page("")) as client:
+        render_about(Kanvas_Settings(), _selected_profile())
+        links = {
+            _element_props(element)["href"]
+            for element in client.elements.values()
+            if element.tag == "a" and "href" in _element_props(element)
+        }
+        copy = {element.text for element in client.elements.values() if isinstance(element, Label)}
+        tmdb_logo = next(
+            element
+            for element in client.elements.values()
+            if element.tag == "img"
+            and _element_props(element).get("src") == "/_kanvas/tmdb-logo.svg"
+        )
+
+    assert {
+        "https://github.com/APasz/Kasana",
+        "https://github.com/APasz/Kasana/blob/main/LICENSE",
+        "https://www.themoviedb.org",
+        "https://fanart.tv",
+        "https://creativecommons.org/licenses/by/3.0/",
+        "/_kanvas/libass/LICENSE",
+        "/_kanvas/libass/COPYRIGHT",
+    } <= links
+    assert {
+        "Created by APasz",
+        "Released under the MIT License.",
+        "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+    } <= copy
+    assert _element_props(tmdb_logo).get("alt") == "TMDB"
 
 
 def test_item_actions_place_a_versioned_download_form_beside_play() -> None:
@@ -4565,6 +4626,7 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
 
     assert {
         "/",
+        "/about",
         "/library",
         "/item/{item_id}",
         "/kanvas/actions/items/{item_id}/download",

@@ -52,6 +52,7 @@ from kasana.kanvas.playback_compatibility import (
     classify_playback,
 )
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile, is_profile_access_error
+from kasana.kanvas.routes.about import render_about
 from kasana.kanvas.routes.administration import AdministrationSection, render_administration
 from kasana.kanvas.routes.collections import (
     render_collection_detail,
@@ -2601,6 +2602,7 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
 
     _kanvas_page("/profiles", "Kanvas · Profiles")(profiles_page)
     _kanvas_page("/", "Kanvas")(home_page)
+    _kanvas_page("/about", "Kanvas · About")(about_page)
     _kanvas_page("/library", "Kanvas · Library")(library_page)
     _kanvas_page("/item/{item_id}", "Kanvas · Item")(item_page)
     _kanvas_page("/play/item/{item_id}", "Kanvas · Playback")(play_item_page)
@@ -2673,6 +2675,15 @@ async def home_page(request: Request) -> Response | None:
     if isinstance(profile, RedirectResponse):
         return profile
     await render_home(_settings, profile)
+
+
+async def about_page(request: Request) -> Response | None:
+    """Serve the project information and notices page."""
+
+    profile = await _page_profile(request)
+    if isinstance(profile, RedirectResponse):
+        return profile
+    render_about(_settings, profile)
 
 
 async def library_page(request: Request) -> Response | None:

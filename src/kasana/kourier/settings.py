@@ -26,11 +26,13 @@ class TMDBSettings(KSettings):
 
     api_token: SecretStr
     base_url: AnyHttpUrl = AnyHttpUrl("https://api.themoviedb.org/3")
-    image_base_url: AnyHttpUrl = AnyHttpUrl("https://image.tmdb.org/t/p/original")
+    image_target_width: int = Field(default=780, ge=1, le=10_000)
+    use_original_images: bool = False
     language: str = Field(default="en-AU", min_length=2, max_length=32)
     region: str = Field(default="AU", min_length=2, max_length=3)
     timeout_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
     concurrency: int = Field(default=4, ge=1, le=32)
+    requests_per_second: float = Field(default=10.0, gt=0.0, le=40.0)
     max_retries: int = Field(default=2, ge=0, le=5)
     retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
     max_backoff_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
@@ -50,6 +52,7 @@ class FanartSettings(KSettings):
     language: str = Field(default="en-AU", min_length=2, max_length=32)
     timeout_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
     concurrency: int = Field(default=4, ge=1, le=32)
+    requests_per_second: float = Field(default=4.0, gt=0.0, le=40.0)
     max_retries: int = Field(default=2, ge=0, le=5)
     retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
     max_backoff_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
