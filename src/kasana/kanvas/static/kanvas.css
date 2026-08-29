@@ -1143,6 +1143,7 @@ kanvas-poster {
 .k-player:fullscreen .k-player__timeline-preview { bottom: calc(100% + var(--k-player-fullscreen-details-height) + 6px); }
 .k-player:fullscreen .k-player__control--next { display: grid; }
 .k-player:fullscreen .k-player__control--next[hidden] { display: none; }
+.k-player:fullscreen [data-player-action="theatre"] { display: none; }
 .k-player:fullscreen.k-player--controls-hidden .k-player__progress,
 .k-player:fullscreen.k-player--controls-hidden .k-player__details {
     opacity: 0;

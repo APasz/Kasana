@@ -820,6 +820,7 @@ def test_fullscreen_player_places_controls_above_the_progress_bar() -> None:
         ".k-player:fullscreen .k-player__timeline-preview { bottom: calc(100% + "
         "var(--k-player-fullscreen-details-height) + 6px); }" in stylesheet
     )
+    assert '.k-player:fullscreen [data-player-action="theatre"] { display: none; }' in stylesheet
 
 
 def test_fullscreen_player_shows_the_local_time_with_seconds() -> None:
