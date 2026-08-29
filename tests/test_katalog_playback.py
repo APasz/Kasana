@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import socket
 from collections.abc import AsyncIterator
@@ -21,7 +22,11 @@ from starlette.types import Message, Scope
 
 from kasana.katalog.api.app import create_app
 from kasana.katalog.api.runtime import KatalogApiRuntime
-from kasana.katalog.api.service import MediaTransferFile
+from kasana.katalog.api.service import (
+    MediaTransferFile,
+    _is_within_session_progress_completion_grace_period,  # pyright: ignore[reportPrivateUsage]
+    _session_progress_grace_period_seconds,  # pyright: ignore[reportPrivateUsage]
+)
 from kasana.katalog.api.transfer import BoundedFileResponse, RangeStreamingFileTransferPolicy
 from kasana.katalog.client import KatalogClient
 from kasana.katalog.database import KatalogDatabase
@@ -43,6 +48,7 @@ from kasana.katalog.public import (
     PlaybackContextKind,
     PlaybackPlanEntry,
     PlaybackPlanRequest,
+    PlaybackSessionCompletionRequest,
     PlaybackSessionResponse,
     PlaybackStatesRequest,
     SessionProgressUpdate,
@@ -95,6 +101,37 @@ def test_playback_session_response_accepts_the_configurable_queue_maximum() -> N
     )
 
     assert len(session.entries) == MAX_PLAYBACK_QUEUE_SIZE
+
+
+@pytest.mark.parametrize(
+    ("duration_seconds", "expected_grace_period_seconds"),
+    (
+        (None, 30.0),
+        (0.0, 30.0),
+        (40.0, 4.0),
+        (120.0, 12.0),
+        (300.0, 30.0),
+        (600.0, 30.0),
+    ),
+)
+def test_session_progress_grace_period_scales_with_known_duration(
+    duration_seconds: float | None, expected_grace_period_seconds: float
+) -> None:
+    assert _session_progress_grace_period_seconds(duration_seconds) == pytest.approx(
+        expected_grace_period_seconds
+    )
+
+
+@pytest.mark.parametrize("duration_seconds", (None, 0.0))
+def test_session_progress_completion_requires_a_positive_duration(
+    duration_seconds: float | None,
+) -> None:
+    assert not _is_within_session_progress_completion_grace_period(0.0, duration_seconds)
+
+
+def test_session_progress_completion_uses_the_thirty_second_crossover() -> None:
+    assert not _is_within_session_progress_completion_grace_period(269.9, 300.0)
+    assert _is_within_session_progress_completion_grace_period(270.0, 300.0)
 
 
 async def test_playback_language_options_are_derived_from_available_tracks(
@@ -982,6 +1019,35 @@ async def test_queue_completion_transitions_collection_playback_atomically(
     assert current_session["current_item"]["saved_resume_position_seconds"] == 0
 
 
+async def test_expected_session_completion_preserves_the_current_entry_and_is_logged(
+    playback_fixture: PlaybackFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="kasana.katalog.api.service")
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    launch = await _create_plan(
+        playback_fixture,
+        {"kind": "watch_order", "watch_order_id": ids["watch_order"]},
+    )
+    session = (await client.get(f"/api/v1/playback/plans/{launch}")).json()
+    completion_path = f"/api/v1/playback/sessions/{session['id']}/complete"
+
+    completed = await client.post(completion_path, json={"expected_entry_position": 0})
+
+    assert completed.status_code == 200
+    assert completed.json()["event"]["kind"] == "completed"
+    assert completed.json()["session"]["current_entry_position"] == 0
+    current_session = (await client.get(f"/api/v1/playback/sessions/{session['id']}")).json()
+    assert current_session["current_entry_position"] == 0
+    assert current_session["current_item"]["item_id"] == ids["movie"]
+    assert "Playback completion source=explicit" in caplog.text
+    assert "already_completed=False" in caplog.text
+
+    stale_completion = await client.post(completion_path, json={"expected_entry_position": 1})
+
+    assert stale_completion.status_code == 422
+
+
 async def test_stopping_an_advanced_queue_then_marking_its_current_item_updates_on_deck(
     playback_fixture: PlaybackFixture,
 ) -> None:
@@ -1020,9 +1086,11 @@ async def test_stopping_an_advanced_queue_then_marking_its_current_item_updates_
     )
 
 
-async def test_session_progress_uses_start_and_completion_grace_periods(
+async def test_session_progress_uses_scaled_start_and_completion_grace_periods(
     playback_fixture: PlaybackFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="kasana.katalog.api.service")
     client = playback_fixture.client
     ids = playback_fixture.ids
     launch = await _create_plan(
@@ -1033,26 +1101,102 @@ async def test_session_progress_uses_start_and_completion_grace_periods(
     progress_path = f"/api/v1/playback/sessions/{session['id']}/progress"
     state_path = f"/api/v1/users/{ids['user']}/items/{ids['movie']}/progress"
 
-    opening_progress = await client.put(progress_path, json={"position_seconds": 29.9})
+    opening_progress = await client.put(progress_path, json={"position_seconds": 11.9})
 
     assert opening_progress.status_code == 200
     assert opening_progress.json()["event"] is None
     assert (await client.get(state_path)).json() is None
 
-    first_saved_progress = await client.put(progress_path, json={"position_seconds": 30})
+    first_saved_progress = await client.put(progress_path, json={"position_seconds": 12})
 
     assert first_saved_progress.status_code == 200
     assert first_saved_progress.json()["event"]["kind"] == "progress"
     first_saved_state = (await client.get(state_path)).json()
     assert first_saved_state["completed"] is False
-    assert first_saved_state["position_seconds"] == 30
+    assert first_saved_state["position_seconds"] == 12
 
-    ending_progress = await client.put(progress_path, json={"position_seconds": 90})
+    not_quite_ending_progress = await client.put(progress_path, json={"position_seconds": 90})
+
+    assert not_quite_ending_progress.status_code == 200
+    state_before_completion = (await client.get(state_path)).json()
+    assert state_before_completion["completed"] is False
+    assert state_before_completion["position_seconds"] == 90
+
+    ending_progress = await client.put(progress_path, json={"position_seconds": 108})
 
     assert ending_progress.status_code == 200
     final_state = (await client.get(state_path)).json()
     assert final_state["completed"] is True
-    assert final_state["position_seconds"] == 90
+    assert final_state["position_seconds"] == 108
+    assert "Playback completion source=progress_grace" in caplog.text
+
+
+async def test_session_progress_short_media_uses_scaled_start_grace_period(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as database_session:
+        media_file = database_session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == ids["movie"])
+        )
+        assert media_file is not None
+        media_file.duration_seconds = 40.0
+
+    launch = await _create_plan(
+        playback_fixture,
+        {"kind": "standalone", "item_id": ids["movie"]},
+    )
+    session = (await client.get(f"/api/v1/playback/plans/{launch}")).json()
+    progress_path = f"/api/v1/playback/sessions/{session['id']}/progress"
+    state_path = f"/api/v1/users/{ids['user']}/items/{ids['movie']}/progress"
+
+    opening_progress = await client.put(progress_path, json={"position_seconds": 3.9})
+
+    assert opening_progress.status_code == 200
+    assert opening_progress.json()["event"] is None
+    assert (await client.get(state_path)).json() is None
+
+    first_saved_progress = await client.put(progress_path, json={"position_seconds": 4})
+
+    assert first_saved_progress.status_code == 200
+    assert first_saved_progress.json()["event"]["kind"] == "progress"
+    saved_state = (await client.get(state_path)).json()
+    assert saved_state["completed"] is False
+    assert saved_state["position_seconds"] == 4
+
+
+async def test_session_progress_completion_grace_period_is_capped_at_thirty_seconds(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    client = playback_fixture.client
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as database_session:
+        media_file = database_session.scalar(
+            select(MediaFile).where(MediaFile.library_item_id == ids["movie"])
+        )
+        assert media_file is not None
+        media_file.duration_seconds = 600.0
+
+    launch = await _create_plan(
+        playback_fixture,
+        {"kind": "standalone", "item_id": ids["movie"]},
+    )
+    session = (await client.get(f"/api/v1/playback/plans/{launch}")).json()
+    progress_path = f"/api/v1/playback/sessions/{session['id']}/progress"
+    state_path = f"/api/v1/users/{ids['user']}/items/{ids['movie']}/progress"
+
+    sixty_seconds_remaining = await client.put(progress_path, json={"position_seconds": 540})
+
+    assert sixty_seconds_remaining.status_code == 200
+    state_before_completion = (await client.get(state_path)).json()
+    assert state_before_completion["completed"] is False
+
+    thirty_seconds_remaining = await client.put(progress_path, json={"position_seconds": 570})
+
+    assert thirty_seconds_remaining.status_code == 200
+    final_state = (await client.get(state_path)).json()
+    assert final_state["completed"] is True
 
 
 async def test_progress_seek_completion_expiry_and_unavailable_items(
@@ -1391,6 +1535,11 @@ async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFi
                 playback_session.id, SessionProgressUpdate(position_seconds=1.0)
             )
             assert update.session.current_item is not None
+            completed = await client.complete_playback_session(
+                playback_session.id,
+                PlaybackSessionCompletionRequest(expected_entry_position=0),
+            )
+            assert completed.event.kind.value == "completed"
             body = b"".join(
                 [
                     chunk

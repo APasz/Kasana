@@ -18,6 +18,7 @@ from kasana.katalog.public import (
     ManualQueuePlaybackContext,
     PlaybackPlanRequest,
     PlaybackSessionCloseResult,
+    PlaybackSessionCompletionRequest,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -155,6 +156,19 @@ class KanvasPlaybackService:
                 PlaybackSessionTransitionRequest(expected_entry_position=expected_entry_position),
             )
         return self._owned_session(transitioned)
+
+    async def complete_current_playback_entry(
+        self, session_id: str, expected_entry_position: int
+    ) -> None:
+        """Explicitly complete an owned entry while leaving the queue position unchanged."""
+
+        async with self._client() as client:
+            session = await client.get_playback_session(session_id)
+            self._owned_session(session)
+            await client.complete_playback_session(
+                session_id,
+                PlaybackSessionCompletionRequest(expected_entry_position=expected_entry_position),
+            )
 
     async def close_playback_session(self, session_id: str) -> PlaybackSessionCloseResult:
         """Close an owned browser session and return its final current entry."""

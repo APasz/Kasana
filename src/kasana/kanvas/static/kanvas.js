@@ -4495,20 +4495,27 @@
         releaseVideoHeight();
         void reconnectPlaybackStream();
       });
+      const postPlaybackCompletion = async (action) => {
+        const response = await fetch(
+          `/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/${action}`,
+          {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            credentials: 'same-origin',
+            body: JSON.stringify({entryPosition}),
+          }
+        );
+        if (!response.ok) throw new Error('Completion failed');
+        return response.status === 204 ? null : response.json();
+      };
       const completeAndAdvancePlayback = async () => {
         if (completing) return;
         completing = true;
         setQueueNextBusy(true);
         status.textContent = 'Completing playback…';
         try {
-          const response = await fetch(`/kanvas/playback/sessions/${encodeURIComponent(sessionId)}/complete`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-            credentials: 'same-origin',
-            body: JSON.stringify({entryPosition}),
-          });
-          const payload = await response.json();
-          if (!response.ok) throw new Error('Completion failed');
+          const payload = await postPlaybackCompletion('complete');
+          if (payload === null) throw new Error('Completion response is missing');
           const nextUrl = itemPageUrl(payload.nextUrl);
           if (nextUrl !== null && !isPlayerFullscreen()) {
             window.location.assign(itemPageAutoplayUrl(nextUrl));
@@ -4537,6 +4544,21 @@
           status.textContent = 'Playback completion could not be saved.';
         }
       };
+      const completeCurrentPlayback = async () => {
+        if (completing) return;
+        completing = true;
+        setQueueNextBusy(true);
+        status.textContent = 'Completing playback…';
+        try {
+          await postPlaybackCompletion('complete-current');
+          status.textContent = 'Playback complete. Select Play next to continue.';
+        } catch (_) {
+          status.textContent = 'Playback completion could not be saved.';
+        } finally {
+          completing = false;
+          setQueueNextBusy(false);
+        }
+      };
       const onQueueNext = (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -4547,7 +4569,7 @@
         if (!hasQueuedNextItem || autoplayNext) {
           void completeAndAdvancePlayback();
         } else {
-          status.textContent = 'Playback complete. Select Play next to continue.';
+          void completeCurrentPlayback();
         }
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);

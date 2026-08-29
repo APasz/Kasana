@@ -1430,13 +1430,14 @@ async function testAutoplayNextIsScopedToTheCurrentQueueItem() {
   assert.equal(autoplayNextControl.checked, false);
 
   const completionCallsBeforeEnd = fetchCalls.filter(
-    (call) => String(call.url).includes('/complete')
+    (call) => String(call.url).endsWith('/complete-current')
   ).length;
   video.emit('ended');
   await nextTick();
+  await nextTick();
   assert.equal(
-    fetchCalls.filter((call) => String(call.url).includes('/complete')).length,
-    completionCallsBeforeEnd
+    fetchCalls.filter((call) => String(call.url).endsWith('/complete-current')).length,
+    completionCallsBeforeEnd + 1
   );
   assert.equal(status.textContent, 'Playback complete. Select Play next to continue.');
 

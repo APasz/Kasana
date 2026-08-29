@@ -1125,6 +1125,12 @@ class SessionProgressUpdate(APIModel):
     expected_entry_position: int | None = Field(default=None, ge=0)
 
 
+class PlaybackSessionCompletionRequest(APIModel):
+    """Identify the current queue entry a player wants to complete."""
+
+    expected_entry_position: int = Field(ge=0)
+
+
 class PlaybackSessionTransitionRequest(APIModel):
     """Identify the queue entry a player has finished before requesting a transition."""
 

@@ -561,6 +561,40 @@ async def test_browser_completion_returns_the_next_item_playback_page(
 
 
 @pytest.mark.asyncio
+async def test_browser_current_completion_preserves_the_queue_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = SimpleNamespace(user=SimpleNamespace(id=1))
+    calls: list[tuple[str, int]] = []
+
+    class FakePlaybackService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        async def complete_current_playback_entry(
+            self, session_id: str, expected_entry_position: int
+        ) -> None:
+            calls.append((session_id, expected_entry_position))
+
+    class JsonRequest:
+        async def json(self) -> dict[str, int]:
+            return {"entryPosition": 0}
+
+    async def require_profile(_request: Request) -> object:
+        return profile
+
+    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
+
+    response = await dashboard.complete_current_playback(
+        "s" * 32, cast(Request, JsonRequest())
+    )
+
+    assert response.status_code == 204
+    assert calls == [("s" * 32, 0)]
+
+
+@pytest.mark.asyncio
 async def test_explicit_start_is_retained_when_playback_redirects_to_its_current_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

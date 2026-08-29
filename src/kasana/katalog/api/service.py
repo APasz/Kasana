@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import re
 import secrets
@@ -127,7 +128,8 @@ from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
-    PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS,
+    PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_DURATION_FRACTION,
+    PLAYBACK_SESSION_PROGRESS_MAX_GRACE_PERIOD_SECONDS,
 )
 from kasana.katalog.models import (
     AuditCategory,
@@ -197,6 +199,7 @@ from kasana.katalog.user_configuration import (
 )
 
 _MAX_PAGE_SIZE = 100
+_LOGGER = logging.getLogger(__name__)
 _SEASON_DIRECTORY = re.compile(r"^(?:season|volume)\s*(?P<number>\d{1,3})$", re.IGNORECASE)
 _SEASON_EPISODE_MARKER = re.compile(
     r"(?:^|[. _-])s(?P<season>\d{1,2})[. _-]*e(?P<episode>\d{1,3})(?:$|[. _-])",
@@ -2407,7 +2410,9 @@ class KatalogQueryService:
             duration = _progress_duration(media_file, existing_state, update.position_seconds)
             if update.position_seconds > duration:
                 raise CatalogueValidationError("Playback position exceeds the media duration.")
-            if _is_within_session_progress_start_grace_period(update.position_seconds):
+            if _is_within_session_progress_start_grace_period(
+                update.position_seconds, media_file.duration_seconds
+            ):
                 return PlaybackProgressResult(
                     session=self._playback_session_response(session, playback_session, now)
                 )
@@ -2424,6 +2429,9 @@ class KatalogQueryService:
             completed = _is_within_session_progress_completion_grace_period(
                 update.position_seconds, media_file.duration_seconds
             )
+            completed_by_progress_grace = completed and (
+                existing_state is None or not existing_state.completed
+            )
             try:
                 record_playback_progress(
                     session,
@@ -2432,9 +2440,7 @@ class KatalogQueryService:
                     position_seconds=update.position_seconds,
                     duration_seconds=duration,
                     completed=completed,
-                    increment_play_count=(
-                        completed and (existing_state is None or not existing_state.completed)
-                    ),
+                    increment_play_count=completed_by_progress_grace,
                     played_at=now,
                 )
             except ValueError as error:
@@ -2447,6 +2453,15 @@ class KatalogQueryService:
                 position_seconds=update.position_seconds,
                 occurred_at=now,
             )
+            if completed_by_progress_grace:
+                _LOGGER.info(
+                    "Playback completion source=progress_grace session_id=%s "
+                    "entry_position=%s position_seconds=%.3f duration_seconds=%.3f",
+                    playback_session.id,
+                    entry.position,
+                    update.position_seconds,
+                    duration,
+                )
             return PlaybackProgressResult(
                 session=self._playback_session_response(session, playback_session, now),
                 event=_playback_session_event(event),
@@ -2506,13 +2521,21 @@ class KatalogQueryService:
 
         return self._database.run_transaction(advance)
 
-    def complete_playback_session(self, session_id: str) -> PlaybackCompletionResult:
+    def complete_playback_session(
+        self, session_id: str, expected_entry_position: int | None = None
+    ) -> PlaybackCompletionResult:
         def complete(session: Session) -> PlaybackCompletionResult:
             now: datetime = datetime.now(UTC)
             playback_session: PlaybackSession = _require(
                 session, ModelPlaybackSession, session_id, "Playback session"
             )
             _require_active_session(playback_session, now)
+            if expected_entry_position is not None:
+                current_entry = _current_session_entry(session, playback_session)
+                if current_entry.position != expected_entry_position:
+                    raise CatalogueValidationError(
+                        "Playback session entry does not match the queue."
+                    )
             event = self._complete_current_session_entry(session, playback_session, now)
             return PlaybackCompletionResult(
                 session=self._playback_session_response(session, playback_session, now),
@@ -2569,6 +2592,7 @@ class KatalogQueryService:
         existing_state: PlaybackState | None = _playback_state(
             session, playback_session.user_id, entry.library_item_id
         )
+        was_already_completed = existing_state is not None and existing_state.completed
         duration = _completion_duration(media_file, existing_state)
         try:
             record_playback_progress(
@@ -2578,12 +2602,12 @@ class KatalogQueryService:
                 position_seconds=duration,
                 duration_seconds=duration,
                 completed=True,
-                increment_play_count=existing_state is None or not existing_state.completed,
+                increment_play_count=not was_already_completed,
                 played_at=now,
             )
         except ValueError as error:
             raise CatalogueValidationError(str(error)) from error
-        return _record_session_event(
+        event = _record_session_event(
             session,
             playback_session,
             entry_position=entry.position,
@@ -2591,6 +2615,16 @@ class KatalogQueryService:
             position_seconds=duration,
             occurred_at=now,
         )
+        _LOGGER.info(
+            "Playback completion source=explicit session_id=%s entry_position=%s "
+            "position_seconds=%.3f duration_seconds=%.3f already_completed=%s",
+            playback_session.id,
+            entry.position,
+            duration,
+            duration,
+            was_already_completed,
+        )
+        return event
 
     def _advance_current_session_entry(
         self, session: Session, playback_session: PlaybackSession, now: datetime
@@ -3447,10 +3481,23 @@ def _progress_duration(
     return position_seconds
 
 
-def _is_within_session_progress_start_grace_period(position_seconds: float) -> bool:
+def _session_progress_grace_period_seconds(duration_seconds: float | None) -> float:
+    """Return the duration-scaled playback progress grace period."""
+
+    if duration_seconds is None or duration_seconds <= 0:
+        return PLAYBACK_SESSION_PROGRESS_MAX_GRACE_PERIOD_SECONDS
+    return min(
+        PLAYBACK_SESSION_PROGRESS_MAX_GRACE_PERIOD_SECONDS,
+        duration_seconds * PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_DURATION_FRACTION,
+    )
+
+
+def _is_within_session_progress_start_grace_period(
+    position_seconds: float, duration_seconds: float | None
+) -> bool:
     """Keep brief playback starts out of a user's saved viewing state."""
 
-    return position_seconds < PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS
+    return position_seconds < _session_progress_grace_period_seconds(duration_seconds)
 
 
 def _is_within_session_progress_completion_grace_period(
@@ -3458,9 +3505,10 @@ def _is_within_session_progress_completion_grace_period(
 ) -> bool:
     """Treat an eligible position near a known media end as completed."""
 
-    return (
-        duration_seconds is not None
-        and duration_seconds - position_seconds <= PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_SECONDS
+    if duration_seconds is None or duration_seconds <= 0:
+        return False
+    return duration_seconds - position_seconds <= _session_progress_grace_period_seconds(
+        duration_seconds
     )
 
 

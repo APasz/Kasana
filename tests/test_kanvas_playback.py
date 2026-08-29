@@ -30,6 +30,7 @@ from kasana.katalog.public import (
     PlaybackPlanLaunch,
     PlaybackPlanRequest,
     PlaybackSessionCloseResult,
+    PlaybackSessionCompletionRequest,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -53,6 +54,9 @@ class _ClientState:
     consumed_launch_tokens: list[str] = field(default_factory=list)
     progress_updates: list[tuple[str, SessionProgressUpdate]] = field(default_factory=list)
     track_selections: list[tuple[str, PlaybackSessionTrackSelection]] = field(default_factory=list)
+    completions: list[tuple[str, PlaybackSessionCompletionRequest | None]] = field(
+        default_factory=list
+    )
     transitions: list[tuple[str, PlaybackSessionTransitionRequest]] = field(default_factory=list)
     closed_session_ids: list[str] = field(default_factory=list)
 
@@ -92,6 +96,12 @@ class _FakeClient:
     ) -> PlaybackSessionResponse:
         self._state.track_selections.append((session_id, selection))
         return self._state.session
+
+    async def complete_playback_session(
+        self, session_id: str, completion: PlaybackSessionCompletionRequest | None = None
+    ) -> object:
+        self._state.completions.append((session_id, completion))
+        return object()
 
     async def complete_and_advance_playback_session(
         self, session_id: str, request: PlaybackSessionTransitionRequest
@@ -248,6 +258,7 @@ async def test_playback_service_requires_owned_sessions_for_mutations_and_fallba
     assert await service.playback_session(_SESSION_ID) == state.session
     await service.report_playback_progress(_SESSION_ID, progress)
     assert await service.select_playback_tracks(_SESSION_ID, selection) == state.session
+    await service.complete_current_playback_entry(_SESSION_ID, 1)
     assert await service.complete_playback_entry(_SESSION_ID, 1) == state.session
     assert await service.close_playback_session(_SESSION_ID) == PlaybackSessionCloseResult(
         current_entry_position=1,
@@ -257,6 +268,9 @@ async def test_playback_service_requires_owned_sessions_for_mutations_and_fallba
 
     assert state.progress_updates == [(_SESSION_ID, progress)]
     assert state.track_selections == [(_SESSION_ID, selection)]
+    assert state.completions == [
+        (_SESSION_ID, PlaybackSessionCompletionRequest(expected_entry_position=1))
+    ]
     assert state.transitions == [
         (_SESSION_ID, PlaybackSessionTransitionRequest(expected_entry_position=1))
     ]

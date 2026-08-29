@@ -70,6 +70,7 @@ from kasana.katalog.api.contracts import (
     PlaybackPlanRequest,
     PlaybackProgressResult,
     PlaybackSessionCloseResult,
+    PlaybackSessionCompletionRequest,
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
@@ -1052,9 +1053,14 @@ def create_app(
     )
     async def complete_playback_session(
         session_id: Annotated[str, Path(min_length=32, max_length=128)],
+        completion: PlaybackSessionCompletionRequest | None = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PlaybackCompletionResult:
-        return await run_blocking(runtime.queries.complete_playback_session, session_id)
+        return await run_blocking(
+            runtime.queries.complete_playback_session,
+            session_id,
+            completion.expected_entry_position if completion is not None else None,
+        )
 
     @app.post(
         "/api/v1/playback/sessions/{session_id}/complete-and-advance",

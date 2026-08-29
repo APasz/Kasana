@@ -1636,6 +1636,24 @@ async def complete_playback(session_id: str, request: Request) -> JSONResponse:
     )
 
 
+@app.post("/kanvas/playback/sessions/{session_id}/complete-current", include_in_schema=False)
+async def complete_current_playback(session_id: str, request: Request) -> Response:
+    """Explicitly complete the current browser entry without advancing its queue."""
+
+    profile = await _require_profile(request)
+    try:
+        payload = await _json_object(request)
+        entry_position = _nonnegative_integer(payload, "entryPosition")
+        await KanvasPlaybackService(_settings, profile.user.id).complete_current_playback_entry(
+            session_id, entry_position
+        )
+    except ValueError:
+        return _invalid_action("Playback session is invalid.")
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Playback completion could not be saved.")
+    return Response(status_code=204)
+
+
 @app.post("/kanvas/actions/collections", include_in_schema=False)
 async def create_collection_action(request: Request) -> RedirectResponse:
     """Create a collection from the native editor and enter its deterministic route."""
