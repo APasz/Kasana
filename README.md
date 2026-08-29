@@ -1,14 +1,20 @@
 # Kasana
 
-Kasana is a personal media catalogue, playback-tracking, and launcher system.
-Katalog owns the catalogue, scanner, SQLite database, and HTTP API. Kanvas
-(dashboard) and Kourier (metadata integration) have their composition roots in
-place. Kestrel is the mpv player agent.
+Kasana is a self-hosted personal media catalogue for a trusted LAN. It scans local films
+and series, tracks each profile's progress, provides a browser dashboard, and can launch
+local playback through mpv.
 
-## Start from scratch
+| Component | Responsibility |
+| --- | --- |
+| Katalog | SQLite catalogue, scanning, metadata, artwork, playback state, and the HTTP API. |
+| Kanvas | NiceGUI browser dashboard for profiles, libraries, collections, administration, and playback. |
+| Kestrel | Local mpv playback agent and `kasana://` URI handler. |
+| Kourier | TMDB and optional Fanart.tv provider adapters. |
 
-Install [uv](https://docs.astral.sh/uv/), Python 3.14, and FFmpeg (`ffprobe`
-must be on `PATH`), then run:
+## Quick start
+
+Kasana requires [uv](https://docs.astral.sh/uv/) and Python 3.14. Install FFmpeg so
+`ffprobe` is on `PATH` for scans; install mpv if using Kestrel.
 
 ```bash
 git clone <repository-url> kasana
@@ -19,135 +25,86 @@ uv run kasana-katalog database initialise
 uv run kasana-katalog user create owner --display-name Owner
 uv run kasana-katalog library add /absolute/path/to/Movies --expected-kind movie --display-name Movies
 uv run kasana-katalog scan
-uv run kasana-katalog status
 ```
 
-Use `--expected-kind series` for a television root. The scanner recognises
-`.avi`, `.m4v`, `.mkv`, `.mov`, `.mp4`, and `.webm`.
+Use `--expected-kind series` for a television root. Katalog scans `.avi`, `.m4v`,
+`.mkv`, `.mov`, `.mp4`, and `.webm` files.
 
-Non-secret application preferences live in one domain file per component:
-`configs/config.shared.json`, `config.katalog.json`, `config.kanvas.json`,
-`config.kestrel.json`, `config.kourier.json`, `config.tmdb.json`, and
-`config.fanart.json`. Each
-created profile is stored independently at `configs/users/<user-id>/configuration.json`;
-the numeric directory is its user ID and contains the profile name, level, state,
-optional local PIN, and UI accent colour. User documents are deliberately ignored by Git. The
-per-user configuration document is the single source of truth for profile data, including a PIN.
-PINs are intentionally stored in plaintext as trusted-LAN convenience gates: they are not
-passwords, are never returned by Kasana, and must never be logged. Kestrel,
-Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
-`api_host` and `api_port`. Keep only secrets (for example
-`KASANA_KOURIER_TMDB_API_TOKEN` and `KASANA_KOURIER_FANART_API_KEY`) in `.env`; environment variables can still
-temporarily override non-secret preferences for deployment. Kanvas generates a persistent
-`configs/kanvas.session-secret` with mode `0600` on its first start (or accepts
-`KASANA_KANVAS_SESSION_SECRET` for managed deployments); preserve that secret across restarts.
-Katalog similarly generates `configs/katalog.api-token` with mode `0600`. Its clients use that
-credential automatically when they share the configuration directory. A remote Kestrel client
-must be given the same value through `KASANA_KATALOG_API_BEARER_TOKEN`; do not expose Katalog's
-API without this credential.
-
-Start the API with `uv run kasana-katalog-api`; its documentation is at
-<http://127.0.0.1:5373/api/v1/docs>. Change its bind address in
-`configs/config.katalog.json` (or temporarily set `KASANA_KATALOG_API_HOST` or
-`KASANA_KATALOG_API_PORT`).
-The API also writes a portable JSON backup when the configured backup file is
-missing, then every 24 hours by default. Configure that in
-`configs/config.katalog.json` with `json_backup_enabled`, `json_backup_path`,
-and `json_backup_interval_hours`.
-Kanvas listens on every local network interface at port `5370` by default. Open
-`http://<server-LAN-address>:5370` from another device on the same network. If
-your host firewall blocks inbound connections, allow TCP port `5370`; set
-`host` to `127.0.0.1` in `configs/config.kanvas.json` to restrict Kanvas to the
-local machine again.
-
-For large browser downloads, set Kanvas's `download_public_url` to the
-browser-reachable Katalog origin (for example `http://media-server:5373`) in
-`configs/config.kanvas.json`. Kanvas will then redirect the browser to a
-short-lived opaque download grant, so media bytes bypass the dashboard process.
-Without this setting, downloads continue through the secure same-origin Kanvas
-proxy.
-
-### Kanvas browser support
-
-Kanvas supports current desktop releases of Chrome, Chromium, Microsoft Edge,
-and Firefox on both Windows and Linux. JavaScript and same-origin cookies must
-be enabled. Inline playback uses the browser's native media stack, so a file
-must use a container and codecs the installed browser can decode; this can vary for
-Firefox on Linux when system H.264/AAC codec support is not installed. Kestrel
-is the Linux/Steam Deck option for media that a browser cannot play.
-
-Each Kasana domain writes to its own file in `logs` by default (for example,
-`logs/katalog.log` and `logs/kanvas.log`). At process startup, a domain's
-previous log replaces its matching file in `logs.old`, retaining one prior
-session per domain without disrupting other running components. Set
-`log_directory` in `configs/config.shared.json` or temporarily set
-`KASANA_LOG_DIRECTORY` to change the destination; background job exceptions
-include their traceback there even when the Jobs page stores a compact failure
-reason.
-
-## Play a file with Kestrel
-
-Install `mpv`. Katalog and Kestrel use compatible defaults, so start the API
-in a separate terminal and leave it running:
+Start Katalog, then Kanvas in another terminal:
 
 ```bash
-# Terminal 1
 uv run kasana-katalog-api
 ```
 
-In another terminal, confirm the resolved local configuration, then find the
-playback user and item ID. A fresh database can create its first user with
-`kasana-katalog user create owner --display-name Owner`.
+```bash
+uv run kasana-kanvas
+```
+
+Open <http://127.0.0.1:5370>. Kanvas binds to `0.0.0.0:5370` by default; Katalog
+binds to `127.0.0.1:5373`. Its OpenAPI documentation is at
+<http://127.0.0.1:5373/api/v1/docs>.
+
+## Configuration and security
+
+Non-secret preferences live in `configs/config.<domain>.json`, for `shared`, `katalog`,
+`kanvas`, `kestrel`, `kourier`, `tmdb`, and `fanart`. Environment variables and `.env`
+override those files. Set `KASANA_CONFIG_DIRECTORY` to relocate the configuration root.
+
+Katalog and Kanvas create `configs/katalog.api-token` and
+`configs/kanvas.session-secret`, respectively, with owner-only permissions. Keep them
+private. Components sharing the configuration directory use the API token automatically; a
+remote Kestrel client needs the same `KASANA_KATALOG_API_BEARER_TOKEN` value.
+
+Profiles are stored in `configs/users/<id>/configuration.json`. Their optional PINs are
+plaintext trusted-LAN convenience gates, not passwords.
+
+## Metadata and artwork
+
+TMDB metadata and artwork require a Read Access Token:
 
 ```bash
-# Terminal 2
-uv run kasana config show
-uv run kasana-katalog user list
+export KASANA_KOURIER_TMDB_API_TOKEN='your-tmdb-read-access-token'
+uv run kasana-katalog metadata auto-match --root 1
+uv run kasana-katalog metadata review
+uv run kasana-katalog artwork fetch --root 1
+```
+
+Fanart.tv is optional and adds artwork variants:
+
+```bash
+export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
+```
+
+Downloaded artwork is cached outside media directories. Matching is conservative; review
+or manually select uncertain matches with `kasana-katalog metadata --help`.
+
+## Playback
+
+With Katalog running and mpv installed, find an item and play it through Kestrel:
+
+```bash
 uv run kasana-katalog item search Cars --year 2006 --kind movie
-```
-
-Play an available item directly; Kestrel creates and consumes the short-lived
-Katalog launch token without printing it:
-
-```bash
 uv run kasana-kestrel play-item 42 --user owner
-```
-
-Kestrel can also start a series queue or an explicit queue:
-
-```bash
 uv run kasana-kestrel play-series 8 --user owner --resume
-uv run kasana-kestrel play-queue 4 9 12 --user owner
 ```
 
-Kestrel is an optional external-player integration for Linux or Steam Deck
-Desktop Mode. Install its per-user URI handler and check end-to-end readiness:
+On an XDG desktop, install and check the URI handler with:
 
 ```bash
 uv run kasana-kestrel install-uri-handler
 uv run kasana-kestrel doctor
 ```
 
-The URI handler supports `kasana://play/<launch-token>` links from another
-Kasana client. `install-uri-handler` prints the exact XDG `.desktop` file it
-creates. Use `kasana-kestrel uninstall-uri-handler` to remove it.
-
-## Common commands
+## Operations and development
 
 ```bash
-uv run kasana-katalog library list
-uv run kasana-katalog scan --root 1 --probe-concurrency 4
+uv run kasana-katalog status
 uv run kasana-katalog scan --dry-run
-uv run kasana-katalog audit --category orphaned_subtitle
-uv run kasana-katalog database upgrade
+uv run kasana-katalog audit
 uv run kasana-katalog database backup
-uv run kasana-katalog database restore .local/share/kasana/kasana.backup.json --yes
-uv run kasana-katalog --json status
-uv run kasana-katalog user list
-uv run kasana-katalog item search Cars --year 2006 --kind movie
 
-uv run kasana config show
-uv run kasana doctor
+# Stop kasana-katalog-api before restoring.
+uv run kasana-katalog database restore kasana.backup.json --yes
 
 uv run ruff check .
 uv run ruff format --check .
@@ -155,52 +112,9 @@ uv run basedpyright
 uv run pytest
 ```
 
-`--json` and `--debug` are global CLI options. Offline roots are retained and
-their files marked unavailable; scans do not delete catalogue records.
-Container and codec audit findings mean Katalog does not recognise the reported
-FFmpeg format or codec family; they do not claim that the installed mpv/FFmpeg
-stack cannot play the file.
+Use `--json` for machine-readable Katalog CLI output and `--help` on any command for its
+full interface. See [the architecture notes](docs/architecture.md) for component boundaries.
 
-Database backups include the SQLite schema, catalogue data, and local profile
-configuration from `configs/users`. They intentionally exclude media files and
-the artwork cache. Stop `kasana-katalog-api` before running `database restore`,
-because restore replaces the local SQLite database and profile configuration.
+## Licence
 
-## Metadata and artwork
-
-TMDB-backed commands need an API Read Access Token:
-
-```bash
-export KASANA_KOURIER_TMDB_API_TOKEN='your-tmdb-api-read-access-token'
-uv run kasana-katalog metadata auto-match --root 1
-uv run kasana-katalog metadata review
-uv run kasana-katalog artwork fetch --root 1
-```
-
-Fanart.tv is optional and adds independently cached movie-poster alternatives
-and season-specific TV posters to the picker. TMDB remains the metadata and
-primary-artwork provider, including landscape stills for local TV episodes:
-
-```bash
-export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
-# Optional personal key for faster access to newly added images:
-export KASANA_KOURIER_FANART_CLIENT_KEY='your-fanart-personal-key'
-```
-
-Fanart.tv's TV artwork is used only for matching local seasons. Its
-season-specific posters are never presented as generic series-poster choices.
-
-TMDB selects its configured scaled image variants for cache and picker downloads
-by default. Set `image_target_width` in `config.tmdb.json` to tune that target;
-set `use_original_images` only when full-resolution source files are required.
-Both providers pace requests process-wide and honour `Retry-After`; their
-`requests_per_second` defaults are 10 for TMDB and 4 for Fanart.tv.
-
-Matching is reviewable and conservative; fuzzy title similarity alone cannot
-auto-match. Downloaded artwork uses the configured `katalog.artwork_cache_path`
-and never replaces artwork in media directories. TMDB and logging preferences
-live in `configs/config.tmdb.json` and `configs/config.shared.json`; Fanart.tv
-preferences live in `configs/config.fanart.json`. Provider keys remain
-environment-only secrets.
-
-See [docs/architecture.md](docs/architecture.md) for component boundaries.
+MIT.
