@@ -777,6 +777,7 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "this.addEventListener('pointerenter', showPlayerControls);" in script
     assert "playerTooltipAnchor" in script
     assert ".k-player.k-player--controls-hidden .k-player__frame-toggle" in stylesheet
+    assert ".k-player.k-player--controls-hidden .k-player__frame-toggle:hover" in stylesheet
     assert "data-player-timeline-preview" in card
     assert "showTimelinePreview" in script
     assert ".k-player__timeline-preview" in stylesheet

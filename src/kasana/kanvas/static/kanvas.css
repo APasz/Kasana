@@ -853,7 +853,8 @@ kanvas-poster {
     transition: opacity 160ms ease, transform 160ms ease;
 }
 .k-player__frame-toggle .k-icon { width: clamp(24px, 25%, 72px); height: clamp(24px, 25%, 72px); filter: drop-shadow(0 1px 2px rgb(0 0 0 / 72%)); }
-.k-player.k-player--controls-hidden .k-player__frame-toggle {
+.k-player.k-player--controls-hidden .k-player__frame-toggle,
+.k-player.k-player--controls-hidden .k-player__frame-toggle:hover {
     opacity: 0;
     pointer-events: none;
     transform: translate(-50%, -50%) scale(0.92);
