@@ -27,7 +27,8 @@ Use `--expected-kind series` for a television root. The scanner recognises
 
 Non-secret application preferences live in one domain file per component:
 `configs/config.shared.json`, `config.katalog.json`, `config.kanvas.json`,
-`config.kestrel.json`, `config.kourier.json`, and `config.tmdb.json`. Each
+`config.kestrel.json`, `config.kourier.json`, `config.tmdb.json`, and
+`config.fanart.json`. Each
 created profile is stored independently at `configs/users/<user-id>/configuration.json`;
 the numeric directory is its user ID and contains the profile name, level, state,
 optional local PIN, and UI accent colour. User documents are deliberately ignored by Git. The
@@ -36,7 +37,7 @@ PINs are intentionally stored in plaintext as trusted-LAN convenience gates: the
 passwords, are never returned by Kasana, and must never be logged. Kestrel,
 Kanvas, and Kourier derive their Katalog URL from `config.katalog.json`'s
 `api_host` and `api_port`. Keep only secrets (for example
-`KASANA_KOURIER_TMDB_API_TOKEN`) in `.env`; environment variables can still
+`KASANA_KOURIER_TMDB_API_TOKEN` and `KASANA_KOURIER_FANART_API_KEY`) in `.env`; environment variables can still
 temporarily override non-secret preferences for deployment. Kanvas generates a persistent
 `configs/kanvas.session-secret` with mode `0600` on its first start (or accepts
 `KASANA_KANVAS_SESSION_SECRET` for managed deployments); preserve that secret across restarts.
@@ -176,10 +177,24 @@ uv run kasana-katalog metadata review
 uv run kasana-katalog artwork fetch --root 1
 ```
 
+Fanart.tv is optional and adds independently cached movie-poster alternatives
+to the picker while TMDB remains the metadata and primary-artwork provider:
+
+```bash
+export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
+# Optional personal key for faster access to newly added images:
+export KASANA_KOURIER_FANART_CLIENT_KEY='your-fanart-personal-key'
+```
+
+Fanart.tv support is intentionally limited to movie posters: its TV endpoint
+returns season-specific poster artwork rather than a generic series-poster
+collection, which does not fit Kasana's series poster picker.
+
 Matching is reviewable and conservative; fuzzy title similarity alone cannot
 auto-match. Downloaded artwork uses the configured `katalog.artwork_cache_path`
 and never replaces artwork in media directories. TMDB and logging preferences
-live in `configs/config.tmdb.json` and `configs/config.shared.json`; the TMDB
-token remains an environment-only secret.
+live in `configs/config.tmdb.json` and `configs/config.shared.json`; Fanart.tv
+preferences live in `configs/config.fanart.json`. Provider keys remain
+environment-only secrets.
 
 See [docs/architecture.md](docs/architecture.md) for component boundaries.

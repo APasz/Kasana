@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.limits import MAX_ARTWORK_PER_ITEM
 from kasana.katalog.metadata.refresh import (
     ArtworkStreamingProvider,
+    ExternalPosterArtworkProvider,
     MetadataProvider,
     PosterArtworkProvider,
     provider_for,
@@ -26,8 +27,10 @@ from kasana.katalog.metadata.refresh import (
 from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
+    MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
+    MetadataMatchStatus,
     Zaisan,
 )
 from kasana.shared.concurrency import run_blocking
@@ -36,6 +39,9 @@ from kasana.shared.metadata import (
     ArtworkDownload,
     ArtworkKind,
     ArtworkReference,
+    ExternalIdentifier,
+    PosterListing,
+    PosterLookup,
     ProviderCapability,
     ProviderMediaKind,
     ProviderReference,
@@ -73,9 +79,12 @@ class ArtworkRequest:
     library_item_id: int
     provider: str
     provider_id: str
+    owner_provider: str
+    owner_provider_id: str
     media_kind: ProviderMediaKind
     source_url: str
     revision: str
+    external_ids: tuple[ExternalIdentifier, ...] = ()
     language: str | None = None
     width: int | None = None
     height: int | None = None
@@ -90,6 +99,9 @@ class ArtworkRequest:
 class PosterVariantBatch:
     """One provider response plus whether it authoritatively listed all variants."""
 
+    library_item_id: int
+    provider: str
+    provider_id: str
     requests: tuple[ArtworkRequest, ...]
     variants_listed: bool
 
@@ -129,16 +141,10 @@ class ArtworkCache:
         primary_requests = await run_blocking(self._poster_requests, root_id, item_id)
         batches: tuple[PosterVariantBatch, ...] = ()
         if include_variants:
-            batches = tuple(
-                await asyncio.gather(
-                    *(
-                        self._poster_variant_requests(
-                            provider_for(request.provider, providers), request
-                        )
-                        for request in primary_requests
-                    )
-                )
+            batch_groups = await asyncio.gather(
+                *(self._poster_variant_batches(providers, request) for request in primary_requests)
             )
+            batches = tuple(batch for group in batch_groups for batch in group)
             requests = tuple(request for batch in batches for request in batch.requests)
         else:
             requests = primary_requests
@@ -153,7 +159,7 @@ class ArtworkCache:
         if include_variants and all(result is not None for result in results):
             await asyncio.gather(
                 *(
-                    self._remove_stale_poster_variants(batch.requests)
+                    self._remove_stale_poster_variants(batch)
                     for batch in batches
                     if batch.variants_listed
                 )
@@ -164,9 +170,7 @@ class ArtworkCache:
         records = await run_blocking(self._unreferenced_artwork)
         return await self._remove_artwork_records(records)
 
-    async def _remove_artwork_records(
-        self, records: tuple[CachedArtwork, ...]
-    ) -> tuple[int, int]:
+    async def _remove_artwork_records(self, records: tuple[CachedArtwork, ...]) -> tuple[int, int]:
         removed_files = 0
         removed_bytes = 0
         for record in records:
@@ -177,12 +181,10 @@ class ArtworkCache:
             await run_blocking(self._delete_artwork_record, record.id)
         return removed_files, removed_bytes
 
-    async def _remove_stale_poster_variants(
-        self, requests: tuple[ArtworkRequest, ...]
-    ) -> None:
+    async def _remove_stale_poster_variants(self, batch: PosterVariantBatch) -> None:
         """Drop superseded poster choices while preserving the library's saved choice."""
 
-        records = await run_blocking(self._stale_poster_variants, requests)
+        records = await run_blocking(self._stale_poster_variants, batch)
         await self._remove_artwork_records(records)
 
     def _poster_requests(
@@ -202,8 +204,29 @@ class ArtworkCache:
                 statement = statement.where(Zaisan.library_root_id == root_id)
             if item_id is not None:
                 statement = statement.where(Zaisan.id == item_id)
+            candidates = tuple(
+                session.scalars(
+                    statement.order_by(
+                        MetadataCandidate.library_item_id,
+                        MetadataCandidate.provider,
+                        MetadataCandidate.provider_id,
+                    )
+                ).all()
+            )
+            if not candidates:
+                return ()
+            item_ids = tuple({candidate.library_item_id for candidate in candidates})
+            bindings = {
+                binding.library_item_id: binding
+                for binding in session.scalars(
+                    select(MetadataBinding).where(
+                        MetadataBinding.library_item_id.in_(item_ids),
+                        MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                    )
+                ).all()
+            }
             requests: dict[tuple[str, str, str], ArtworkRequest] = {}
-            for candidate in session.scalars(statement).all():
+            for candidate in candidates:
                 key = (candidate.provider, candidate.provider_id, candidate.poster_revision or "")
                 requests.setdefault(
                     key,
@@ -211,9 +234,14 @@ class ArtworkCache:
                         library_item_id=candidate.library_item_id,
                         provider=candidate.provider,
                         provider_id=candidate.provider_id,
+                        owner_provider=candidate.provider,
+                        owner_provider_id=candidate.provider_id,
                         media_kind=ProviderMediaKind(candidate.provider_media_kind.value),
                         source_url=candidate.poster_source_url or "",
                         revision=candidate.poster_revision or "",
+                        external_ids=external_identifiers(
+                            candidate, bindings.get(candidate.library_item_id)
+                        ),
                         is_primary=True,
                     ),
                 )
@@ -221,7 +249,26 @@ class ArtworkCache:
 
         return self.database.run_transaction(load)
 
-    async def _poster_variant_requests(
+    async def _poster_variant_batches(
+        self, providers: tuple[MetadataProvider, ...], primary: ArtworkRequest
+    ) -> tuple[PosterVariantBatch, ...]:
+        """Load primary and supplemental poster sources for one matched item."""
+
+        primary_provider = provider_for(primary.provider, providers)
+        primary_batch = await self._primary_poster_variant_batch(primary_provider, primary)
+        supplemental_batches = await asyncio.gather(
+            *(
+                self._supplemental_poster_variant_batch(provider, primary)
+                for provider in providers
+                if provider.provider_name != primary.provider
+                and provider.supports(ProviderCapability.LIST_POSTERS_BY_EXTERNAL_ID)
+            )
+        )
+        return self._select_poster_batches(
+            (primary_batch, *(batch for batch in supplemental_batches if batch is not None))
+        )
+
+    async def _primary_poster_variant_batch(
         self, provider: MetadataProvider, primary: ArtworkRequest
     ) -> PosterVariantBatch:
         """Combine the matched poster with optional provider variants in display order."""
@@ -263,29 +310,108 @@ class ArtworkCache:
             variant_revisions.add(variant.raw_path)
 
         return PosterVariantBatch(
+            library_item_id=primary.library_item_id,
+            provider=primary.provider,
+            provider_id=primary.provider_id,
             requests=tuple(
-                ArtworkRequest(
-                    library_item_id=primary.library_item_id,
+                artwork_request(
+                    primary,
+                    reference,
                     provider=primary.provider,
                     provider_id=primary.provider_id,
-                    media_kind=primary.media_kind,
-                    source_url=str(reference.source_url),
-                    revision=reference.raw_path,
-                    language=reference.language,
-                    width=reference.width,
-                    height=reference.height,
-                    vote_average=reference.vote_average,
-                    vote_count=reference.vote_count,
-                    is_primary=reference.is_primary,
-                    display_order=index,
                     has_variant_metadata=reference.raw_path in variant_revisions,
                 )
-                for index, reference in enumerate(
-                    tuple(unique.values())[:MAX_ARTWORK_PER_ITEM]
-                )
+                for reference in unique.values()
             ),
             variants_listed=variants_listed,
         )
+
+    async def _supplemental_poster_variant_batch(
+        self, provider: MetadataProvider, primary: ArtworkRequest
+    ) -> PosterVariantBatch | None:
+        if not hasattr(provider, "list_posters_by_external_id"):
+            msg = (
+                f"Provider {provider.provider_name!r} advertises unsupported supplemental posters."
+            )
+            raise ValueError(msg)
+        poster_provider = cast(ExternalPosterArtworkProvider, provider)
+        listing = await poster_provider.list_posters_by_external_id(
+            PosterLookup(
+                reference=ProviderReference(provider=primary.provider, raw_id=primary.provider_id),
+                media_kind=primary.media_kind,
+                external_ids=primary.external_ids,
+            )
+        )
+        if listing is None:
+            return None
+        self._validate_poster_listing(provider, listing)
+        unique: dict[str, ArtworkReference] = {}
+        for reference in listing.posters:
+            unique.setdefault(
+                reference.raw_path, reference.model_copy(update={"is_primary": False})
+            )
+        return PosterVariantBatch(
+            library_item_id=primary.library_item_id,
+            provider=listing.provider,
+            provider_id=listing.provider_id,
+            requests=tuple(
+                artwork_request(
+                    primary,
+                    reference,
+                    provider=listing.provider,
+                    provider_id=listing.provider_id,
+                    has_variant_metadata=True,
+                )
+                for reference in unique.values()
+            ),
+            variants_listed=True,
+        )
+
+    def _select_poster_batches(
+        self, batches: tuple[PosterVariantBatch, ...]
+    ) -> tuple[PosterVariantBatch, ...]:
+        """Keep the matched poster first, then fairly interleave each artwork source."""
+
+        primary_batch, *supplemental_batches = batches
+        if not primary_batch.requests:
+            msg = "A matched poster source returned no primary poster."
+            raise ValueError(msg)
+        selected: list[list[ArtworkRequest]] = [[] for _ in batches]
+        selected[0].append(replace(primary_batch.requests[0], display_order=0))
+        queues = [list(primary_batch.requests[1:])]
+        queues.extend(list(batch.requests) for batch in supplemental_batches)
+        selected_count = 1
+        while selected_count < MAX_ARTWORK_PER_ITEM:
+            found_request = False
+            for index, queue in enumerate(queues):
+                if not queue:
+                    continue
+                selected[index].append(replace(queue.pop(0), display_order=selected_count))
+                selected_count += 1
+                found_request = True
+                if selected_count == MAX_ARTWORK_PER_ITEM:
+                    break
+            if not found_request:
+                break
+        return tuple(
+            replace(batch, requests=tuple(requests))
+            for batch, requests in zip(batches, selected, strict=True)
+        )
+
+    @staticmethod
+    def _validate_poster_listing(provider: MetadataProvider, listing: PosterListing) -> None:
+        if listing.provider != provider.provider_name:
+            msg = (
+                f"Provider {provider.provider_name!r} returned a listing for {listing.provider!r}."
+            )
+            raise ValueError(msg)
+        for reference in listing.posters:
+            if reference.provider != listing.provider or reference.kind is not ArtworkKind.POSTER:
+                msg = f"Provider {listing.provider!r} returned an invalid poster variant."
+                raise ValueError(msg)
+            if reference.source_url is None:
+                msg = f"Provider {listing.provider!r} returned a poster without a source URL."
+                raise ValueError(msg)
 
     async def _cache_artwork(
         self, provider: MetadataProvider, request: ArtworkRequest
@@ -388,9 +514,7 @@ class ArtworkCache:
 
         return self.database.run_transaction(load)
 
-    def _update_cached_artwork(
-        self, artwork_id: int, request: ArtworkRequest
-    ) -> ArtworkCacheView:
+    def _update_cached_artwork(self, artwork_id: int, request: ArtworkRequest) -> ArtworkCacheView:
         def update(session: Session) -> ArtworkCacheView:
             record = session.get(CachedArtwork, artwork_id)
             if record is None:
@@ -423,6 +547,8 @@ class ArtworkCache:
                     library_item_id=request.library_item_id,
                     provider=request.provider,
                     provider_id=request.provider_id,
+                    owner_provider=request.owner_provider,
+                    owner_provider_id=request.owner_provider_id,
                     artwork_kind=CachedArtworkKind.POSTER,
                     provider_revision=request.revision,
                     source_url=request.source_url,
@@ -469,7 +595,11 @@ class ArtworkCache:
             unreferenced = [
                 record
                 for record in records
-                if (record.provider, record.provider_id) not in referenced
+                if (
+                    record.owner_provider or record.provider,
+                    record.owner_provider_id or record.provider_id,
+                )
+                not in referenced
             ]
             for record in unreferenced:
                 session.expunge(record)
@@ -477,28 +607,23 @@ class ArtworkCache:
 
         return self.database.run_transaction(load)
 
-    def _stale_poster_variants(
-        self, requests: tuple[ArtworkRequest, ...]
-    ) -> tuple[CachedArtwork, ...]:
-        if not requests:
-            return ()
-        request = requests[0]
-        revisions = {entry.revision for entry in requests}
+    def _stale_poster_variants(self, batch: PosterVariantBatch) -> tuple[CachedArtwork, ...]:
+        revisions = {entry.revision for entry in batch.requests}
 
         def load(session: Session) -> tuple[CachedArtwork, ...]:
-            item = session.get(Zaisan, request.library_item_id)
+            item = session.get(Zaisan, batch.library_item_id)
             if item is None:
                 return ()
             selected_id = item.selected_artwork_ids.get(ArtworkKind.POSTER.value)
-            records = session.scalars(
-                select(CachedArtwork).where(
-                    CachedArtwork.library_item_id == request.library_item_id,
-                    CachedArtwork.provider == request.provider,
-                    CachedArtwork.provider_id == request.provider_id,
-                    CachedArtwork.artwork_kind == CachedArtworkKind.POSTER,
-                    CachedArtwork.provider_revision.not_in(revisions),
-                )
-            ).all()
+            statement = select(CachedArtwork).where(
+                CachedArtwork.library_item_id == batch.library_item_id,
+                CachedArtwork.provider == batch.provider,
+                CachedArtwork.provider_id == batch.provider_id,
+                CachedArtwork.artwork_kind == CachedArtworkKind.POSTER,
+            )
+            if revisions:
+                statement = statement.where(CachedArtwork.provider_revision.not_in(revisions))
+            records = session.scalars(statement).all()
             stale = tuple(record for record in records if record.id != selected_id)
             for record in stale:
                 session.expunge(record)
@@ -513,6 +638,59 @@ class ArtworkCache:
                 session.delete(record)
 
         self.database.run_transaction(delete)
+
+
+def external_identifiers(
+    candidate: MetadataCandidate, binding: MetadataBinding | None
+) -> tuple[ExternalIdentifier, ...]:
+    """Combine the candidate's identity with validated IDs from its active binding."""
+
+    identifiers: dict[tuple[str, str], ExternalIdentifier] = {}
+
+    def add(identifier: ExternalIdentifier) -> None:
+        identifiers.setdefault((identifier.namespace, identifier.value), identifier)
+
+    add(ExternalIdentifier(namespace=candidate.provider, value=candidate.provider_id))
+    if binding is not None:
+        for raw_identifier in binding.provider_external_ids:
+            try:
+                add(ExternalIdentifier.model_validate(raw_identifier))
+            except ValidationError as error:
+                msg = f"Metadata binding {binding.id} has an invalid external identifier."
+                raise ValueError(msg) from error
+    return tuple(identifiers.values())
+
+
+def artwork_request(
+    primary: ArtworkRequest,
+    reference: ArtworkReference,
+    *,
+    provider: str,
+    provider_id: str,
+    has_variant_metadata: bool,
+) -> ArtworkRequest:
+    """Map one validated provider reference to Katalog's cache request shape."""
+
+    if reference.source_url is None:
+        msg = f"Provider {provider!r} returned a poster without a source URL."
+        raise ValueError(msg)
+    return ArtworkRequest(
+        library_item_id=primary.library_item_id,
+        provider=provider,
+        provider_id=provider_id,
+        owner_provider=primary.owner_provider,
+        owner_provider_id=primary.owner_provider_id,
+        media_kind=primary.media_kind,
+        source_url=str(reference.source_url),
+        revision=reference.raw_path,
+        language=reference.language,
+        width=reference.width,
+        height=reference.height,
+        vote_average=reference.vote_average,
+        vote_count=reference.vote_count,
+        is_primary=reference.is_primary,
+        has_variant_metadata=has_variant_metadata,
+    )
 
 
 def artwork_view(record: CachedArtwork, cache_path: Path) -> ArtworkCacheView:
@@ -542,6 +720,8 @@ def apply_artwork_request(
 
     record.source_url = request.source_url
     record.attribution = request.provider
+    record.owner_provider = request.owner_provider
+    record.owner_provider_id = request.owner_provider_id
     if request.has_variant_metadata or request.language is not None:
         record.language = request.language
     if request.has_variant_metadata or request.width is not None:

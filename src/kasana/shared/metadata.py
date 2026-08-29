@@ -30,6 +30,7 @@ class ProviderCapability(StrEnum):
     GET_EPISODE = "get_episode"
     GET_ARTWORK = "get_artwork"
     LIST_POSTERS = "list_posters"
+    LIST_POSTERS_BY_EXTERNAL_ID = "list_posters_by_external_id"
 
 
 class ProviderErrorCategory(StrEnum):
@@ -80,6 +81,26 @@ class ArtworkReference(BaseModel):
     vote_average: float | None = Field(default=None, ge=0, le=10)
     vote_count: int | None = Field(default=None, ge=0)
     is_primary: bool = False
+
+
+class PosterLookup(BaseModel):
+    """The matched title identity supplied to a supplemental poster source."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reference: ProviderReference
+    media_kind: ProviderMediaKind
+    external_ids: tuple[ExternalIdentifier, ...] = ()
+
+
+class PosterListing(BaseModel):
+    """An authoritative poster listing under one artwork-source identity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str = Field(min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=200)
+    posters: tuple[ArtworkReference, ...] = ()
 
 
 class ArtworkContent(BaseModel):

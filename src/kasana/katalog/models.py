@@ -677,6 +677,8 @@ class CachedArtwork(Base):
     )
     provider: Mapped[str] = mapped_column(String, nullable=False)
     provider_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_provider: Mapped[str | None] = mapped_column(String)
+    owner_provider_id: Mapped[str | None] = mapped_column(String)
     artwork_kind: Mapped[CachedArtworkKind] = mapped_column(
         _enum(CachedArtworkKind, "cached_artwork_kind"), nullable=False
     )

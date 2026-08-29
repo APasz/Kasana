@@ -26,7 +26,8 @@ from kasana.katalog.metadata import (
 )
 from kasana.katalog.models import MetadataCandidateStatus, ZaisanKind
 from kasana.kourier.errors import KourierError
-from kasana.kourier.settings import TMDBSettings
+from kasana.kourier.fanart import FanartProvider
+from kasana.kourier.settings import FanartSettings, TMDBSettings
 from kasana.kourier.tmdb import TMDBProvider
 
 
@@ -200,15 +201,18 @@ def run_metadata_operation[Result](
     require_provider: bool,
 ) -> Result:
     tmdb_settings: TMDBSettings | None = None
+    fanart_settings: FanartSettings | None = None
     if require_provider:
         try:
             tmdb_settings = TMDBSettings.model_validate({})
+            fanart_settings = FanartSettings.model_validate({})
         except ValidationError as error:
             fail(cli, f"Metadata provider configuration error: {error}", 2)
 
     async def execute() -> Result:
         database = KatalogDatabase(database_path(cli))
         provider: TMDBProvider | None = None
+        supplemental_provider: FanartProvider | None = None
         try:
             workflow = MetadataWorkflow(
                 database,
@@ -224,9 +228,14 @@ def run_metadata_operation[Result](
             )
             if tmdb_settings is not None:
                 provider = TMDBProvider(tmdb_settings)
+                if fanart_settings is not None and fanart_settings.is_configured:
+                    supplemental_provider = FanartProvider(fanart_settings)
+                    return await operation(workflow, (provider, supplemental_provider))
                 return await operation(workflow, (provider,))
             return await operation(workflow, ())
         finally:
+            if supplemental_provider is not None:
+                await supplemental_provider.close()
             if provider is not None:
                 await provider.close()
             database.close()

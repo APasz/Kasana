@@ -121,6 +121,40 @@ def test_duplicate_resolution_batch_contract_accepts_all_selected_pairs() -> Non
     assert len(request.resolutions) == 111
 
 
+async def test_metadata_runtime_closes_tmdb_when_fanart_initialisation_fails(
+    api_fixture: ApiFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances: list[FakeTMDBProvider] = []
+
+    class FakeTMDBProvider:
+        def __init__(self, _: object) -> None:
+            self.closed = False
+            instances.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FailingFanartProvider:
+        def __init__(self, _: object) -> None:
+            raise RuntimeError("Fanart initialisation failed.")
+
+    monkeypatch.setenv("KASANA_KOURIER_TMDB_API_TOKEN", "test-token")
+    monkeypatch.setenv("KASANA_KOURIER_FANART_API_KEY", "test-key")
+    monkeypatch.setattr("kasana.katalog.api.runtime.TMDBProvider", FakeTMDBProvider)
+    monkeypatch.setattr("kasana.katalog.api.runtime.FanartProvider", FailingFanartProvider)
+
+    async def operation(
+        _: MetadataWorkflow, __: tuple[MetadataProvider, ...]
+    ) -> None:
+        pytest.fail("The operation must not run after provider initialisation fails.")
+
+    with pytest.raises(RuntimeError, match="Fanart initialisation failed"):
+        await api_fixture.runtime._with_provider(operation)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(instances) == 1
+    assert instances[0].closed is True
+
+
 @pytest.fixture
 async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
     database_path = tmp_path / "katalog.sqlite3"

@@ -3,12 +3,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import pytest
 from _pytest.monkeypatch import MonkeyPatch
+from pydantic import ValidationError
 
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.settings import KatalogSettings
 from kasana.kestrel.settings import KestrelSettings, PlayerBackend
-from kasana.kourier.settings import KourierSettings, TMDBSettings
+from kasana.kourier.settings import FanartSettings, KourierSettings, TMDBSettings
 from kasana.shared.logging import LogDomain, LogLevel, configure_logging
 from kasana.shared.settings import SharedSettings
 
@@ -65,3 +67,35 @@ def test_tmdb_settings_read_typed_provider_environment(monkeypatch: MonkeyPatch)
 
     assert settings.api_token.get_secret_value() == "test-token"
     assert settings.concurrency == 6
+
+
+def test_fanart_settings_activate_when_a_credential_is_configured(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    assert FanartSettings(api_key=None, client_key=None).is_configured is False
+
+    monkeypatch.setenv("KASANA_KOURIER_FANART_API_KEY", "project-key")
+    monkeypatch.setenv("KASANA_KOURIER_FANART_CLIENT_KEY", "personal-key")
+    monkeypatch.setenv("KASANA_KOURIER_FANART_CONCURRENCY", "6")
+
+    settings = FanartSettings()
+
+    assert settings.is_configured is True
+    assert settings.api_key is not None
+    assert settings.client_key is not None
+    assert settings.api_key.get_secret_value() == "project-key"
+    assert settings.client_key.get_secret_value() == "personal-key"
+    assert settings.concurrency == 6
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ("KASANA_KOURIER_FANART_API_KEY", "KASANA_KOURIER_FANART_CLIENT_KEY"),
+)
+def test_fanart_settings_reject_blank_credentials(
+    monkeypatch: MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.setenv(variable, " \t ")
+
+    with pytest.raises(ValidationError, match="credentials must not be blank"):
+        FanartSettings()

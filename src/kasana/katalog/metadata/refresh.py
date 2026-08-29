@@ -14,6 +14,8 @@ from kasana.shared.metadata import (
     ArtworkDownload,
     ArtworkReference,
     MovieDetails,
+    PosterListing,
+    PosterLookup,
     ProviderCapability,
     ProviderMediaKind,
     ProviderReference,
@@ -61,6 +63,14 @@ class PosterArtworkProvider(MetadataProvider, Protocol):
     async def list_posters(
         self, reference: ProviderReference, media_kind: ProviderMediaKind
     ) -> tuple[ArtworkReference, ...]: ...
+
+
+class ExternalPosterArtworkProvider(MetadataProvider, Protocol):
+    """Optional artwork source resolved from a matched title's external identifiers."""
+
+    async def list_posters_by_external_id(
+        self, lookup: PosterLookup, /
+    ) -> PosterListing | None: ...
 
 
 async def fetch_details(

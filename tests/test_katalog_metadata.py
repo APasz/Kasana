@@ -31,7 +31,10 @@ from kasana.shared.metadata import (
     ArtworkContent,
     ArtworkKind,
     ArtworkReference,
+    ExternalIdentifier,
     MovieDetails,
+    PosterListing,
+    PosterLookup,
     ProviderCapability,
     ProviderMediaKind,
     ProviderReference,
@@ -102,6 +105,39 @@ class _FakeProvider:
         return self.posters
 
 
+class _SupplementalPosterProvider(_FakeProvider):
+    provider_name = "fanart"
+
+    def __init__(
+        self,
+        artwork: ArtworkContent,
+        posters: tuple[ArtworkReference, ...],
+        *,
+        provider_id: str,
+    ) -> None:
+        super().__init__((), {}, artwork, posters)
+        self.provider_id = provider_id
+        self.lookups: list[PosterLookup] = []
+
+    @property
+    def capabilities(self) -> frozenset[ProviderCapability]:
+        return frozenset(
+            {
+                ProviderCapability.GET_ARTWORK,
+                ProviderCapability.LIST_POSTERS_BY_EXTERNAL_ID,
+            }
+        )
+
+    async def list_posters_by_external_id(self, lookup: PosterLookup) -> PosterListing:
+        self.lookups.append(lookup)
+        self.poster_list_calls += 1
+        return PosterListing(
+            provider=self.provider_name,
+            provider_id=self.provider_id,
+            posters=self.posters,
+        )
+
+
 def _search_result(
     provider_id: str,
     title: str,
@@ -130,6 +166,7 @@ def _movie_details(
     year: int,
     overview: str = "Provider overview",
     poster: ArtworkReference | None = None,
+    external_ids: tuple[ExternalIdentifier, ...] = (),
 ) -> MovieDetails:
     return MovieDetails(
         reference=ProviderReference(provider="fake", raw_id=provider_id),
@@ -139,6 +176,7 @@ def _movie_details(
         release_date=date(year, 1, 1),
         overview=overview,
         poster=poster,
+        external_ids=external_ids,
     )
 
 
@@ -592,6 +630,115 @@ async def test_artwork_cache_fetches_ordered_poster_variants_for_one_shared_pick
     assert set(records_by_revision) == {"/primary.png", "/japanese.png", "/fresh.png"}
     assert records_by_revision["/japanese.png"].id == japanese_record.id
     assert not obsolete_path.exists()
+
+
+async def test_artwork_cache_interleaves_supplemental_poster_sources_and_prunes_them_by_owner(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    item_id = _create_movie(database, tmp_path / "Movies", title="Paprika", year=2006)
+    primary = _poster_reference("/primary.png")
+    tmdb_alternative = _poster_reference("/tmdb-alternative.png")
+    replacement = _poster_reference("/replacement.png")
+    fanart_first = ArtworkReference(
+        provider="fanart",
+        kind=ArtworkKind.POSTER,
+        raw_path="fanart-first",
+        source_url=AnyHttpUrl("https://fanart.example.test/first.png"),
+        language="en",
+        width=2000,
+        height=3000,
+        vote_count=25,
+    )
+    fanart_second = ArtworkReference(
+        provider="fanart",
+        kind=ArtworkKind.POSTER,
+        raw_path="fanart-second",
+        source_url=AnyHttpUrl("https://fanart.example.test/second.png"),
+        language="ja",
+        width=1000,
+        height=1500,
+        vote_count=10,
+    )
+    image = b"\x89PNG\r\n\x1a\nminimal"
+    metadata_provider = _FakeProvider(
+        (_search_result("51", "Paprika", year=2006, poster=primary),),
+        {
+            "51": _movie_details(
+                "51",
+                "Paprika",
+                year=2006,
+                poster=primary,
+                external_ids=(ExternalIdentifier(namespace="tmdb", value="51"),),
+            ),
+            "52": _movie_details(
+                "52",
+                "Paprika",
+                year=2006,
+                poster=replacement,
+                external_ids=(ExternalIdentifier(namespace="tmdb", value="52"),),
+            ),
+        },
+        ArtworkContent(reference=primary, content=image, media_type="image/png"),
+        posters=(tmdb_alternative,),
+    )
+    fanart_provider = _SupplementalPosterProvider(
+        ArtworkContent(reference=fanart_first, content=image, media_type="image/png"),
+        (fanart_first, fanart_second),
+        provider_id="tmdb:51",
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.search_item(item_id, (metadata_provider,))
+    cached = await workflow.fetch_posters(
+        (metadata_provider, fanart_provider), item_id=item_id, include_variants=True
+    )
+
+    assert len(cached) == 4
+    assert metadata_provider.artwork_calls == 2
+    assert fanart_provider.artwork_calls == 2
+    assert fanart_provider.poster_list_calls == 1
+    assert fanart_provider.lookups == [
+        PosterLookup(
+            reference=ProviderReference(provider="fake", raw_id="51"),
+            media_kind=ProviderMediaKind.MOVIE,
+            external_ids=(
+                ExternalIdentifier(namespace="fake", value="51"),
+                ExternalIdentifier(namespace="tmdb", value="51"),
+            ),
+        )
+    ]
+
+    def records(session: Session) -> tuple[CachedArtwork, ...]:
+        return tuple(
+            session.scalars(
+                select(CachedArtwork)
+                .where(CachedArtwork.library_item_id == item_id)
+                .order_by(CachedArtwork.display_order)
+            )
+        )
+
+    cached_records = database.run_transaction(records)
+    assert [
+        (
+            record.provider,
+            record.provider_id,
+            record.owner_provider,
+            record.owner_provider_id,
+            record.provider_revision,
+            record.is_primary,
+        )
+        for record in cached_records
+    ] == [
+        ("fake", "51", "fake", "51", "/primary.png", True),
+        ("fake", "51", "fake", "51", "/tmdb-alternative.png", False),
+        ("fanart", "tmdb:51", "fake", "51", "fanart-first", False),
+        ("fanart", "tmdb:51", "fake", "51", "fanart-second", False),
+    ]
+    assert await workflow.prune_artwork() == (0, 0)
+
+    await workflow.match_item(item_id, metadata_provider, "52")
+
+    assert await workflow.prune_artwork() == (4, len(image) * 4)
 
 
 async def test_artwork_cache_fetches_only_the_requested_item(

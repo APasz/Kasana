@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import AnyHttpUrl
 from yarl import URL
 
+from kasana.kourier.tmdb.constants import TMDB_PROVIDER
 from kasana.kourier.tmdb.payloads import (
     CountryCode,
     TMDBCountry,
@@ -15,7 +16,6 @@ from kasana.kourier.tmdb.payloads import (
     TMDBMovieSearchEntry,
     TMDBSeriesSearchEntry,
 )
-from kasana.kourier.tmdb.retry import TMDB_PROVIDER
 from kasana.shared.metadata import (
     ArtworkKind,
     ArtworkReference,

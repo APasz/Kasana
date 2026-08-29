@@ -45,7 +45,8 @@ from kasana.katalog.repair import (
 from kasana.katalog.scanning import IncrementalScanner, ScanCancelledError, ScanResult
 from kasana.katalog.settings import KatalogSettings
 from kasana.katalog.user_configuration import UserConfigurationStore
-from kasana.kourier.settings import TMDBSettings
+from kasana.kourier.fanart import FanartProvider
+from kasana.kourier.settings import FanartSettings, TMDBSettings
 from kasana.kourier.tmdb import TMDBProvider
 from kasana.shared.concurrency import BlockingExecutor, run_blocking
 
@@ -579,10 +580,26 @@ class KatalogApiRuntime:
             provider_settings = TMDBSettings.model_validate({})
         except ValidationError as error:
             raise MetadataProviderConfigurationError("TMDB provider is not configured.") from error
-        provider = TMDBProvider(provider_settings)
         try:
-            return await operation(self._workflow(), (provider,))
+            fanart_settings = FanartSettings.model_validate({})
+        except ValidationError as error:
+            raise MetadataProviderConfigurationError(
+                "Fanart.tv provider configuration is invalid."
+            ) from error
+        provider = TMDBProvider(provider_settings)
+        supplemental_provider: FanartProvider | None = None
+        try:
+            if fanart_settings.is_configured:
+                supplemental_provider = FanartProvider(fanart_settings)
+            providers: tuple[MetadataProvider, ...] = (
+                (provider, supplemental_provider)
+                if supplemental_provider is not None
+                else (provider,)
+            )
+            return await operation(self._workflow(), providers)
         finally:
+            if supplemental_provider is not None:
+                await supplemental_provider.close()
             await provider.close()
 
 
