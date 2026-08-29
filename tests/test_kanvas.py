@@ -8,6 +8,7 @@ from asyncio import CancelledError
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -4295,6 +4296,7 @@ def test_about_page_includes_project_and_required_notices() -> None:
     } <= links
     assert {
         "Created by APasz",
+        f"Version {distribution_version('kasana')}",
         "Released under the MIT License.",
         "This product uses the TMDB API but is not endorsed or certified by TMDB.",
     } <= copy

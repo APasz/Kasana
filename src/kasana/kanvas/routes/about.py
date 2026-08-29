@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.metadata import version as distribution_version
 from typing import Final
 
 from nicegui import ui
@@ -22,6 +23,7 @@ _MIT_LICENSE_FILENAME: Final = "LICENSE"
 _GITHUB_MIT_LICENSE_URL: Final = f"{_GITHUB_URL}/blob/main/{_MIT_LICENSE_FILENAME}"
 _SUBTITLES_OCTOPUS_LICENSE_URL: Final = f"/_kanvas/libass/{_MIT_LICENSE_FILENAME}"
 _SUBTITLES_OCTOPUS_COPYRIGHT_URL: Final = "/_kanvas/libass/COPYRIGHT"
+_PROJECT_DISTRIBUTION: Final = "kasana"
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,9 @@ def render_about(settings: Kanvas_Settings, profile: SessionProfile) -> None:
             ).classes("k-about__lead")
             _link("View the source on GitHub", _GITHUB_URL)
 
+            ui.label(f"Version {distribution_version(_PROJECT_DISTRIBUTION)}").classes(
+                "k-about__copy"
+            )
             ui.label("Created by APasz").classes("k-about__copy")
 
             section_title("Licence")
