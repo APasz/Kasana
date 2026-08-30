@@ -81,9 +81,7 @@ class ProfileSessionRegistry:
             for session_id in expired:
                 del session_ids[session_id]
         expired_profile_ids = tuple(
-            user_id
-            for user_id, profile in self._profiles.items()
-            if profile.expires_at <= now
+            user_id for user_id, profile in self._profiles.items() if profile.expires_at <= now
         )
         for user_id in expired_profile_ids:
             del self._profiles[user_id]
@@ -217,9 +215,7 @@ class ProfileSessions:
 
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[KatalogClient]:
-        async with katalog_client_context(
-            self._settings, client_factory=KatalogClient
-        ) as client:
+        async with katalog_client_context(self._settings, client_factory=KatalogClient) as client:
             yield client
 
 

@@ -67,9 +67,7 @@ def classify_playback(
     video_codec = _codec(entry.video_streams[0].codec)
     if video_codec in {"h264", "avc", "avc1"}:
         pass
-    elif video_codec in {"hevc", "h265", "hev1", "hvc1"} and _browser_supports_hevc(
-        capabilities
-    ):
+    elif video_codec in {"hevc", "h265", "hev1", "hvc1"} and _browser_supports_hevc(capabilities):
         pass
     else:
         return PlaybackCompatibilityDecision(mode=PlaybackMode.UNSUPPORTED)

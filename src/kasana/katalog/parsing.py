@@ -74,12 +74,10 @@ class ParseFailure:
     message: str
 
 
-_DECADE_PATTERN: Pattern[str] = re.compile(
-    r"^(?:(?:18|19|20)\d{2}'?s|\d{2}'s)$", re.IGNORECASE
-)
+_DECADE_PATTERN: Pattern[str] = re.compile(r"^(?:(?:18|19|20)\d{2}'?s|\d{2}'s)$", re.IGNORECASE)
 _YEAR_SUFFIX_PATTERN: Pattern[str] = re.compile(r"\s*\((?P<year>(?:18|19|20)\d{2})\)$")
 _SEASON_PATTERN: Pattern[str] = re.compile(
-    rf"^(?P<label>season|volume|シーズン|시즌)\s*(?P<number>{NUMERAL_TOKEN_PATTERN})$",
+    rf"^(?P<label>season|volume|シーズン|시즌)[. _-]*(?P<number>{NUMERAL_TOKEN_PATTERN})$",
     re.IGNORECASE,
 )
 _ORDINAL_SEASON_PATTERN: Pattern[str] = re.compile(
@@ -121,9 +119,7 @@ _EPISODE_RANGE_SUFFIX = (
     rf"(?:episode|ep|e){NUMERAL_TOKEN_PATTERN}"
 )
 _EPISODE_MARKER_PATTERN: Pattern[str] = re.compile(
-    _SEASON_EPISODE_MARKER
-    +
-    rf"(?:{_EPISODE_RANGE_SUFFIX})?"
+    _SEASON_EPISODE_MARKER + rf"(?:{_EPISODE_RANGE_SUFFIX})?"
     r"(?:$|[. _-])"
     rf"|(?:^|[. _-])(?:episode|ep|e){NUMERAL_TOKEN_PATTERN}(?:$|[. _-])"
     rf"|\[{NUMERAL_TOKEN_PATTERN}[xX]{NUMERAL_TOKEN_PATTERN}\]"
@@ -164,9 +160,7 @@ def parse_season_number(directory_name: str, *, allow_volume: bool) -> int | Non
         return _parse_season_numeral(match.group("number"))
     ordinal_match = _ORDINAL_SEASON_PATTERN.fullmatch(directory_name.strip())
     return (
-        _parse_season_numeral(ordinal_match.group("number"))
-        if ordinal_match is not None
-        else None
+        _parse_season_numeral(ordinal_match.group("number")) if ordinal_match is not None else None
     )
 
 
@@ -185,9 +179,7 @@ def _parse_episode_numeral(value: str) -> int | None:
 def parse_episode_numbers(
     filename_stem: str, *, season_from_directory: int | None
 ) -> tuple[int, int] | None:
-    episode_range = parse_episode_range(
-        filename_stem, season_from_directory=season_from_directory
-    )
+    episode_range = parse_episode_range(filename_stem, season_from_directory=season_from_directory)
     if episode_range is None:
         return None
     return episode_range.start.season_number, episode_range.start.episode_number
@@ -196,18 +188,14 @@ def parse_episode_numbers(
 def parse_episode_range(
     filename_stem: str, *, season_from_directory: int | None
 ) -> EpisodeRange | None:
-    season_episode_range: Match[str] | None = _SEASON_EPISODE_RANGE_PATTERN.search(
-        filename_stem
-    )
+    season_episode_range: Match[str] | None = _SEASON_EPISODE_RANGE_PATTERN.search(filename_stem)
     if season_episode_range is not None:
         season_number = _parse_season_numeral(season_episode_range.group("season"))
         episode_number = _parse_episode_numeral(season_episode_range.group("episode"))
         end_season_number = _parse_season_numeral(
             season_episode_range.group("end_season") or season_episode_range.group("season")
         )
-        end_episode_number = _parse_episode_numeral(
-            season_episode_range.group("end_episode")
-        )
+        end_episode_number = _parse_episode_numeral(season_episode_range.group("end_episode"))
         if (
             season_number is None
             or episode_number is None
@@ -241,9 +229,7 @@ def parse_episode_range(
         if season_number is None or episode_number is None:
             return None
         return EpisodeRange(
-            start=EpisodeIdentifier(
-                season_number=season_number, episode_number=episode_number
-            )
+            start=EpisodeIdentifier(season_number=season_number, episode_number=episode_number)
         )
     season_episode: Match[str] | None = _SEASON_EPISODE_PATTERN.search(filename_stem)
     if season_episode is not None:
@@ -272,9 +258,7 @@ def parse_episode_range(
     east_asian_episode = _EAST_ASIAN_EPISODE_PATTERN.search(filename_stem)
     if east_asian_episode is None:
         return None
-    numeral = east_asian_episode.group("han_episode") or east_asian_episode.group(
-        "hangul_episode"
-    )
+    numeral = east_asian_episode.group("han_episode") or east_asian_episode.group("hangul_episode")
     assert numeral is not None
     episode_number = _parse_episode_numeral(numeral)
     return (

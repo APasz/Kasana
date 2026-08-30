@@ -19,7 +19,9 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     with op.batch_alter_table("library_item") as batch:
         batch.add_column(sa.Column("default_audio_stream_index", sa.Integer(), nullable=True))
-        batch.add_column(sa.Column("default_subtitle_track_id", sa.String(length=64), nullable=True))
+        batch.add_column(
+            sa.Column("default_subtitle_track_id", sa.String(length=64), nullable=True)
+        )
         batch.add_column(
             sa.Column("default_subtitle_timing_offset_milliseconds", sa.Integer(), nullable=True)
         )

@@ -508,9 +508,9 @@ def test_watch_order_unavailability_distinguishes_non_playable_members(
         assert series is not None
         assert unavailable_extra is not None
         return (
-            _watch_order_entry_is_unavailable(session, movie),
-            _watch_order_entry_is_unavailable(session, series),
-            _watch_order_entry_is_unavailable(session, unavailable_extra),
+            _watch_order_entry_is_unavailable(movie, ()),
+            _watch_order_entry_is_unavailable(series, ()),
+            _watch_order_entry_is_unavailable(unavailable_extra, ()),
         )
 
     assert database.run_transaction(availability) == (True, False, True)

@@ -22,7 +22,7 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.parsing import infer_library_layout
+from kasana.katalog.parsing import LibraryLayout, infer_library_layout
 from kasana.katalog.probe import FFProbeClient, ProbeFailure, ProbeResult
 from kasana.katalog.scanning.audit import structural_findings
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile, plan_files
@@ -135,7 +135,7 @@ class IncrementalScanner:
         findings = list(filesystem.findings)
         plan = plan_files(
             root_path,
-            infer_library_layout(root_path),
+            _layout_for_root(root),
             filesystem.files,
             existing_files,
         )
@@ -310,7 +310,7 @@ class IncrementalScanner:
             findings.extend(
                 structural_findings(
                     root,
-                    layout=infer_library_layout(Path(root.path)),
+                    layout=_layout_for_root(root),
                     items=items,
                     media_files=media_files,
                 )
@@ -318,3 +318,20 @@ class IncrementalScanner:
             return tuple(findings)
 
         return self.database.run_transaction(inspect)
+
+
+def _layout_for_root(root: Kura) -> LibraryLayout:
+    """Use a conventional directory name when present, else the configured root kind."""
+
+    layout = infer_library_layout(Path(root.path))
+    if layout is not LibraryLayout.UNKNOWN:
+        return layout
+    match root.expected_media_kind:
+        case ZaisanKind.MOVIE:
+            return LibraryLayout.MOVIES
+        case ZaisanKind.SERIES:
+            return LibraryLayout.TV_SHOWS
+        case _:
+            raise ValueError(
+                f"Library root {root.id} has unsupported expected kind {root.expected_media_kind}."
+            )

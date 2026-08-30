@@ -4465,6 +4465,23 @@ def test_console_main_uses_auto_browser_open_setting(monkeypatch: MonkeyPatch) -
     assert all(options["timeout_graceful_shutdown"] == 5 for options in run_options)
 
 
+def test_console_main_suppresses_normal_keyboard_interrupt(monkeypatch: MonkeyPatch) -> None:
+    def fake_main() -> None:
+        pass
+
+    def fake_build_dashboard(_settings: Kanvas_Settings) -> None:
+        pass
+
+    def fake_run(**_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(kanvas_main, "main", fake_main)
+    monkeypatch.setattr(kanvas_main, "build_dashboard", fake_build_dashboard)
+    monkeypatch.setattr(kanvas_main.ui, "run", fake_run)
+
+    kanvas_main.console_main()
+
+
 async def test_service_transforms_real_public_contracts_through_one_fake_client(
     monkeypatch: MonkeyPatch,
 ) -> None:

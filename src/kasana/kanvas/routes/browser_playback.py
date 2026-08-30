@@ -49,9 +49,7 @@ def _player_icon(icon: IconName, alternate_icon: IconName | None = None) -> None
     with ui.element("span").classes("k-player__control-icon k-player__control-icon--default"):
         icon_svg(icon)
     if alternate_icon is not None:
-        with ui.element("span").classes(
-            "k-player__control-icon k-player__control-icon--alternate"
-        ):
+        with ui.element("span").classes("k-player__control-icon k-player__control-icon--alternate"):
             icon_svg(alternate_icon)
 
 
@@ -120,10 +118,14 @@ def _fullscreen_frame_alignment_option(
     """Render one icon option in the fullscreen video-frame alignment control."""
 
     escaped_label = escape(label, quote=True)
-    with ui.element("button").classes("k-player__frame-alignment-option").props(
-        f'type="button" data-player-frame-alignment-option="{alignment.value}" '
-        f'aria-label="{escaped_label}" '
-        f'aria-pressed="{str(alignment is _FullscreenFrameAlignment.CENTRED).lower()}"'
+    with (
+        ui.element("button")
+        .classes("k-player__frame-alignment-option")
+        .props(
+            f'type="button" data-player-frame-alignment-option="{alignment.value}" '
+            f'aria-label="{escaped_label}" '
+            f'aria-pressed="{str(alignment is _FullscreenFrameAlignment.CENTRED).lower()}"'
+        )
     ):
         icon_svg(icon)
 
@@ -179,8 +181,10 @@ def _render_playback_queue(session: PlaybackSessionResponse) -> None:
     next_entry = queued_entries[0]
     with ui.element("details").classes("k-playback-queue").props("data-player-queue"):
         count_label = "item" if len(queued_entries) == 1 else "items"
-        with ui.element("summary").classes("k-playback-queue__summary").props(
-            'aria-label="Show playback queue"'
+        with (
+            ui.element("summary")
+            .classes("k-playback-queue__summary")
+            .props('aria-label="Show playback queue"')
         ):
             ui.label(f"Queue · {len(queued_entries)} {count_label}").classes(
                 "k-playback-queue__heading"
@@ -190,16 +194,16 @@ def _render_playback_queue(session: PlaybackSessionResponse) -> None:
                 context = _queue_entry_context(next_entry)
                 if context is not None:
                     ui.label(context).classes("k-playback-queue__context")
-            with ui.element("button").classes("k-button k-playback-queue__advance").props(
-                'type="button" data-player-next aria-label="Play the next queue item"'
+            with (
+                ui.element("button")
+                .classes("k-button k-playback-queue__advance")
+                .props('type="button" data-player-next aria-label="Play the next queue item"')
             ):
                 ui.label("Play next").classes("k-button__label")
         with ui.element("ol").classes("k-playback-queue__entries"):
             for index, queued_entry in enumerate(queued_entries, start=1):
                 with ui.element("li").classes("k-playback-queue__entry"):
-                    ui.label(f"Up next · {index}").classes(
-                        "k-playback-queue__state"
-                    )
+                    ui.label(f"Up next · {index}").classes("k-playback-queue__state")
                     with ui.element("div").classes("k-playback-queue__details"):
                         ui.label(queued_entry.display_title).classes("k-playback-queue__title")
                         context = _queue_entry_context(queued_entry)
@@ -225,25 +229,37 @@ def _subtitle_track_label(track: PlaybackSubtitleTrack) -> str:
 def _render_track_menus(entry: PlaybackPlanEntry) -> None:
     """Render compact, server-authoritative track menus without leaking source URLs."""
 
-    with ui.element("div").classes("k-player__track-menu").props(
-        'data-player-audio-menu role="menu" hidden'
+    with (
+        ui.element("div")
+        .classes("k-player__track-menu")
+        .props('data-player-audio-menu role="menu" hidden')
     ):
         ui.label("Audio").classes("k-player__menu-heading")
-        with ui.element("div").props('data-player-audio-options'):
+        with ui.element("div").props("data-player-audio-options"):
             for index, _stream in enumerate(entry.audio_streams):
-                with ui.element("button").classes("k-player__track-option").props(
-                    f'type="button" data-player-audio-stream="{index}" '
-                    f'aria-pressed="{str(index == entry.selected_audio_stream_index).lower()}"'
+                with (
+                    ui.element("button")
+                    .classes("k-player__track-option")
+                    .props(
+                        f'type="button" data-player-audio-stream="{index}" '
+                        f'aria-pressed="{str(index == entry.selected_audio_stream_index).lower()}"'
+                    )
                 ):
                     ui.label(_audio_track_label(entry, index))
-    with ui.element("div").classes("k-player__track-menu").props(
-        'data-player-subtitle-menu role="menu" hidden'
+    with (
+        ui.element("div")
+        .classes("k-player__track-menu")
+        .props('data-player-subtitle-menu role="menu" hidden')
     ):
         ui.label("Subtitles").classes("k-player__menu-heading")
-        with ui.element("div").props('data-player-subtitle-options'):
-            with ui.element("button").classes("k-player__track-option").props(
-                f'type="button" data-player-subtitle-track="" '
-                f'aria-pressed="{str(entry.selected_subtitle_track_id is None).lower()}"'
+        with ui.element("div").props("data-player-subtitle-options"):
+            with (
+                ui.element("button")
+                .classes("k-player__track-option")
+                .props(
+                    f'type="button" data-player-subtitle-track="" '
+                    f'aria-pressed="{str(entry.selected_subtitle_track_id is None).lower()}"'
+                )
             ):
                 ui.label("Off")
             for track in entry.subtitle_tracks:
@@ -252,58 +268,99 @@ def _render_track_menus(entry: PlaybackPlanEntry) -> None:
                     if track.format.value == "unsupported"
                     else ""
                 )
-                with ui.element("button").classes("k-player__track-option").props(
-                    f'type="button" data-player-subtitle-track="{track.id}" '
-                    f'data-player-subtitle-format="{track.format.value}"{unsupported} '
-                    f'aria-pressed="{str(track.id == entry.selected_subtitle_track_id).lower()}"'
+                selected = str(track.id == entry.selected_subtitle_track_id).lower()
+                with (
+                    ui.element("button")
+                    .classes("k-player__track-option")
+                    .props(
+                        f'type="button" data-player-subtitle-track="{track.id}" '
+                        f'data-player-subtitle-format="{track.format.value}"{unsupported} '
+                        f'aria-pressed="{selected}"'
+                    )
                 ):
                     ui.label(_subtitle_track_label(track))
-        with ui.element("div").classes("k-player__subtitle-timing").props(
-            'role="group" aria-label="Subtitle timing"'
+        with (
+            ui.element("div")
+            .classes("k-player__subtitle-timing")
+            .props('role="group" aria-label="Subtitle timing"')
         ):
             ui.label("Timing").classes("k-player__subtitle-timing-heading")
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-timing-step="-500" '
-                'aria-label="Show subtitles 0.5 seconds earlier"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-timing-step="-500" '
+                    'aria-label="Show subtitles 0.5 seconds earlier"'
+                )
             ):
                 ui.label("Earlier")
             ui.label(_subtitle_timing_label(entry.subtitle_timing_offset_milliseconds)).props(
                 'data-player-subtitle-timing-label aria-live="polite"'
             )
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-timing-step="500" '
-                'aria-label="Show subtitles 0.5 seconds later"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-timing-step="500" '
+                    'aria-label="Show subtitles 0.5 seconds later"'
+                )
             ):
                 ui.label("Later")
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-timing-reset aria-label="Reset subtitle timing"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-timing-reset '
+                    'aria-label="Reset subtitle timing"'
+                )
             ):
                 ui.label("Reset")
-        with ui.element("div").classes("k-player__subtitle-appearance").props(
-            'data-player-subtitle-appearance role="group" aria-label="WebVTT subtitle appearance"'
+        with (
+            ui.element("div")
+            .classes("k-player__subtitle-appearance")
+            .props(
+                'data-player-subtitle-appearance role="group" '
+                'aria-label="WebVTT subtitle appearance"'
+            )
         ):
             ui.label("Appearance · WebVTT").classes("k-player__subtitle-timing-heading")
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-font-scale-step="-25" '
-                'aria-label="Use smaller subtitle text"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-font-scale-step="-25" '
+                    'aria-label="Use smaller subtitle text"'
+                )
             ):
                 ui.label("Smaller")
             ui.label(f"{entry.subtitle_font_scale_percent}%").props(
                 'data-player-subtitle-font-scale-label aria-live="polite"'
             )
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-font-scale-step="25" '
-                'aria-label="Use larger subtitle text"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-font-scale-step="25" '
+                    'aria-label="Use larger subtitle text"'
+                )
             ):
                 ui.label("Larger")
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-background '
-                f'aria-pressed="{str(entry.subtitle_background).lower()}"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-background '
+                    f'aria-pressed="{str(entry.subtitle_background).lower()}"'
+                )
             ):
                 ui.label("Backdrop")
-            with ui.element("button").classes("k-player__timing-option").props(
-                'type="button" data-player-subtitle-shadow '
-                f'aria-pressed="{str(entry.subtitle_shadow).lower()}"'
+            with (
+                ui.element("button")
+                .classes("k-player__timing-option")
+                .props(
+                    'type="button" data-player-subtitle-shadow '
+                    f'aria-pressed="{str(entry.subtitle_shadow).lower()}"'
+                )
             ):
                 ui.label("Shadow")
             with ui.element("div").classes("k-player__subtitle-position"):
@@ -313,10 +370,14 @@ def _render_track_menus(entry: PlaybackPlanEntry) -> None:
                     ("middle", "Middle"),
                     ("bottom", "Bottom"),
                 ):
-                    with ui.element("button").classes("k-player__timing-option").props(
-                        f'type="button" data-player-subtitle-position="{position}" '
-                        "aria-pressed="
-                        f'"{str(entry.subtitle_vertical_position.value == position).lower()}"'
+                    with (
+                        ui.element("button")
+                        .classes("k-player__timing-option")
+                        .props(
+                            f'type="button" data-player-subtitle-position="{position}" '
+                            "aria-pressed="
+                            f'"{str(entry.subtitle_vertical_position.value == position).lower()}"'
+                        )
                     ):
                         ui.label(label)
 
@@ -370,13 +431,11 @@ def render_browser_playback_card(
             'data-player-kestrel hidden aria-live="polite"'
         )
         with ui.element("div").classes("k-player__frame"):
-            ui.element("video").classes("k-player__video").props(
-                'playsinline preload="metadata"'
-            )
+            ui.element("video").classes("k-player__video").props('playsinline preload="metadata"')
             _player_frame_toggle()
         with ui.element("div").classes("k-player__fullscreen-info"):
             ui.label(browser_entry.fullscreen_title).classes("k-player__fullscreen-title").props(
-                'data-player-fullscreen-title'
+                "data-player-fullscreen-title"
             )
             ui.label(browser_entry.special_info or "").classes(
                 "k-player__fullscreen-special-info"
@@ -387,9 +446,13 @@ def render_browser_playback_card(
             ui.label("").classes("k-player__fullscreen-time").props(
                 'data-player-fullscreen-time aria-label="Current time"'
             )
-        with ui.element("div").classes("k-player__frame-alignment").props(
-            'data-player-frame-alignment-controls role="group" '
-            'aria-label="Video alignment" hidden'
+        with (
+            ui.element("div")
+            .classes("k-player__frame-alignment")
+            .props(
+                'data-player-frame-alignment-controls role="group" '
+                'aria-label="Video alignment" hidden'
+            )
         ):
             _fullscreen_frame_alignment_option(
                 _FullscreenFrameAlignment.START, "Left", IconName.FRAME_ALIGN_START
@@ -400,7 +463,7 @@ def render_browser_playback_card(
             _fullscreen_frame_alignment_option(
                 _FullscreenFrameAlignment.END, "Right", IconName.FRAME_ALIGN_END
             )
-        with ui.element("span").props('data-player-ass-fonts hidden'):
+        with ui.element("span").props("data-player-ass-fonts hidden"):
             for font in entry.subtitle_font_attachments:
                 ui.element("span").props(f'data-player-ass-font="{font.id}"')
         with ui.element("div").classes("k-player__progress"):
@@ -419,12 +482,12 @@ def render_browser_playback_card(
             )
             ui.label("-0:00").classes(
                 "k-player__time k-player__time--remaining k-player__bar-label"
-            ).props(
-                'data-player-remaining-time aria-live="off"'
-            )
+            ).props('data-player-remaining-time aria-live="off"')
         with ui.element("div").classes("k-player__details"):
-            with ui.element("div").classes("k-player__controls").props(
-                'aria-label="Playback controls"'
+            with (
+                ui.element("div")
+                .classes("k-player__controls")
+                .props('aria-label="Playback controls"')
             ):
                 with ui.element("div").classes("k-player__transport-controls"):
                     _player_control(
@@ -490,8 +553,13 @@ def render_browser_playback_card(
                         "Fullscreen",
                         alternate_icon=IconName.FULLSCREEN_EXIT,
                     )
-            with ui.element("div").classes("k-player__mobile-menu").props(
-                'data-player-mobile-menu role="group" aria-label="More playback controls" hidden'
+            with (
+                ui.element("div")
+                .classes("k-player__mobile-menu")
+                .props(
+                    'data-player-mobile-menu role="group" '
+                    'aria-label="More playback controls" hidden'
+                )
             ):
                 _mobile_player_menu_option(
                     IconName.ADMINISTRATION,
@@ -536,14 +604,18 @@ def render_browser_playback_card(
                         'type="range" min="0" max="1" value="1" step="0.05" '
                         'data-player-mobile-volume aria-label="Volume"'
                     )
-        with ui.element("div").classes("k-player__context-menu").props(
-            'data-player-context-menu role="menu" hidden'
+        with (
+            ui.element("div")
+            .classes("k-player__context-menu")
+            .props('data-player-context-menu role="menu" hidden')
         ):
             ui.label("Playback speed").classes("k-player__menu-heading")
             with ui.element("div").classes("k-player__speed-options"):
                 for rate in _PLAYBACK_RATES:
-                    with ui.element("button").classes("k-player__speed-option").props(
-                        f'type="button" data-player-rate="{rate:g}" aria-pressed="false"'
+                    with (
+                        ui.element("button")
+                        .classes("k-player__speed-option")
+                        .props(f'type="button" data-player-rate="{rate:g}" aria-pressed="false"')
                     ):
                         ui.html(f"{rate:g}x", tag="span")
             with ui.element("div").classes("k-player__context-option"):
@@ -552,8 +624,10 @@ def render_browser_playback_card(
                 )
                 ui.html("Show browser controls", tag="span")
             if has_queued_item:
-                with ui.element("label").classes("k-player__context-option").props(
-                    "data-player-autoplay-next-option"
+                with (
+                    ui.element("label")
+                    .classes("k-player__context-option")
+                    .props("data-player-autoplay-next-option")
                 ):
                     ui.element("input").props(
                         'type="checkbox" data-player-autoplay-next checked '

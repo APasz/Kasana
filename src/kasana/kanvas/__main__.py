@@ -27,18 +27,23 @@ def console_main() -> None:
     settings = Kanvas_Settings()
     shared_settings = SharedSettings()
     build_dashboard(settings)
-    ui.run(  # pyright: ignore[reportUnknownMemberType]
-        host=settings.host,
-        port=settings.port,
-        title="Kanvas",
-        dark=True,
-        reload=False,
-        tailwind=False,
-        show=settings.auto_browser_open,
-        show_welcome_message=False,
-        uvicorn_logging_level=shared_settings.log_level.value.casefold(),
-        log_config=None,
-        timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
-    )
+    try:
+        ui.run(  # pyright: ignore[reportUnknownMemberType]
+            host=settings.host,
+            port=settings.port,
+            title="Kanvas",
+            dark=True,
+            reload=False,
+            tailwind=False,
+            show=settings.auto_browser_open,
+            show_welcome_message=False,
+            uvicorn_logging_level=shared_settings.log_level.value.casefold(),
+            log_config=None,
+            timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
+        )
+    except KeyboardInterrupt:
+        return
+
+
 if __name__ == "__main__":  # pragma: no cover
     console_main()

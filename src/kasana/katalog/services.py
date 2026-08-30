@@ -46,12 +46,10 @@ _PARENT_KINDS: dict[ZaisanKind, frozenset[ZaisanKind]] = {
 PLAYABLE_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
     {ZaisanKind.MOVIE, ZaisanKind.EPISODE, ZaisanKind.SPECIAL, ZaisanKind.EXTRA}
 )
-EPISODIC_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[
-    ZaisanKind
-]({ZaisanKind.EPISODE, ZaisanKind.SPECIAL})
-_SERIES_COMPLETION_CHILD_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
-    {ZaisanKind.SEASON}
+EPISODIC_ITEM_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
+    {ZaisanKind.EPISODE, ZaisanKind.SPECIAL}
 )
+_SERIES_COMPLETION_CHILD_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind]({ZaisanKind.SEASON})
 
 
 def create_library_root(

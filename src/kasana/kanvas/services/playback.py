@@ -38,9 +38,7 @@ class KanvasPlaybackService:
 
     @asynccontextmanager
     async def _client(self) -> AsyncGenerator[KatalogClient]:
-        async with katalog_client_context(
-            self._settings, client_factory=KatalogClient
-        ) as client:
+        async with katalog_client_context(self._settings, client_factory=KatalogClient) as client:
             yield client
 
     async def create_item_launch_uri(self, item_id: int, *, resume: bool) -> str:

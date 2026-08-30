@@ -105,9 +105,7 @@ def update_collection(
             ),
         )
     elif name is not None:
-        request = _validated(
-            cli, lambda: CollectionUpdate(expected_revision=revision, name=name)
-        )
+        request = _validated(cli, lambda: CollectionUpdate(expected_revision=revision, name=name))
     elif overview is not None or clear_overview:
         request = _validated(
             cli,

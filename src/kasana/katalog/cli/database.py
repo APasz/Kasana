@@ -31,8 +31,8 @@ def backup(
     """Write a portable JSON snapshot of SQLite and profile configuration."""
 
     cli = context_from(context)
-    target = (destination or cli.settings.effective_json_backup_path).expanduser().resolve(
-        strict=False
+    target = (
+        (destination or cli.settings.effective_json_backup_path).expanduser().resolve(strict=False)
     )
     try:
         create_json_backup(

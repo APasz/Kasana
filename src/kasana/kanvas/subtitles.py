@@ -83,9 +83,7 @@ def _shift_cues(
             + timing_offset_seconds,
         )
         end = (
-            _timestamp_seconds(timing.group("end"))
-            - stream_offset_seconds
-            + timing_offset_seconds
+            _timestamp_seconds(timing.group("end")) - stream_offset_seconds + timing_offset_seconds
         )
         if end <= 0:
             continue

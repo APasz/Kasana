@@ -690,9 +690,7 @@ class CachedArtwork(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     vote_average: Mapped[float | None] = mapped_column(Float)
     vote_count: Mapped[int | None] = mapped_column(Integer)
-    is_primary: Mapped[bool] = mapped_column(
-        nullable=False, default=False, server_default=false()
-    )
+    is_primary: Mapped[bool] = mapped_column(nullable=False, default=False, server_default=false())
     display_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )

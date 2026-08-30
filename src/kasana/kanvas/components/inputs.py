@@ -86,9 +86,11 @@ def multi_select_input(
     if len(selected_labels) > 2:
         summary = f"{len(selected_labels)} {aria_label.casefold()}"
 
-    with ui.element("details").classes("k-control-shell k-check-menu").props(
-        f"aria-label={aria_label!r}"
-    ) as menu:
+    with (
+        ui.element("details")
+        .classes("k-control-shell k-check-menu")
+        .props(f"aria-label={aria_label!r}") as menu
+    ):
         with ui.element("summary").classes("k-check-menu__summary"):
             ui.label(summary)
         with ui.element("div").classes("k-check-menu__options"):

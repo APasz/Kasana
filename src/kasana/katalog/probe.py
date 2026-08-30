@@ -228,9 +228,7 @@ def _font_attachment_summary(stream: _ProbeStream) -> JSONObject | None:
     ):
         return None
     suffix = Path(filename).suffix.casefold()
-    font_format = {".ttf": "truetype", ".otf": "opentype", ".ttc": "collection"}.get(
-        suffix
-    )
+    font_format = {".ttf": "truetype", ".otf": "opentype", ".ttc": "collection"}.get(suffix)
     if font_format is None:
         return None
     return {"stream_index": stream.index, "filename": filename, "format": font_format}

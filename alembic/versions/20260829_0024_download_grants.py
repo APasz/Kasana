@@ -33,9 +33,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_download_grant_hash", "download_grant", ["token_hash"], unique=True)
     op.create_index("ix_download_grant_expiry", "download_grant", ["expires_at"])
-    op.create_index(
-        "ix_download_grant_user_expiry", "download_grant", ["user_id", "expires_at"]
-    )
+    op.create_index("ix_download_grant_user_expiry", "download_grant", ["user_id", "expires_at"])
 
 
 def downgrade() -> None:

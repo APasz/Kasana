@@ -19,12 +19,18 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     with op.batch_alter_table("library_root") as batch:
         batch.add_column(sa.Column("preferred_audio_language", sa.String(length=32), nullable=True))
-        batch.add_column(sa.Column("preferred_subtitle_language", sa.String(length=32), nullable=True))
+        batch.add_column(
+            sa.Column("preferred_subtitle_language", sa.String(length=32), nullable=True)
+        )
     with op.batch_alter_table("playback_session_entry") as batch:
         batch.add_column(
-            sa.Column("selected_audio_stream_index", sa.Integer(), nullable=False, server_default="0")
+            sa.Column(
+                "selected_audio_stream_index", sa.Integer(), nullable=False, server_default="0"
+            )
         )
-        batch.add_column(sa.Column("selected_subtitle_track_id", sa.String(length=32), nullable=True))
+        batch.add_column(
+            sa.Column("selected_subtitle_track_id", sa.String(length=32), nullable=True)
+        )
         batch.create_check_constraint(
             op.f("ck_playback_session_entry_nonnegative_selected_audio_stream_index"),
             "selected_audio_stream_index >= 0",

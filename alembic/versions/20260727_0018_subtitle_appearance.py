@@ -19,10 +19,14 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     with op.batch_alter_table("playback_session_entry") as batch:
         batch.add_column(
-            sa.Column("subtitle_font_scale_percent", sa.Integer(), nullable=False, server_default="100")
+            sa.Column(
+                "subtitle_font_scale_percent", sa.Integer(), nullable=False, server_default="100"
+            )
         )
         batch.add_column(
-            sa.Column("subtitle_background", sa.Boolean(), nullable=False, server_default=sa.false())
+            sa.Column(
+                "subtitle_background", sa.Boolean(), nullable=False, server_default=sa.false()
+            )
         )
         batch.add_column(
             sa.Column("subtitle_shadow", sa.Boolean(), nullable=False, server_default=sa.false())

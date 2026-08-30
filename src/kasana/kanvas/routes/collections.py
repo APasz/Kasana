@@ -171,10 +171,7 @@ async def render_collection_edit(
                 name="default_watch_order_id",
                 aria_label="Default watch order",
                 options=(
-                    *(
-                        SelectOption(str(order.id), order.name)
-                        for order in detail.watch_orders
-                    ),
+                    *(SelectOption(str(order.id), order.name) for order in detail.watch_orders),
                 )
                 if detail.watch_orders
                 else (SelectOption("", "No watch orders yet"),),

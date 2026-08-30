@@ -143,9 +143,7 @@ async def test_metadata_runtime_closes_tmdb_when_fanart_initialisation_fails(
     monkeypatch.setattr("kasana.katalog.api.runtime.TMDBProvider", FakeTMDBProvider)
     monkeypatch.setattr("kasana.katalog.api.runtime.FanartProvider", FailingFanartProvider)
 
-    async def operation(
-        _: MetadataWorkflow, __: tuple[MetadataProvider, ...]
-    ) -> None:
+    async def operation(_: MetadataWorkflow, __: tuple[MetadataProvider, ...]) -> None:
         pytest.fail("The operation must not run after provider initialisation fails.")
 
     with pytest.raises(RuntimeError, match="Fanart initialisation failed"):
@@ -1065,9 +1063,7 @@ async def test_completed_scan_auto_matches_safe_candidates(
     monkeypatch.setattr("kasana.katalog.api.runtime.IncrementalScanner", FakeScanner)
     monkeypatch.setattr(api_fixture.runtime, "_with_provider", with_fake_provider)
 
-    job = await api_fixture.runtime.submit_scan(
-        root_id=1, include_unavailable=False, dry_run=False
-    )
+    job = await api_fixture.runtime.submit_scan(root_id=1, include_unavailable=False, dry_run=False)
     task = api_fixture.runtime.jobs._tasks[job.id]  # pyright: ignore[reportPrivateUsage]
     await task
     completed = await api_fixture.runtime.jobs.get(job.id)
@@ -1178,9 +1174,7 @@ async def test_seeded_library_deployment_smoke_path(
     assert metadata_match.status_code == 200
     assert matched == [(1, "alpha", "api")]
 
-    artwork = await api_fixture.client.post(
-        "/api/v1/artwork/fetch", json={"library_root_id": 1}
-    )
+    artwork = await api_fixture.client.post("/api/v1/artwork/fetch", json={"library_root_id": 1})
     assert artwork.status_code == 202
     await api_fixture.runtime.jobs._tasks[artwork.json()["job"]["id"]]  # pyright: ignore[reportPrivateUsage]
 
@@ -1318,11 +1312,11 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     )
     configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
     assert set(configuration) == {
-            "accent_colour",
-            "autoplay_on_resume",
-            "default_subtitle_background",
-            "default_subtitle_font_scale_percent",
-            "default_subtitle_shadow",
+        "accent_colour",
+        "autoplay_on_resume",
+        "default_subtitle_background",
+        "default_subtitle_font_scale_percent",
+        "default_subtitle_shadow",
         "level",
         "name",
         "pin",
@@ -1352,9 +1346,7 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
     assert refreshed_user["role"] == "user"
     assert refreshed_user["accent_colour"] == "#336699"
 
-    targeted_profile = await api_fixture.client.get(
-        f"/api/v1/users/{user['id']}/session-profile"
-    )
+    targeted_profile = await api_fixture.client.get(f"/api/v1/users/{user['id']}/session-profile")
 
     assert targeted_profile.status_code == 200
     assert targeted_profile.json()["id"] == user["id"]
@@ -1387,15 +1379,15 @@ async def test_profile_user_operations_pin_and_disabled_playback(api_fixture: Ap
         "display_name": "Filesystem profile",
         "role": "user",
         "is_disabled": False,
-            "pin_required": False,
-            "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
-            "autoplay_on_resume": False,
-            "preferred_audio_language": None,
-            "preferred_subtitle_language": None,
-            "default_subtitle_font_scale_percent": 100,
-            "default_subtitle_background": False,
-            "default_subtitle_shadow": False,
-        }
+        "pin_required": False,
+        "accent_colour": PROFILE_ACCENT_COLOUR_DEFAULT,
+        "autoplay_on_resume": False,
+        "preferred_audio_language": None,
+        "preferred_subtitle_language": None,
+        "default_subtitle_font_scale_percent": 100,
+        "default_subtitle_background": False,
+        "default_subtitle_shadow": False,
+    }
 
     rejected_pin = await api_fixture.client.post(
         f"/api/v1/users/{user['id']}/authenticate", json={"pin": "0000"}

@@ -445,9 +445,7 @@ class KatalogClient:
     async def list_library_item_download_options(
         self, item_id: int
     ) -> tuple[MediaTechnicalSummary, ...]:
-        response = await self._request(
-            "GET", f"/api/v1/library/items/{item_id}/download-options"
-        )
+        response = await self._request("GET", f"/api/v1/library/items/{item_id}/download-options")
         try:
             return _DOWNLOAD_OPTIONS_ADAPTER.validate_python(response.payload)
         except ValidationError as error:
@@ -1185,8 +1183,7 @@ class KatalogClient:
         headers["Authorization"] = f"Bearer {self._bearer_token}"
         try:
             async with session.request(
-                method,
-                self._base_url + path, headers=headers, timeout=self._media_timeout
+                method, self._base_url + path, headers=headers, timeout=self._media_timeout
             ) as response:
                 request_id = response.headers.get("X-Request-ID")
                 if response.status >= 400:

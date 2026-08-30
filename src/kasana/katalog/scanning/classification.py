@@ -210,14 +210,11 @@ def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> b
         return False
     match parsed.kind:
         case ParsedMediaKind.MOVIE:
-            return (
-                existing.item_kind is ZaisanKind.MOVIE
-                and (
-                    existing.item_title != parsed.title
-                    or (
-                        parsed.release_year is not None
-                        and existing.item_release_year != parsed.release_year
-                    )
+            return existing.item_kind is ZaisanKind.MOVIE and (
+                existing.item_title != parsed.title
+                or (
+                    parsed.release_year is not None
+                    and existing.item_release_year != parsed.release_year
                 )
             )
         case ParsedMediaKind.SPECIAL:

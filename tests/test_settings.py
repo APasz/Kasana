@@ -18,18 +18,26 @@ from kasana.shared.settings import SharedSettings
 def test_component_settings_use_distinct_environment_prefixes(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("KASANA_LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("KASANA_KATALOG_API_PORT", "9123")
-    monkeypatch.setenv("KASANA_KESTREL_PLAYER_BACKEND", "vlc")
+    monkeypatch.setenv("KASANA_KESTREL_PROGRESS_INTERVAL_SECONDS", "12")
 
     assert SharedSettings().log_level is LogLevel.DEBUG
     assert SharedSettings().log_directory == Path("logs")
     assert SharedSettings().graceful_shutdown_timeout_seconds == 5
     assert KatalogSettings().api_port == 9123
-    assert KestrelSettings().player_backend is PlayerBackend.VLC
+    assert KestrelSettings().player_backend is PlayerBackend.MPV
+    assert KestrelSettings().progress_interval_seconds == 12
     assert Kanvas_Settings().host == "0.0.0.0"
     assert Kanvas_Settings().port == 5370
     assert Kanvas_Settings().auto_browser_open is False
     assert KestrelSettings().katalog_url == "http://127.0.0.1:9123"
     assert str(KourierSettings().katalog_url) == "http://127.0.0.1:9123/"
+
+
+def test_kestrel_rejects_an_unimplemented_player_backend(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("KASANA_KESTREL_PLAYER_BACKEND", "vlc")
+
+    with pytest.raises(ValidationError, match="mpv"):
+        KestrelSettings()
 
 
 def test_kanvas_auto_browser_open_reads_typed_environment(monkeypatch: MonkeyPatch) -> None:

@@ -210,9 +210,7 @@ class _HierarchyIndex:
                 and item.episode_number is not None
                 and parent is not None
             ):
-                series = (
-                    items_by_id.get(parent.parent_id) if parent.parent_id is not None else None
-                )
+                series = items_by_id.get(parent.parent_id) if parent.parent_id is not None else None
                 if series is not None and series.item_kind is ZaisanKind.SERIES:
                     episodes[
                         (
@@ -226,9 +224,9 @@ class _HierarchyIndex:
                 and parent is not None
                 and parent.item_kind is ZaisanKind.SERIES
             ):
-                specials[
-                    (_series_title_identity(parent.sort_title), item.title.casefold())
-                ].append(item)
+                specials[(_series_title_identity(parent.sort_title), item.title.casefold())].append(
+                    item
+                )
         return cls(
             items_by_id=items_by_id,
             children_by_parent={
@@ -351,9 +349,7 @@ class DuplicateResolutionService:
             backup_path=backup_path,
         )
 
-    def apply_many(
-        self, *, resolutions: Sequence[tuple[int, int]], backup_path: Path
-    ) -> None:
+    def apply_many(self, *, resolutions: Sequence[tuple[int, int]], backup_path: Path) -> None:
         if not backup_path.is_absolute():
             msg = "Duplicate resolution requires an absolute SQLite backup path."
             raise ValueError(msg)
@@ -390,9 +386,7 @@ def repair_backup_path(database_path: Path, now: datetime | None = None) -> Path
     return database_path.with_name(f"{database_path.name}.hierarchy-repair-{timestamp}.bak")
 
 
-def duplicate_resolution_backup_path(
-    database_path: Path, now: datetime | None = None
-) -> Path:
+def duplicate_resolution_backup_path(database_path: Path, now: datetime | None = None) -> Path:
     """Return the backup path created before deleting a duplicate catalogue record."""
 
     timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
@@ -470,9 +464,7 @@ def _children_by_parent(items: Sequence[Zaisan]) -> dict[int, tuple[Zaisan, ...]
     }
 
 
-def _subtree_item_ids(
-    item_id: int, children_by_parent: dict[int, tuple[Zaisan, ...]]
-) -> set[int]:
+def _subtree_item_ids(item_id: int, children_by_parent: dict[int, tuple[Zaisan, ...]]) -> set[int]:
     """Return one item's complete logical hierarchy, including the item itself."""
 
     item_ids = {item_id}
@@ -485,9 +477,7 @@ def _subtree_item_ids(
     return item_ids
 
 
-def _subtree_has_files(
-    item_ids: set[int], files_by_item: dict[int, tuple[MediaFile, ...]]
-) -> bool:
+def _subtree_has_files(item_ids: set[int], files_by_item: dict[int, tuple[MediaFile, ...]]) -> bool:
     return any(files_by_item.get(item_id) for item_id in item_ids)
 
 
@@ -535,9 +525,7 @@ def _hierarchy_child_key(item: Zaisan) -> tuple[object, ...]:
     return (item.item_kind, item.sort_title.casefold())
 
 
-def _shares_metadata_identifier(
-    item: Zaisan, identifiers: set[tuple[str, str]]
-) -> bool:
+def _shares_metadata_identifier(item: Zaisan, identifiers: set[tuple[str, str]]) -> bool:
     return bool(_matching_metadata_identifiers(item, identifiers))
 
 

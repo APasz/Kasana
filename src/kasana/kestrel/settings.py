@@ -16,7 +16,6 @@ from kasana.shared.settings import KSettings
 
 class PlayerBackend(StrEnum):
     MPV = "mpv"
-    VLC = "vlc"
 
 
 def _default_runtime_directory() -> Path:

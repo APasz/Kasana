@@ -2029,10 +2029,16 @@ class KatalogQueryService:
             if cursor_value is not None:
                 candidates = _on_deck_candidates_after_cursor(candidates, cursor_value)
             page, has_next = _split_page(tuple(candidates), normalised_limit)
+            series_ids = tuple(
+                candidate.item.id
+                for candidate in page
+                if candidate.source is _OnDeckCandidateSource.IN_PROGRESS_SERIES
+            )
+            resume_items = _series_resume_items(session, user_id, series_ids)
             next_items = tuple(
                 candidate.item
                 if candidate.source is _OnDeckCandidateSource.WATCH_ORDER
-                else _series_resume_item(session, user_id, candidate.item.id)
+                else resume_items[candidate.item.id]
                 for candidate in page
             )
             summary_items = {
@@ -2257,8 +2263,16 @@ class KatalogQueryService:
             )
             session.add(playback_session)
             session.flush()
+            root_ids = tuple({planned.item.library_root_id for planned in planned_entries})
+            roots_by_id: dict[int, Kura] = {
+                root.id: root for root in session.scalars(select(Kura).where(Kura.id.in_(root_ids)))
+            }
             for position, planned in enumerate[_PlannedPlaybackEntry](planned_entries):
-                root: Kura = _require(session, Kura, planned.item.library_root_id, "Library root")
+                root = roots_by_id.get(planned.item.library_root_id)
+                if root is None:
+                    raise CatalogueNotFoundError(
+                        f"Library root {planned.item.library_root_id} does not exist."
+                    )
                 subtitle_tracks = _subtitle_tracks(planned.media_file)
                 session.add(
                     PlaybackSessionEntry(
@@ -2681,9 +2695,13 @@ class KatalogQueryService:
             if configuration.state is UserConfigurationState.DISABLED:
                 raise CatalogueValidationError("Disabled users cannot create download grants.")
             item: Zaisan = _require(session, Zaisan, request.item_id, "Library item")
-            media_file: MediaFile = _require(session, MediaFile, request.media_file_id, "Media file")
+            media_file: MediaFile = _require(
+                session, MediaFile, request.media_file_id, "Media file"
+            )
             if media_file.library_item_id != item.id:
-                raise CatalogueValidationError("The selected media version does not belong to this item.")
+                raise CatalogueValidationError(
+                    "The selected media version does not belong to this item."
+                )
             try:
                 transfer = _media_transfer_file(
                     item,
@@ -2691,7 +2709,9 @@ class KatalogQueryService:
                     unavailable_message="Download is unavailable.",
                 )
             except CatalogueNotFoundError as error:
-                raise CatalogueValidationError("The selected media version is unavailable.") from error
+                raise CatalogueValidationError(
+                    "The selected media version is unavailable."
+                ) from error
             token = secrets.token_urlsafe(32)
             expires_at = now + self._download_grant_ttl
             session.add(
@@ -2856,10 +2876,7 @@ class KatalogQueryService:
             )
         else:
             manual_context: ManualQueuePlaybackContext = context
-            planned = tuple(
-                self._planned_entry(session, _require(session, Zaisan, item_id, "Library item"))
-                for item_id in manual_context.item_ids
-            )
+            planned = self._manual_queue_entries(session, manual_context.item_ids)
             response_context = PlaybackContext(kind=PlaybackContextKind.MANUAL_QUEUE)
             skipped_unavailable_titles = ()
         if not planned:
@@ -2871,26 +2888,37 @@ class KatalogQueryService:
         return planned, response_context, skipped_unavailable_titles
 
     def _planned_entry(self, session: Session, item: Zaisan) -> _PlannedPlaybackEntry:
-        if item.item_kind not in PLAYABLE_ITEM_KINDS:
-            raise CatalogueValidationError(f"{item.item_kind.value} items are not playable.")
-        if item.availability is not AvailabilityState.AVAILABLE:
-            raise CatalogueValidationError(f"Library item {item.id} is unavailable.")
-        media_files = tuple(
-            session.scalars(
-                select(MediaFile)
-                .where(
-                    MediaFile.library_item_id == item.id,
-                    MediaFile.availability == AvailabilityState.AVAILABLE,
-                )
-                .order_by(MediaFile.id)
-            )
+        return self._planned_entries(session, (item,))[0]
+
+    def _planned_entries(
+        self, session: Session, items: tuple[Zaisan, ...]
+    ) -> tuple[_PlannedPlaybackEntry, ...]:
+        """Plan entries from one batched lookup of their available media files."""
+
+        media_files_by_item_id = _available_media_files_by_item_id(session, items)
+        return tuple(
+            _planned_entry_from_media_files(item, media_files_by_item_id.get(item.id, ()))
+            for item in items
         )
-        for media_file in media_files:
-            if Path(media_file.absolute_path).is_file():
-                return _PlannedPlaybackEntry(
-                    item=item, media_file=media_file, source_watch_order_position=None
-                )
-        raise CatalogueValidationError(f"Library item {item.id} has no available media file.")
+
+    def _manual_queue_entries(
+        self, session: Session, item_ids: tuple[int, ...]
+    ) -> tuple[_PlannedPlaybackEntry, ...]:
+        """Plan a manually ordered queue while retaining its validation order."""
+
+        items_by_id = _library_items_by_id(session, item_ids)
+        media_files_by_item_id = _available_media_files_by_item_id(
+            session, tuple(items_by_id.values())
+        )
+        planned: list[_PlannedPlaybackEntry] = []
+        for item_id in item_ids:
+            item = items_by_id.get(item_id)
+            if item is None:
+                raise CatalogueNotFoundError(f"Library item {item_id} does not exist.")
+            planned.append(
+                _planned_entry_from_media_files(item, media_files_by_item_id.get(item_id, ()))
+            )
+        return tuple(planned)
 
     def _series_entries(
         self, session: Session, user_id: int, context: SeriesPlaybackContext
@@ -2898,7 +2926,7 @@ class KatalogQueryService:
         series, episodic_items = _series_and_episodic_items(session, context)
         start_index = _series_start_index(session, user_id, episodic_items, context)
         return (
-            tuple(self._planned_entry(session, item) for item in episodic_items[start_index:]),
+            self._planned_entries(session, episodic_items[start_index:]),
             series.id,
         )
 
@@ -2944,28 +2972,33 @@ class KatalogQueryService:
                 ),
                 len(rows),
             )
+        remaining_rows = rows[start_index:]
+        media_files_by_item_id = _available_media_files_by_item_id(
+            session, tuple(item for _, item in remaining_rows)
+        )
         planned: list[_PlannedPlaybackEntry] = []
         skipped_unavailable_titles: list[str] = []
-        for entry, item in rows[start_index:]:
+        for entry, item in remaining_rows:
+            media_files = media_files_by_item_id.get(item.id, ())
             try:
-                planned_entry = self._planned_entry(session, item)
+                planned_entry = _planned_entry_from_media_files(
+                    item,
+                    media_files,
+                    source_watch_order_position=entry.position,
+                )
             except CatalogueValidationError:
-                if context.skip_unavailable and _watch_order_entry_is_unavailable(session, item):
+                if context.skip_unavailable and _watch_order_entry_is_unavailable(
+                    item, media_files
+                ):
                     skipped_unavailable_titles.append(item.title)
                     continue
-                if _watch_order_entry_is_unavailable(session, item):
+                if _watch_order_entry_is_unavailable(item, media_files):
                     raise CatalogueValidationError(
                         f"Watch order entry '{item.title}' is unavailable. "
                         "Choose skip_unavailable to continue."
                     ) from None
                 raise
-            planned.append(
-                _PlannedPlaybackEntry(
-                    item=planned_entry.item,
-                    media_file=planned_entry.media_file,
-                    source_watch_order_position=entry.position,
-                )
-            )
+            planned.append(planned_entry)
         return tuple(planned), tuple(skipped_unavailable_titles)
 
     def _playback_session_response(
@@ -3007,6 +3040,7 @@ class KatalogQueryService:
                 )
             )
         }
+        series_titles_by_item_id = _series_titles_by_item_id(session, tuple(items.values()))
         response_entries: list[PlaybackPlanEntry] = []
         for index, entry in enumerate(entries):
             item = items.get(entry.library_item_id)
@@ -3064,7 +3098,7 @@ class KatalogQueryService:
                         if next_entry is not None and next_item is not None
                         else None
                     ),
-                    series_title=_series_title(session, item),
+                    series_title=series_titles_by_item_id[item.id],
                 )
             )
         current_item = next(
@@ -3567,39 +3601,7 @@ def _series_and_episodic_items(
         series = _require(session, Zaisan, context.series_id, "Library item")
         if series.item_kind is not ZaisanKind.SERIES:
             raise CatalogueValidationError("A series context must identify a series item.")
-    season = aliased(Zaisan)
-    episodic_items = tuple(
-        session.scalars(
-            select(Zaisan)
-            .outerjoin(
-                season,
-                and_(
-                    Zaisan.parent_id == season.id,
-                    season.item_kind == ZaisanKind.SEASON,
-                ),
-            )
-            .where(
-                or_(
-                    and_(
-                        season.parent_id == series.id,
-                        Zaisan.item_kind.in_(EPISODIC_ITEM_KINDS),
-                    ),
-                    and_(
-                        Zaisan.parent_id == series.id,
-                        Zaisan.item_kind == ZaisanKind.SPECIAL,
-                    ),
-                )
-            )
-            .order_by(
-                case((season.id.is_(None), 1), else_=0),
-                season.season_number,
-                case((Zaisan.item_kind == ZaisanKind.EPISODE, 0), else_=1),
-                Zaisan.episode_number,
-                Zaisan.sort_title,
-                Zaisan.id,
-            )
-        )
-    )
+    episodic_items = _episodic_items_by_series(session, (series.id,))[series.id]
     if not episodic_items:
         raise CatalogueValidationError("The requested series has no episodes or specials.")
     return series, episodic_items
@@ -3654,15 +3656,104 @@ def _series_start_index(
     )
 
 
-def _series_resume_item(session: Session, user_id: int, series_id: int) -> Zaisan:
-    """Resolve the exact episode a resume-enabled series launch will begin with."""
+def _episodic_items_by_series(
+    session: Session, series_ids: tuple[int, ...]
+) -> dict[int, tuple[Zaisan, ...]]:
+    """Load ordered episodes and specials for multiple series in one query."""
 
-    context = SeriesPlaybackContext(series_id=series_id, resume=True)
-    _, episodic_items = _series_and_episodic_items(session, context)
-    start_index = _series_start_index(session, user_id, episodic_items, context)
-    if start_index >= len(episodic_items):
-        raise RuntimeError("An in-progress series must have an uncompleted episode.")
-    return episodic_items[start_index]
+    if not series_ids:
+        return {}
+    unique_series_ids = tuple(dict.fromkeys(series_ids))
+    season = aliased(Zaisan)
+    resolved_series_id_column = func.coalesce(season.parent_id, Zaisan.parent_id).label("series_id")
+    rows = session.execute(
+        select(Zaisan, resolved_series_id_column)
+        .outerjoin(
+            season,
+            and_(
+                Zaisan.parent_id == season.id,
+                season.item_kind == ZaisanKind.SEASON,
+            ),
+        )
+        .where(
+            or_(
+                and_(
+                    season.parent_id.in_(unique_series_ids),
+                    Zaisan.item_kind.in_(EPISODIC_ITEM_KINDS),
+                ),
+                and_(
+                    Zaisan.parent_id.in_(unique_series_ids),
+                    Zaisan.item_kind == ZaisanKind.SPECIAL,
+                ),
+            )
+        )
+        .order_by(
+            resolved_series_id_column,
+            case((season.id.is_(None), 1), else_=0),
+            season.season_number,
+            case((Zaisan.item_kind == ZaisanKind.EPISODE, 0), else_=1),
+            Zaisan.episode_number,
+            Zaisan.sort_title,
+            Zaisan.id,
+        )
+    )
+    items_by_series: dict[int, list[Zaisan]] = {series_id: [] for series_id in unique_series_ids}
+    for item, resolved_series_id in rows:
+        if not isinstance(resolved_series_id, int) or resolved_series_id not in items_by_series:
+            raise RuntimeError("An episodic item has an invalid series parent.")
+        items_by_series[resolved_series_id].append(item)
+    return {series_id: tuple(items) for series_id, items in items_by_series.items()}
+
+
+def _series_resume_items(
+    session: Session, user_id: int, series_ids: tuple[int, ...]
+) -> dict[int, Zaisan]:
+    """Resolve the resume entry for each in-progress series without per-series queries."""
+
+    episodic_items_by_series = _episodic_items_by_series(session, series_ids)
+    if not episodic_items_by_series:
+        return {}
+    item_series_ids = {
+        item.id: series_id
+        for series_id, episodic_items in episodic_items_by_series.items()
+        for item in episodic_items
+    }
+    states_by_item_id: dict[int, PlaybackState] = {}
+    resumable_item_ids: dict[int, int] = {}
+    for state in session.scalars(
+        select(PlaybackState)
+        .where(
+            PlaybackState.user_id == user_id,
+            PlaybackState.library_item_id.in_(tuple(item_series_ids)),
+        )
+        .order_by(PlaybackState.last_played_at.desc(), PlaybackState.id.desc())
+    ):
+        states_by_item_id[state.library_item_id] = state
+        series_id = item_series_ids[state.library_item_id]
+        if not state.completed and state.position_seconds > 0:
+            resumable_item_ids.setdefault(series_id, state.library_item_id)
+    resume_items: dict[int, Zaisan] = {}
+    for series_id, episodic_items in episodic_items_by_series.items():
+        if not episodic_items:
+            raise CatalogueValidationError("The requested series has no episodes or specials.")
+        resumable_item_id = resumable_item_ids.get(series_id)
+        if resumable_item_id is not None:
+            resume_items[series_id] = next(
+                item for item in episodic_items if item.id == resumable_item_id
+            )
+            continue
+        next_item = next(
+            (
+                item
+                for item in episodic_items
+                if (state := states_by_item_id.get(item.id)) is None or not state.completed
+            ),
+            None,
+        )
+        if next_item is None:
+            raise RuntimeError("An in-progress series must have an uncompleted episode.")
+        resume_items[series_id] = next_item
+    return resume_items
 
 
 def _series_parent_for_episodic_item(session: Session, item: Zaisan) -> Zaisan:
@@ -3729,21 +3820,62 @@ def _media_transfer_file(
     )
 
 
-def _watch_order_entry_is_unavailable(session: Session, item: Zaisan) -> bool:
+def _library_items_by_id(session: Session, item_ids: tuple[int, ...]) -> dict[int, Zaisan]:
+    """Load a manual queue's items with one catalogue query."""
+
+    return {
+        item.id: item for item in session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids)))
+    }
+
+
+def _available_media_files_by_item_id(
+    session: Session, items: tuple[Zaisan, ...]
+) -> dict[int, tuple[MediaFile, ...]]:
+    """Load available media once, preserving each item's version preference order."""
+
+    item_ids = tuple(dict.fromkeys(item.id for item in items))
+    if not item_ids:
+        return {}
+    media_files_by_item_id: dict[int, list[MediaFile]] = {}
+    for media_file in session.scalars(
+        select(MediaFile)
+        .where(
+            MediaFile.library_item_id.in_(item_ids),
+            MediaFile.availability == AvailabilityState.AVAILABLE,
+        )
+        .order_by(MediaFile.library_item_id, MediaFile.id)
+    ):
+        media_files_by_item_id.setdefault(media_file.library_item_id, []).append(media_file)
+    return {item_id: tuple(media_files) for item_id, media_files in media_files_by_item_id.items()}
+
+
+def _planned_entry_from_media_files(
+    item: Zaisan,
+    media_files: tuple[MediaFile, ...],
+    *,
+    source_watch_order_position: int | None = None,
+) -> _PlannedPlaybackEntry:
+    if item.item_kind not in PLAYABLE_ITEM_KINDS:
+        raise CatalogueValidationError(f"{item.item_kind.value} items are not playable.")
+    if item.availability is not AvailabilityState.AVAILABLE:
+        raise CatalogueValidationError(f"Library item {item.id} is unavailable.")
+    for media_file in media_files:
+        if Path(media_file.absolute_path).is_file():
+            return _PlannedPlaybackEntry(
+                item=item,
+                media_file=media_file,
+                source_watch_order_position=source_watch_order_position,
+            )
+    raise CatalogueValidationError(f"Library item {item.id} has no available media file.")
+
+
+def _watch_order_entry_is_unavailable(item: Zaisan, media_files: tuple[MediaFile, ...]) -> bool:
     """Identify entries a user may explicitly skip without masking invalid ordering."""
 
     if item.availability is not AvailabilityState.AVAILABLE:
         return True
     if item.item_kind not in PLAYABLE_ITEM_KINDS:
         return False
-    media_files = tuple(
-        session.scalars(
-            select(MediaFile).where(
-                MediaFile.library_item_id == item.id,
-                MediaFile.availability == AvailabilityState.AVAILABLE,
-            )
-        )
-    )
     return not any(Path(media_file.absolute_path).is_file() for media_file in media_files)
 
 
@@ -3797,10 +3929,40 @@ def _playback_plan_entry(
     )
 
 
-def _series_title(session: Session, item: Zaisan) -> str | None:
+def _series_titles_by_item_id(session: Session, items: tuple[Zaisan, ...]) -> dict[int, str | None]:
+    """Resolve queue item series titles without loading each ancestry chain separately."""
+
+    ancestors_by_id: dict[int, Zaisan] = {item.id: item for item in items}
+    pending_parent_ids = {
+        parent_id
+        for item in items
+        if (parent_id := item.parent_id) is not None and parent_id not in ancestors_by_id
+    }
+    while pending_parent_ids:
+        parents = {
+            parent.id: parent
+            for parent in session.scalars(
+                select(Zaisan).where(Zaisan.id.in_(tuple(pending_parent_ids)))
+            )
+        }
+        ancestors_by_id.update(parents)
+        pending_parent_ids = {
+            parent_id
+            for parent in parents.values()
+            if (parent_id := parent.parent_id) is not None and parent_id not in ancestors_by_id
+        }
+    return {item.id: _series_title_from_ancestors(item, ancestors_by_id) for item in items}
+
+
+def _series_title_from_ancestors(item: Zaisan, ancestors_by_id: Mapping[int, Zaisan]) -> str | None:
     current = item
+    seen_parent_ids: set[int] = set()
     while current.parent_id is not None:
-        parent = session.get(Zaisan, current.parent_id)
+        parent_id = current.parent_id
+        if parent_id in seen_parent_ids:
+            return None
+        seen_parent_ids.add(parent_id)
+        parent = ancestors_by_id.get(parent_id)
         if parent is None:
             return None
         if parent.item_kind is ZaisanKind.SERIES:

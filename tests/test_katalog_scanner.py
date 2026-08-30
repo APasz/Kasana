@@ -195,6 +195,34 @@ def test_incremental_scan_detects_add_change_move_and_missing(
     assert database.run_transaction(read_availability) is AvailabilityState.UNAVAILABLE
 
 
+def test_scan_uses_the_configured_kind_for_nonstandard_root_names(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    films = tmp_path / "Films"
+    shows = tmp_path / "Series"
+    film = films / "Example Film (2024).mp4"
+    episode = shows / "Example Show" / "Season 01" / "Example Show S01E01.mp4"
+    film.parent.mkdir(parents=True)
+    episode.parent.mkdir(parents=True)
+    film.write_bytes(b"film")
+    episode.write_bytes(b"episode")
+    _register_root(database, films, ZaisanKind.MOVIE)
+    _register_root(database, shows, ZaisanKind.SERIES)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 2
+    assert result.findings == ()
+    assert set(
+        database.run_transaction(lambda session: session.scalars(select(Zaisan.item_kind)))
+    ) == {
+        ZaisanKind.MOVIE,
+        ZaisanKind.SERIES,
+        ZaisanKind.SEASON,
+        ZaisanKind.EPISODE,
+    }
+
+
 def test_scan_handles_missing_library_root_and_recovers(
     database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
 ) -> None:
@@ -485,9 +513,7 @@ def test_scan_preserves_matched_series_identity_when_an_episode_file_changes(
         return tuple(
             (item.id, item.title)
             for item in session.scalars(
-                select(Zaisan)
-                .where(Zaisan.item_kind == ZaisanKind.SERIES)
-                .order_by(Zaisan.id)
+                select(Zaisan).where(Zaisan.item_kind == ZaisanKind.SERIES).order_by(Zaisan.id)
             ).all()
         )
 
@@ -496,6 +522,7 @@ def test_scan_preserves_matched_series_identity_when_an_episode_file_changes(
 
 def test_episode_parsing_uses_season_directory_context() -> None:
     assert parse_season_number("Season 02", allow_volume=False) == 2
+    assert parse_season_number("Season.02", allow_volume=False) == 2
     assert parse_season_number("Volume 02", allow_volume=False) is None
     assert parse_season_number("Volume 02", allow_volume=True) == 2
     assert parse_episode_numbers("Show s1e2", season_from_directory=1) == (1, 2)

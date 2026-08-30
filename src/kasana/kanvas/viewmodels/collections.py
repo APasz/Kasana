@@ -43,9 +43,7 @@ class WatchOrderCardView(BaseModel):
     entry_count: int = Field(ge=0, alias="entryCount")
     revision: int = Field(ge=1)
     is_default: bool = Field(default=False, alias="isDefault")
-    completed_entry_count: int | None = Field(
-        default=None, ge=0, alias="completedEntryCount"
-    )
+    completed_entry_count: int | None = Field(default=None, ge=0, alias="completedEntryCount")
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     next_item_title: str | None = Field(default=None, max_length=1_000, alias="nextItemTitle")
     has_unavailable_entries: bool = Field(default=False, alias="hasUnavailableEntries")
@@ -63,9 +61,7 @@ class CollectionDetailView(BaseModel):
     watch_order_count: int = Field(ge=0, alias="watchOrderCount")
     revision: int = Field(ge=1)
     artwork_item_id: int | None = Field(default=None, gt=0, alias="artworkItemId")
-    default_watch_order_id: int | None = Field(
-        default=None, gt=0, alias="defaultWatchOrderId"
-    )
+    default_watch_order_id: int | None = Field(default=None, gt=0, alias="defaultWatchOrderId")
     artwork_url: str | None = Field(default=None, alias="artworkUrl")
     mosaic_urls: tuple[str, ...] = Field(default=(), max_length=4, alias="mosaicUrls")
     movies: tuple[CollectionMemberView, ...] = ()

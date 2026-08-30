@@ -20,4 +20,7 @@ def main() -> None:
         timeout_graceful_shutdown=shared_settings.graceful_shutdown_timeout_seconds,
     )
     configure_logging(shared_settings.log_level, LogDomain.KATALOG, shared_settings.log_directory)
-    uvicorn.Server(config).run()
+    try:
+        uvicorn.Server(config).run()
+    except KeyboardInterrupt:
+        return

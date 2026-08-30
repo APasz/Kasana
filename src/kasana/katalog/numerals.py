@@ -139,9 +139,19 @@ def _parse_roman(value: str) -> int | None:
 
 def _roman_numeral(value: int) -> str:
     parts = (
-        (1_000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
-        (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
-        (5, "V"), (4, "IV"), (1, "I"),
+        (1_000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
     )
     result: list[str] = []
     remainder = value
@@ -151,9 +161,7 @@ def _roman_numeral(value: int) -> str:
     return "".join(result)
 
 
-def _parse_east_asian(
-    value: str, digits: dict[str, int], units: dict[str, int]
-) -> int | None:
+def _parse_east_asian(value: str, digits: dict[str, int], units: dict[str, int]) -> int | None:
     """Parse canonical multiplicative East-Asian numerals without guessing malformed forms."""
 
     if not value or any(character not in digits and character not in units for character in value):

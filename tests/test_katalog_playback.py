@@ -17,12 +17,13 @@ from typing import cast
 import httpx
 import pytest
 import uvicorn
-from sqlalchemy import select
+from sqlalchemy import event, select
 from starlette.types import Message, Scope
 
 from kasana.katalog.api.app import create_app
 from kasana.katalog.api.runtime import KatalogApiRuntime
 from kasana.katalog.api.service import (
+    KatalogQueryService,
     MediaTransferFile,
     _is_within_session_progress_completion_grace_period,  # pyright: ignore[reportPrivateUsage]
     _session_progress_grace_period_seconds,  # pyright: ignore[reportPrivateUsage]
@@ -66,6 +67,7 @@ from kasana.katalog.services import (
     record_playback_progress,
 )
 from kasana.katalog.settings import KatalogSettings
+from kasana.katalog.user_configuration import UserConfiguration, UserConfigurationStore
 from kasana.shared.concurrency import run_blocking
 
 
@@ -442,6 +444,86 @@ async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(
     assert completed_states.json()["partially_watched_item_ids"] == []
 
 
+def test_on_deck_resolves_a_full_series_page_without_per_series_queries(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    """A realistic On Deck page must not resolve each series in separate SQL queries."""
+
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    with database.transaction() as session:
+        root = create_library_root(
+            session, path=library_path, expected_media_kind=ZaisanKind.SERIES
+        )
+        user = create_user(session, username="on-deck-profile")
+        for index in range(48):
+            series = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SERIES,
+                title=f"Series {index:02d}",
+            )
+            season = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.SEASON,
+                parent_id=series.id,
+                season_number=1,
+                title="Season 1",
+            )
+            watched_episode = create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.EPISODE,
+                parent_id=season.id,
+                season_number=1,
+                episode_number=1,
+                title="Episode 1",
+            )
+            create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.EPISODE,
+                parent_id=season.id,
+                season_number=1,
+                episode_number=2,
+                title="Episode 2",
+            )
+            record_playback_progress(
+                session,
+                user_id=user.id,
+                library_item_id=watched_episode.id,
+                position_seconds=120.0,
+                duration_seconds=120.0,
+                completed=True,
+            )
+        user_id = user.id
+
+    user_configurations = UserConfigurationStore(tmp_path / "users")
+    user_configurations.save(user_id, UserConfiguration(username="on-deck-profile"))
+    service = KatalogQueryService(
+        database,
+        artwork_cache_path=tmp_path / "artwork",
+        user_configurations=user_configurations,
+    )
+    statements: list[str] = []
+
+    def count_statement(*_arguments: object) -> None:
+        statements.append("statement")
+
+    event.listen(database.engine, "before_cursor_execute", count_statement)
+    try:
+        page = service.on_deck(user_id, cursor=None, limit=48)
+    finally:
+        event.remove(database.engine, "before_cursor_execute", count_statement)
+
+    assert len(page.items) == 48
+    next_items = tuple(entry.next_item for entry in page.items)
+    assert all(item is not None for item in next_items)
+    assert {item.title for item in next_items if item is not None} == {"Episode 2"}
+    assert len(statements) <= 12
+
+
 async def test_on_deck_hides_series_represented_by_an_active_collection(
     playback_fixture: PlaybackFixture,
 ) -> None:
@@ -713,6 +795,144 @@ async def test_series_resume_watch_order_and_manual_queue_contexts(
         playback_fixture.ids["episode_three"],
         playback_fixture.ids["movie"],
     ]
+
+
+async def test_large_playback_plans_batch_item_and_media_queries(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    library_path = playback_fixture.settings.database_path.parent / "library"
+    with playback_fixture.database.transaction() as session:
+        season = session.get(Zaisan, ids["season"])
+        assert season is not None
+        episode_ids = [ids["episode_one"], ids["episode_two"], ids["episode_three"]]
+        for episode_number in range(4, 100):
+            episode = create_library_item(
+                session,
+                library_root_id=season.library_root_id,
+                item_kind=ZaisanKind.EPISODE,
+                parent_id=season.id,
+                season_number=season.season_number,
+                episode_number=episode_number,
+                title=f"Episode {episode_number}",
+            )
+            media_path = library_path / f"large-queue-{episode_number}.mkv"
+            media_path.touch()
+            media_stat = media_path.stat()
+            attach_media_file(
+                session,
+                library_item_id=episode.id,
+                absolute_path=media_path,
+                size_bytes=media_stat.st_size,
+                mtime_ns=media_stat.st_mtime_ns,
+                container="matroska",
+            )
+            episode_ids.append(episode.id)
+        queue_item_ids = tuple((*episode_ids, ids["special"]))
+        collection = create_collection(session, name="Large playback queue")
+        for item_id in queue_item_ids:
+            add_collection_membership(session, collection_id=collection.id, library_item_id=item_id)
+        watch_order = create_watch_order(
+            session,
+            collection_id=collection.id,
+            name="Large playback queue",
+            order_kind=KeiroKind.CUSTOM,
+        )
+        for item_id in queue_item_ids:
+            append_watch_order_entry(
+                session, watch_order_id=watch_order.id, library_item_id=item_id
+            )
+
+    contexts = (
+        {"kind": "series", "series_id": ids["series"]},
+        {"kind": "manual_queue", "item_ids": list(queue_item_ids)},
+        {"kind": "watch_order", "watch_order_id": watch_order.id},
+    )
+    statements: list[str] = []
+
+    def count_statement(*_arguments: object) -> None:
+        statements.append("statement")
+
+    for context in contexts:
+        statements.clear()
+        event.listen(playback_fixture.database.engine, "before_cursor_execute", count_statement)
+        try:
+            response = await playback_fixture.client.post(
+                "/api/v1/playback/plans",
+                json={"user_id": ids["user"], "context": context},
+            )
+        finally:
+            event.remove(playback_fixture.database.engine, "before_cursor_execute", count_statement)
+        assert response.status_code == 201, response.text
+        assert len(statements) <= 112
+
+
+async def test_large_mixed_series_playback_launch_batches_ancestry_queries(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    library_path = playback_fixture.settings.database_path.parent / "library"
+    with playback_fixture.database.transaction() as session:
+        episode = session.get(Zaisan, ids["episode_one"])
+        assert episode is not None
+        queue_item_ids = [episode.id]
+        for index in range(1, 100):
+            series = create_library_item(
+                session,
+                library_root_id=episode.library_root_id,
+                item_kind=ZaisanKind.SERIES,
+                title=f"Queue series {index}",
+            )
+            season = create_library_item(
+                session,
+                library_root_id=episode.library_root_id,
+                item_kind=ZaisanKind.SEASON,
+                parent_id=series.id,
+                season_number=1,
+                title="Season 1",
+            )
+            queue_episode = create_library_item(
+                session,
+                library_root_id=episode.library_root_id,
+                item_kind=ZaisanKind.EPISODE,
+                parent_id=season.id,
+                season_number=1,
+                episode_number=1,
+                title="Episode 1",
+            )
+            media_path = library_path / f"mixed-series-queue-{index}.mkv"
+            media_path.touch()
+            media_stat = media_path.stat()
+            attach_media_file(
+                session,
+                library_item_id=queue_episode.id,
+                absolute_path=media_path,
+                size_bytes=media_stat.st_size,
+                mtime_ns=media_stat.st_mtime_ns,
+                container="matroska",
+            )
+            queue_item_ids.append(queue_episode.id)
+
+    launch_token = await _create_plan(
+        playback_fixture,
+        {"kind": "manual_queue", "item_ids": queue_item_ids},
+    )
+    statements: list[str] = []
+
+    def count_statement(*_arguments: object) -> None:
+        statements.append("statement")
+
+    event.listen(playback_fixture.database.engine, "before_cursor_execute", count_statement)
+    try:
+        response = await playback_fixture.client.get(f"/api/v1/playback/plans/{launch_token}")
+    finally:
+        event.remove(playback_fixture.database.engine, "before_cursor_execute", count_statement)
+
+    assert response.status_code == 200, response.text
+    entries = response.json()["entries"]
+    assert len(entries) == 100
+    assert all(entry["series_title"] is not None for entry in entries)
+    assert len(statements) <= 214
 
 
 async def test_series_resume_falls_back_to_the_first_unwatched_episode_or_special(
@@ -1511,18 +1731,14 @@ async def test_typed_client_and_stream_cancellation(playback_fixture: PlaybackFi
             await asyncio.sleep(0.001)
         with playback_fixture.database.transaction() as session:
             media_file = session.scalar(
-                select(MediaFile).where(
-                    MediaFile.library_item_id == playback_fixture.ids["movie"]
-                )
+                select(MediaFile).where(MediaFile.library_item_id == playback_fixture.ids["movie"])
             )
             assert media_file is not None
         async with KatalogClient(
             f"http://127.0.0.1:{socket_handle.getsockname()[1]}",
             bearer_token=playback_fixture.settings.api_bearer_token.get_secret_value(),
         ) as client:
-            options = await client.list_library_item_download_options(
-                playback_fixture.ids["movie"]
-            )
+            options = await client.list_library_item_download_options(playback_fixture.ids["movie"])
             assert [option.id for option in options] == [media_file.id]
             launch = await client.create_playback_plan(
                 PlaybackPlanRequest(

@@ -9,14 +9,18 @@ Yukibot ────┤
 Remote apps ┘
 ```
 
+Kanvas is the primary player: it renders the dashboard and plays compatible media in the
+browser. Kestrel is an optional local mpv fallback, not a prerequisite for browser playback.
+
 - **Katalog** owns media discovery, persistence, watch state, and the backend API. Its
   FastAPI server publishes `/api/v1`; `kasana.katalog.public` is the only Python surface
   other components may import, and exposes only transport-neutral contracts plus
   `KatalogClient`.
 - **Kanvas** renders the NiceGUI dashboard and accesses catalogue data only through
   Katalog's public API/contracts.
-- **Kestrel** runs on a playback machine, controls a local mpv or VLC process, and reports
-  playback updates through Katalog's public API/contracts.
+- **Kestrel** runs on a playback machine, controls a local mpv process, and reports playback
+  updates through Katalog's public API/contracts. It is optional when Kanvas can play the
+  selected media in the browser.
 - **Kourier** fetches and normalises external metadata. It knows nothing about catalogue
   persistence or match decisions.
 - **kasana.shared** contains only reusable settings, logging, and stable common contracts,

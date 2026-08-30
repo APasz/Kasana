@@ -1603,7 +1603,9 @@ async def require_bearer_token(
     if _api_path_uses_opaque_capability(request.url.path):
         return None
     if authorization is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required."
+        )
     scheme, _, token = authorization.partition(" ")
     if scheme.casefold() != "bearer" or not token:
         raise HTTPException(
@@ -1612,7 +1614,9 @@ async def require_bearer_token(
         )
     expected_token = cast(str, request.app.state.api_bearer_token)
     if not compare_digest(token, expected_token):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token."
+        )
     return token
 
 

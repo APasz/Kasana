@@ -76,9 +76,9 @@ def test_status_does_not_need_an_extra_connection_from_a_bounded_pool(tmp_path: 
     database = KatalogDatabase(tmp_path / "katalog.sqlite3", connection_pool_size=1)
     try:
         database.create_schema()
-        status = KatalogQueryService(
-            database, artwork_cache_path=tmp_path / "artwork"
-        ).status(active_jobs=0, failed_jobs=0)
+        status = KatalogQueryService(database, artwork_cache_path=tmp_path / "artwork").status(
+            active_jobs=0, failed_jobs=0
+        )
         assert status.database_revision is None
     finally:
         database.close()

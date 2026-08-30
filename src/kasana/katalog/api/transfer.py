@@ -201,7 +201,7 @@ def _if_range_matches(if_range: str, media_file: MediaTransferFile) -> bool:
         return False
     try:
         date_value = parsedate_to_datetime(candidate)
-    except (IndexError, OverflowError, TypeError, ValueError):
+    except IndexError, OverflowError, TypeError, ValueError:
         return False
     if date_value.tzinfo is None:
         return False

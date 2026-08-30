@@ -71,12 +71,18 @@ def _element_props(element: Element) -> dict[str, object]:
 def test_h264_aac_mp4_direct_play_and_mkv_remux() -> None:
     capabilities = BrowserPlaybackCapabilities()
 
-    assert classify_playback(
-        _entry(container="isobmff"), capabilities, preferred_audio_language=None
-    ).mode is PlaybackMode.DIRECT
-    assert classify_playback(
-        _entry(container="matroska"), capabilities, preferred_audio_language=None
-    ).mode is PlaybackMode.REMUX
+    assert (
+        classify_playback(
+            _entry(container="isobmff"), capabilities, preferred_audio_language=None
+        ).mode
+        is PlaybackMode.DIRECT
+    )
+    assert (
+        classify_playback(
+            _entry(container="matroska"), capabilities, preferred_audio_language=None
+        ).mode
+        is PlaybackMode.REMUX
+    )
 
 
 def test_scanner_codec_metadata_is_exposed_to_browser_playback() -> None:
@@ -148,9 +154,10 @@ def test_hevc_requires_positive_browser_evidence() -> None:
         )
     )
 
-    assert classify_playback(
-        entry, BrowserPlaybackCapabilities(), preferred_audio_language=None
-    ).mode is PlaybackMode.UNSUPPORTED
+    assert (
+        classify_playback(entry, BrowserPlaybackCapabilities(), preferred_audio_language=None).mode
+        is PlaybackMode.UNSUPPORTED
+    )
     assert (
         classify_playback(entry, supported, preferred_audio_language=None).mode
         is PlaybackMode.DIRECT
@@ -246,9 +253,7 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
         "42.500",
         "-i",
         "http://katalog.test/api/v1/media/token",
-    ] == launched[
-        launched.index("-noaccurate_seek") : launched.index("-i") + 2
-    ]
+    ] == launched[launched.index("-noaccurate_seek") : launched.index("-i") + 2]
     assert "pipe:1" in launched
 
     remux_command_start = len(launched)
@@ -300,9 +305,7 @@ async def test_fragmented_mp4_stream_reads_output_reports_failure_and_uses_copy_
 
 
 def test_playback_delivery_query_validation_keeps_direct_ranges_and_copy_boundary() -> None:
-    request = Request(
-        {"type": "http", "query_string": b"mode=remux&audioStream=0", "headers": []}
-    )
+    request = Request({"type": "http", "query_string": b"mode=remux&audioStream=0", "headers": []})
     entry = _entry(container="matroska")
 
     mode, audio_index = dashboard._requested_playback_delivery(  # pyright: ignore[reportPrivateUsage]
@@ -318,12 +321,13 @@ def test_playback_delivery_query_validation_keeps_direct_ranges_and_copy_boundar
         entry, PlaybackMode.DIRECT, audio_index
     )
 
-    seek_request = Request(
-        {"type": "http", "query_string": b"startSeconds=30.5", "headers": []}
+    seek_request = Request({"type": "http", "query_string": b"startSeconds=30.5", "headers": []})
+    assert (
+        dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
+            seek_request, entry.duration_seconds
+        )
+        == 30.5
     )
-    assert dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
-        seek_request, entry.duration_seconds
-    ) == 30.5
 
     with pytest.raises(HTTPException):
         dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
@@ -377,27 +381,36 @@ async def test_compatibility_endpoint_returns_remux_or_visible_kestrel_fallback(
 
 def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None:
     entry = _entry(container="isobmff")
-    assert dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
-        Request({"type": "http", "query_string": b"offsetSeconds=42.5", "headers": []}),
-        entry.duration_seconds,
-    ) == 42.5
+    assert (
+        dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request({"type": "http", "query_string": b"offsetSeconds=42.5", "headers": []}),
+            entry.duration_seconds,
+        )
+        == 42.5
+    )
     assert dashboard._optional_track_id("embedded-3") == "embedded-3"  # pyright: ignore[reportPrivateUsage]
     assert dashboard._optional_track_id(None) is None  # pyright: ignore[reportPrivateUsage]
     assert dashboard._is_webvtt_track("webvtt")  # pyright: ignore[reportPrivateUsage]
-    assert dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
-        Request(
-            {
-                "type": "http",
-                "query_string": b"timingOffsetMilliseconds=-500",
-                "headers": [],
-            }
-        ),
-        default_milliseconds=0,
-    ) == -0.5
-    assert dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
-        Request({"type": "http", "query_string": b"", "headers": []}),
-        default_milliseconds=500,
-    ) == 0.5
+    assert (
+        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request(
+                {
+                    "type": "http",
+                    "query_string": b"timingOffsetMilliseconds=-500",
+                    "headers": [],
+                }
+            ),
+            default_milliseconds=0,
+        )
+        == -0.5
+    )
+    assert (
+        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+            Request({"type": "http", "query_string": b"", "headers": []}),
+            default_milliseconds=500,
+        )
+        == 0.5
+    )
     with pytest.raises(HTTPException):
         dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"offsetSeconds=nan", "headers": []}),
@@ -440,9 +453,7 @@ def test_next_episode_preserves_fullscreen_then_transitions_its_item_page() -> N
 
 def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time() -> None:
     repository_root = Path(__file__).parents[1]
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
-        encoding="utf-8"
-    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
@@ -474,8 +485,7 @@ def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time
     assert "persistTrackSelection" in script
     assert "await selectDelivery(autoplay, position)" in script
     assert (
-        "const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);"
-        in script
+        "const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);" in script
     )
     assert "Open in Kestrel for this subtitle" in script
     assert "libass_script" in head
@@ -529,9 +539,7 @@ async def test_browser_completion_returns_the_next_item_playback_page(
     monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
     monkeypatch.setattr(dashboard, "_require_profile", require_profile)
 
-    response = await dashboard.complete_playback(
-        "s" * 32, cast(Request, JsonRequest())
-    )
+    response = await dashboard.complete_playback("s" * 32, cast(Request, JsonRequest()))
 
     assert calls == [("s" * 32, 0)]
     payload = json.loads(bytes(response.body))
@@ -586,9 +594,7 @@ async def test_browser_current_completion_preserves_the_queue_position(
     monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
     monkeypatch.setattr(dashboard, "_require_profile", require_profile)
 
-    response = await dashboard.complete_current_playback(
-        "s" * 32, cast(Request, JsonRequest())
-    )
+    response = await dashboard.complete_current_playback("s" * 32, cast(Request, JsonRequest()))
 
     assert response.status_code == 204
     assert calls == [("s" * 32, 0)]
@@ -679,9 +685,7 @@ async def test_play_route_starts_new_on_deck_items_but_respects_true_resume_auto
         def __init__(self, *_args: object) -> None:
             pass
 
-        async def create_item_playback_session(
-            self, _item_id: int, *, resume: bool
-        ) -> object:
+        async def create_item_playback_session(self, _item_id: int, *, resume: bool) -> object:
             return session
 
     async def page_profile(_request: Request) -> object:
@@ -736,9 +740,7 @@ def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_sk
     collection_route = (repository_root / "src/kasana/kanvas/routes/collections.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(
-        encoding="utf-8"
-    )
+    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
 
     assert "Skipped unavailable entries" in player
     assert "Play available entries" in collection_route

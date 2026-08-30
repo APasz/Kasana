@@ -44,6 +44,9 @@ Open <http://127.0.0.1:5370>. Kanvas binds to `0.0.0.0:5370` by default; Katalog
 binds to `127.0.0.1:5373`. Its OpenAPI documentation is at
 <http://127.0.0.1:5373/api/v1/docs>.
 
+This browser-first setup is complete: neither Kestrel nor mpv is required to scan, browse,
+or play media in Kanvas.
+
 ## Configuration and security
 
 Non-secret preferences live in `configs/config.<domain>.json`, for `shared`, `katalog`,
@@ -84,7 +87,8 @@ Kanvas is the primary player. Open the dashboard, select a profile, and choose a
 play it in the browser. Playback uses the browser's native media support, so container and
 codec compatibility depends on the browser and host.
 
-Use optional Kestrel when you prefer mpv or the browser cannot play a file:
+Use optional Kestrel only when you prefer local mpv playback or the browser cannot play a
+file:
 
 ```bash
 uv run kasana-katalog item search Cars --year 2006 --kind movie
@@ -117,7 +121,8 @@ uv run pytest
 ```
 
 Use `--json` for machine-readable Katalog CLI output and `--help` on any command for its
-full interface. See [the architecture notes](docs/architecture.md) for component boundaries.
+full interface. See [the architecture notes](docs/architecture.md) for component boundaries
+and [the remaining-issues report](docs/remaining-issues.md) for known limits.
 
 ## Licence
 

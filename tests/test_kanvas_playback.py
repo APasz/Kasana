@@ -224,9 +224,7 @@ async def test_episode_playback_starts_a_series_queue_at_the_selected_episode(
     )
     _install_fake_client(monkeypatch, state)
 
-    await KanvasPlaybackService(_settings(), _USER_ID).create_item_playback_session(
-        7, resume=True
-    )
+    await KanvasPlaybackService(_settings(), _USER_ID).create_item_playback_session(7, resume=True)
 
     context = state.plan_requests[0].context
     assert isinstance(context, SeriesPlaybackContext)

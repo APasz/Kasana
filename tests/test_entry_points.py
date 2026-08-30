@@ -39,5 +39,16 @@ def test_katalog_api_server_uses_the_shared_graceful_shutdown_timeout(
     assert captured_timeout == [5]
 
 
+def test_katalog_api_server_suppresses_normal_keyboard_interrupt(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def fake_run(_server: katalog_server.uvicorn.Server) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(katalog_server.uvicorn.Server, "run", fake_run)
+
+    katalog_server.main()
+
+
 def test_dashboard_can_be_composed() -> None:
     build_dashboard()

@@ -47,18 +47,14 @@ class BrowserPlaybackEntryView(BaseModel):
     fullscreen_title: str = Field(min_length=1, max_length=2_003, alias="fullscreenTitle")
     special_info: str | None = Field(default=None, min_length=1, max_length=80, alias="specialInfo")
     duration_seconds: float | None = Field(default=None, ge=0, alias="durationSeconds")
-    saved_resume_position_seconds: float = Field(
-        ge=0, alias="savedResumePositionSeconds"
-    )
+    saved_resume_position_seconds: float = Field(ge=0, alias="savedResumePositionSeconds")
     audio_streams: tuple[BrowserPlaybackAudioTrackView, ...] = Field(
         default=(), alias="audioStreams", max_length=64
     )
     subtitle_tracks: tuple[BrowserPlaybackSubtitleTrackView, ...] = Field(
         default=(), alias="subtitleTracks", max_length=256
     )
-    subtitle_font_ids: tuple[str, ...] = Field(
-        default=(), alias="subtitleFontIds", max_length=64
-    )
+    subtitle_font_ids: tuple[str, ...] = Field(default=(), alias="subtitleFontIds", max_length=64)
     selected_audio_stream_index: int = Field(ge=0, alias="selectedAudioStream")
     selected_subtitle_track_id: str | None = Field(
         default=None, alias="selectedSubtitleTrack", pattern=r"^(?:embedded|sidecar)-\d+$"

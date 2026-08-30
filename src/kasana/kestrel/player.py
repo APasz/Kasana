@@ -19,7 +19,7 @@ from kasana.katalog.public import (
     SessionProgressUpdate,
 )
 from kasana.kestrel.mpv import MpvError, MpvIpcClient, MpvIpcUnavailableError, discover_mpv
-from kasana.kestrel.settings import KestrelSettings, PlayerBackend
+from kasana.kestrel.settings import KestrelSettings
 from kasana.kestrel.uri import validate_launch_token
 
 _OBSERVED_PROPERTIES = (
@@ -104,8 +104,6 @@ class MpvPlayerAgent:
         settings: KestrelSettings,
         catalogue: PlaybackCatalogueClient,
     ) -> None:
-        if settings.player_backend is not PlayerBackend.MPV:
-            raise KestrelPlaybackError("Only the mpv backend is implemented.")
         self._settings = settings
         self._catalogue = catalogue
         self._runtime_directory = settings.runtime_directory.expanduser().resolve(strict=False)
