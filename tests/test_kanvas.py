@@ -144,9 +144,10 @@ from kasana.kanvas.viewmodels.item import (
 )
 from kasana.kanvas.viewmodels.library import (
     ArtworkShape,
-    CursorPager,
     LibraryFilters,
     LibraryPageEnvelope,
+    LibraryPageRequest,
+    LibraryPosterPage,
     PlaceholderArtView,
     PosterAction,
     PosterState,
@@ -177,6 +178,7 @@ from kasana.katalog.public import (
     LibraryItemEditAudit,
     LibraryItemKind,
     LibraryItemMutationResult,
+    LibraryItemPage,
     LibraryItemSummary,
     LibraryItemUpdate,
     LibraryRootCreate,
@@ -714,7 +716,7 @@ def test_combined_episode_poster_hides_a_redundant_second_episode_marker() -> No
     assert poster.placeholder.lines == ("Children of the Gods",)
 
 
-def test_filter_mapping_and_cursor_pagination_prevent_duplicate_requests() -> None:
+def test_library_filter_and_page_request_validation() -> None:
     filters = LibraryFilters.from_query(
         {
             "search": "  Ghost  ",
@@ -726,23 +728,63 @@ def test_filter_mapping_and_cursor_pagination_prevent_duplicate_requests() -> No
         tags=("anime", "favourite"),
     )
 
-    assert filters.to_katalog_arguments() == {
-        "kind": LibraryItemKind.MOVIE,
-        "tags": ("anime", "favourite"),
-        "year": 2001,
-        "watched": WatchedFilter.IN_PROGRESS,
-        "availability": Availability.AVAILABLE,
-        "search": "Ghost",
-    }
-    pager = CursorPager()
-    assert pager.begin_request() is None
-    assert pager.begin_request() is None
-    pager.fail_request()
-    assert pager.begin_request() is None
-    pager.complete_request("next")
-    assert pager.begin_request() == "next"
-    pager.complete_request(None)
-    assert pager.begin_request() is None
+    assert filters.kind is LibraryItemKind.MOVIE
+    assert filters.tags == ("anime", "favourite")
+    assert filters.watched is WatchedFilter.IN_PROGRESS
+    request = LibraryPageRequest.from_query(
+        {
+            "search": "  Ghost  ",
+            "watched": "in_progress",
+            "availability": "available",
+            "year": "2001",
+        },
+        kinds=("movie", "series"),
+        tags=("anime", "favourite"),
+    )
+    assert request.kinds == (LibraryItemKind.MOVIE, LibraryItemKind.SERIES)
+    assert request.filters == filters.model_copy(update={"kind": None, "all_kinds": False})
+    with pytest.raises(ValueError, match="must not repeat"):
+        LibraryPageRequest.from_query({}, kinds=("movie", "movie"), tags=())
+
+
+def test_library_kind_modes_keep_default_browsing_at_the_catalogue_level() -> None:
+    default_filters = LibraryFilters.from_query({})
+    all_kinds_filters = LibraryFilters.from_query({"kind": "all"})
+    episode_filters = LibraryFilters.from_query({"kind": "episode"})
+
+    default_grids = library_route._library_grids(default_filters)  # pyright: ignore[reportPrivateUsage]
+    assert default_filters.is_default_catalogue_browse is True
+    assert [(grid.title, grid.kinds, grid.layout.value) for grid in default_grids] == [
+        ("Movies", (LibraryItemKind.MOVIE,), "portrait"),
+        ("Series", (LibraryItemKind.SERIES,), "portrait"),
+    ]
+    assert library_route._filter_query(  # pyright: ignore[reportPrivateUsage]
+        default_filters, default_grids[0].kinds
+    ) == [("kind", "movie")]
+
+    all_kinds_grids = library_route._library_grids(all_kinds_filters)  # pyright: ignore[reportPrivateUsage]
+    assert all_kinds_filters.all_kinds is True
+    assert all_kinds_filters.is_default_catalogue_browse is False
+    assert [(grid.title, grid.kinds, grid.layout.value) for grid in all_kinds_grids] == [
+        (
+            "Titles & collections",
+            (
+                LibraryItemKind.MOVIE,
+                LibraryItemKind.SERIES,
+                LibraryItemKind.SEASON,
+                LibraryItemKind.SPECIAL,
+                LibraryItemKind.EXTRA,
+            ),
+            "portrait",
+        ),
+        ("Episodes", (LibraryItemKind.EPISODE,), "landscape"),
+    ]
+    assert library_route._filter_query(  # pyright: ignore[reportPrivateUsage]
+        all_kinds_filters, all_kinds_grids[1].kinds
+    ) == [("kind", "episode")]
+
+    episode_grids = library_route._library_grids(episode_filters)  # pyright: ignore[reportPrivateUsage]
+    assert [(grid.title, grid.layout.value) for grid in episode_grids] == [("Episode", "landscape")]
 
 
 def test_playback_plan_request_and_one_use_uri_do_not_contain_media_locations() -> None:
@@ -1326,12 +1368,17 @@ async def test_library_endpoint_exposes_intentional_katalog_failure_state(
     monkeypatch: MonkeyPatch,
 ) -> None:
     async def unavailable(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        assert kinds == (LibraryItemKind.MOVIE,)
         raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", unavailable)
-    request = Request({"type": "http", "query_string": b"search=ghost", "headers": []})
+    request = Request({"type": "http", "query_string": b"search=ghost&kind=movie", "headers": []})
 
     response = await library_data(request)
 
@@ -1344,11 +1391,16 @@ async def test_library_endpoint_exposes_intentional_katalog_failure_state(
 
 async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: MonkeyPatch) -> None:
     async def page(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
         assert cursor == "later"
-        return (
-            (
+        assert kinds == (LibraryItemKind.MOVIE,)
+        return LibraryPosterPage(
+            items=(
                 PosterView(
                     id=7,
                     title="Safe",
@@ -1357,14 +1409,15 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
                     available=True,
                 ),
             ),
-            None,
+            previous_cursor="before",
+            next_cursor=None,
         )
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
     request = Request(
         {
             "type": "http",
-            "query_string": b"cursor=later",
+            "query_string": b"cursor=later&kind=movie",
             "headers": [(b"x-request-id", b"library-request-7")],
         }
     )
@@ -1373,9 +1426,10 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
 
     assert response.status_code == 200
     payload = json.loads(bytes(response.body))
-    assert payload["schemaVersion"] == 1
+    assert payload["schemaVersion"] == 2
     assert payload["requestId"] == "library-request-7"
     assert response.headers["x-request-id"] == "library-request-7"
+    assert payload["previousCursor"] == "before"
     assert payload["nextCursor"] is None
     assert payload["items"][0]["posterUrl"] == "/kanvas/artwork/7/8"
     assert "playback_url" not in json.dumps(payload)
@@ -1552,8 +1606,13 @@ async def test_library_endpoint_preserves_typed_katalog_failure_statuses(
     expected_status: int,
 ) -> None:
     async def failed(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        assert kinds == (LibraryItemKind.MOVIE,)
         raise error
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", failed)
@@ -1562,7 +1621,7 @@ async def test_library_endpoint_preserves_typed_katalog_failure_statuses(
         Request(
             {
                 "type": "http",
-                "query_string": b"",
+                "query_string": b"kind=movie",
                 "headers": [(b"x-request-id", b"typed-katalog-failure")],
             }
         )
@@ -1586,12 +1645,19 @@ async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
     leaking_value = "/media/private/film.mkv?access_token=secret"
 
     async def broken(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        assert kinds == (LibraryItemKind.MOVIE,)
         raise RuntimeError(leaking_value)
 
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", broken)
-    response = await library_data(Request({"type": "http", "query_string": b"", "headers": []}))
+    response = await library_data(
+        Request({"type": "http", "query_string": b"kind=movie", "headers": []})
+    )
 
     assert response.status_code == 500
     assert json.loads(bytes(response.body))["error"] == {
@@ -1602,9 +1668,18 @@ async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
     assert leaking_value not in caplog.text
 
     async def page(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
-        return (PosterView(id=7, title="Safe", href="/item/7", available=True),), None
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        assert kinds == (LibraryItemKind.MOVIE,)
+        return LibraryPosterPage(
+            items=(PosterView(id=7, title="Safe", href="/item/7", available=True),),
+            previous_cursor=None,
+            next_cursor=None,
+        )
 
     def serialisation_failure(
         _self: LibraryPageEnvelope, **_arguments: object
@@ -1614,7 +1689,7 @@ async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
     monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
     monkeypatch.setattr(LibraryPageEnvelope, "model_dump", serialisation_failure)
     serialisation = await library_data(
-        Request({"type": "http", "query_string": b"", "headers": []})
+        Request({"type": "http", "query_string": b"kind=movie", "headers": []})
     )
 
     assert serialisation.status_code == 500
@@ -1625,15 +1700,22 @@ async def test_library_endpoint_development_diagnostic_is_safe_and_opt_in(
     monkeypatch: MonkeyPatch,
 ) -> None:
     async def transformation_failure(
-        _self: object, _filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
+        _self: object,
+        _filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        assert kinds == (LibraryItemKind.MOVIE,)
         raise LibraryPosterTransformationError(7, ("artwork", "id", "title"))
 
     monkeypatch.setattr(
         "kasana.kanvas.dashboard.KanvasKatalogService.library_page", transformation_failure
     )
     monkeypatch.setattr(dashboard, "_settings", Kanvas_Settings(development_mode=True))
-    response = await library_data(Request({"type": "http", "query_string": b"", "headers": []}))
+    response = await library_data(
+        Request({"type": "http", "query_string": b"kind=movie", "headers": []})
+    )
 
     assert response.status_code == 500
     assert json.loads(bytes(response.body))["error"]["diagnostic"] == "poster_transformation"
@@ -1653,10 +1735,8 @@ async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
         async def __aexit__(self, *_arguments: object) -> None:
             pass
 
-        async def list_library_items(
-            self, **_arguments: object
-        ) -> PaginatedResponse[LibraryItemSummary]:
-            return PaginatedResponse(items=(item,), next_cursor=None, limit=48)
+        async def list_library_items(self, **_arguments: object) -> LibraryItemPage:
+            return LibraryItemPage(items=(item,), next_cursor=None, limit=48)
 
     def fake_client(*_arguments: object, **_keyword_arguments: object) -> FakeClient:
         return FakeClient()
@@ -1670,7 +1750,9 @@ async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
     )
 
     with pytest.raises(LibraryPosterTransformationError) as error:
-        await KanvasKatalogService(Kanvas_Settings()).library_page(LibraryFilters(), cursor=None)
+        await KanvasKatalogService(Kanvas_Settings()).library_page(
+            LibraryFilters(), kinds=(LibraryItemKind.MOVIE,), cursor=None
+        )
 
     assert error.value.item_id == 7
     assert error.value.field_names == (
@@ -4049,20 +4131,38 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives(
         }
         assert any(_element_props(tag).get("checked") is True for tag in tag_inputs)
         assert "k-check-menu" in _element_classes(tag_menu)
-        apply_button = next(
+        library_form = next(
             element
             for element in library_client.elements.values()
-            if element.tag == "button" and _element_props(element).get("aria-label") == "Apply"
+            if element.tag == "form" and "k-library-filter" in _element_classes(element)
+        )
+        clear_link = next(
+            element
+            for element in library_client.elements.values()
+            if element.tag == "a"
+            and _element_props(element).get("aria-label") == "Clear library filters"
+        )
+        search_button = next(
+            element
+            for element in library_client.elements.values()
+            if element.tag == "button" and _element_props(element).get("aria-label") == "Search"
         )
         poster_grid = next(
             element
             for element in library_client.elements.values()
             if element.tag == BrowserComponent.POSTER_GRID
         )
-        assert _element_props(apply_button)["type"] == "submit"
+        assert _element_props(library_form)["data-kanvas-library-filters"] == "true"
+        assert _element_props(clear_link)["href"] == "/library"
+        assert _element_props(search_button)["type"] == "submit"
+        assert not any(
+            element.tag == "button" and _element_props(element).get("aria-label") == "Apply"
+            for element in library_client.elements.values()
+        )
         assert _element_props(poster_grid)["state-user"] == "1"
         assert _element_props(poster_grid)["catalogue-revision"] == "test-revision"
         assert _element_props(poster_grid)["development-mode"] == "false"
+        assert _element_props(poster_grid)["grid-layout"] == "portrait"
         assert "search=poster" in cast(str, _element_props(poster_grid)["source"])
         assert "kind=movie" in cast(str, _element_props(poster_grid)["source"])
 
@@ -4081,6 +4181,81 @@ async def test_native_forms_and_design_review_use_shared_ui_primitives(
         assert "k-input" in _element_classes(review_input)
         assert "k-control-shell" in _element_classes(_parent_element(review_input))
         assert "k-input-shell" in _element_classes(_parent_element(review_input))
+
+
+async def test_library_default_and_all_kind_result_modes_mount_coherent_grid_layouts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class Catalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def library_tags(self) -> tuple[str, ...]:
+            return ()
+
+        async def library_grid_revision(self) -> str:
+            return "test-revision"
+
+    monkeypatch.setattr(library_route, "KanvasKatalogService", Catalogue)
+
+    with Client(page("")) as catalogue_client:
+        await render_library(Kanvas_Settings(), _selected_profile(), LibraryFilters())
+        catalogue_grids = [
+            element
+            for element in catalogue_client.elements.values()
+            if element.tag == BrowserComponent.POSTER_GRID
+        ]
+
+    assert len(catalogue_grids) == 2
+    assert [cast(str, _element_props(grid)["result-label"]) for grid in catalogue_grids] == [
+        "Movies",
+        "Series",
+    ]
+    assert all(_element_props(grid)["grid-layout"] == "portrait" for grid in catalogue_grids)
+    assert all(_element_props(grid)["max-mounted"] == "72" for grid in catalogue_grids)
+    assert [cast(str, _element_props(grid)["source"]) for grid in catalogue_grids] == [
+        "/kanvas/data/library?kind=movie",
+        "/kanvas/data/library?kind=series",
+    ]
+
+    with Client(page("")) as all_kinds_client:
+        await render_library(
+            Kanvas_Settings(),
+            _selected_profile(),
+            LibraryFilters(search="pilot", all_kinds=True),
+        )
+        all_kinds_grids = [
+            element
+            for element in all_kinds_client.elements.values()
+            if element.tag == BrowserComponent.POSTER_GRID
+        ]
+
+    assert [cast(str, _element_props(grid)["result-label"]) for grid in all_kinds_grids] == [
+        "Titles & collections",
+        "Episodes",
+    ]
+    assert [_element_props(grid)["grid-layout"] for grid in all_kinds_grids] == [
+        "portrait",
+        "landscape",
+    ]
+    assert all(_element_props(grid)["max-mounted"] == "72" for grid in all_kinds_grids)
+    assert [cast(str, _element_props(grid)["source"]) for grid in all_kinds_grids] == [
+        "/kanvas/data/library?search=pilot&kind=movie&kind=series&kind=season&kind=special&kind=extra",
+        "/kanvas/data/library?search=pilot&kind=episode",
+    ]
+
+    with Client(page("")) as episode_client:
+        await render_library(
+            Kanvas_Settings(), _selected_profile(), LibraryFilters(kind=LibraryItemKind.EPISODE)
+        )
+        episode_grid = next(
+            element
+            for element in episode_client.elements.values()
+            if element.tag == BrowserComponent.POSTER_GRID
+        )
+
+    assert _element_props(episode_grid)["grid-layout"] == "landscape"
+    assert cast(str, _element_props(episode_grid)["source"]) == "/kanvas/data/library?kind=episode"
 
 
 async def test_library_tag_filter_reports_katalog_failure_without_losing_active_tags(
@@ -4542,10 +4717,8 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
                 limit=limit,
             )
 
-        async def list_library_items(
-            self, **_arguments: object
-        ) -> PaginatedResponse[LibraryItemSummary]:
-            return PaginatedResponse(items=(item,), next_cursor="next", limit=48)
+        async def list_library_items(self, **_arguments: object) -> LibraryItemPage:
+            return LibraryItemPage(items=(item,), next_cursor="next", limit=48)
 
         async def recently_added_catalogue_items(
             self, *, limit: int = 20
@@ -4570,7 +4743,11 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     service = KanvasKatalogService(Kanvas_Settings(), _selected_profile().user.id)
 
     rails = await service.home_rails()
-    posters, next_cursor = await service.library_page(LibraryFilters(tags=("anime",)), cursor=None)
+    library_page = await service.library_page(
+        LibraryFilters(tags=("anime",)),
+        kinds=(LibraryItemKind.MOVIE,),
+        cursor=None,
+    )
 
     assert [rail.kind for rail in rails] == [
         HomeRailKind.CONTINUE,
@@ -4591,8 +4768,9 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     assert rails[1].posters[1].detail == "S05 E12"
     assert rails[1].posters[1].href == "/play/item/7?resume=true&onDeck=true"
     assert rails[1].posters[1].partially_watched is True
-    assert posters[0].poster_url == "/kanvas/artwork/7/8"
-    assert next_cursor == "next"
+    assert library_page.items[0].poster_url == "/kanvas/artwork/7/8"
+    assert library_page.previous_cursor is None
+    assert library_page.next_cursor == "next"
 
 
 async def test_item_picker_uses_a_bounded_server_side_library_search(

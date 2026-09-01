@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, replace
@@ -63,6 +64,7 @@ _IMAGE_SUFFIXES: dict[str, str] = {
     "image/gif": ".gif",
     "image/webp": ".webp",
 }
+_LOGGER = logging.getLogger(__name__)
 
 
 class ArtworkCacheView(BaseModel):
@@ -191,7 +193,11 @@ class ArtworkCache:
         item_id: int | None = None,
         include_variants: bool = False,
     ) -> tuple[ArtworkCacheView, ...]:
-        """Cache accepted posters plus matched season posters and episode stills."""
+        """Cache available posters, season posters, and episode stills.
+
+        A failure from one external provider does not prevent artwork from another
+        provider from being cached.
+        """
 
         if root_id is not None and item_id is not None:
             msg = "Artwork fetch accepts either a library root or an item, not both."
@@ -210,11 +216,12 @@ class ArtworkCache:
         primary_still_requests = tuple(
             request for request in primary_requests if request.artwork_kind is ArtworkKind.STILL
         )
+        semaphore = asyncio.Semaphore(self.concurrency)
         batches: tuple[PosterVariantBatch, ...] = ()
         if include_variants:
             batch_groups = await asyncio.gather(
                 *(
-                    self._poster_variant_batches(providers, request)
+                    self._poster_variant_batches(providers, request, semaphore)
                     for request in primary_poster_requests
                 )
             )
@@ -223,12 +230,20 @@ class ArtworkCache:
             requests = unique_artwork_requests((*primary_still_requests, *variant_requests))
         else:
             requests = primary_requests
-        semaphore = asyncio.Semaphore(self.concurrency)
 
         async def fetch(request: ArtworkRequest) -> ArtworkCacheView | None:
             async with semaphore:
                 provider = provider_for(request.provider, providers)
-                return await self._cache_artwork(provider, request)
+                try:
+                    return await self._cache_artwork(provider, request)
+                except KourierError as error:
+                    self._log_provider_artwork_failure(
+                        error,
+                        operation="artwork download",
+                        provider=request.provider,
+                        library_item_id=request.library_item_id,
+                    )
+                    return None
 
         results = await asyncio.gather(*(fetch(request) for request in requests))
         successful_cache_identities = {
@@ -484,7 +499,13 @@ class ArtworkCache:
             except KourierError as error:
                 if error.category is ProviderErrorCategory.NOT_FOUND:
                     return SeasonArtworkBatch()
-                raise
+                self._log_provider_artwork_failure(
+                    error,
+                    operation="season artwork lookup",
+                    provider=target.provider,
+                    library_item_id=target.library_item_id,
+                )
+                return SeasonArtworkBatch()
             if details.reference.provider != target.provider:
                 msg = f"Provider {target.provider!r} returned season details from another provider."
                 raise ValueError(msg)
@@ -601,7 +622,10 @@ class ArtworkCache:
         return tuple(await asyncio.gather(*(resolve(target) for target in targets)))
 
     async def _poster_variant_batches(
-        self, providers: tuple[MetadataProvider, ...], primary: ArtworkRequest
+        self,
+        providers: tuple[MetadataProvider, ...],
+        primary: ArtworkRequest,
+        semaphore: asyncio.Semaphore,
     ) -> tuple[PosterVariantBatch, ...]:
         """Load primary and supplemental poster sources for one matched item."""
 
@@ -609,10 +633,12 @@ class ArtworkCache:
             msg = "Poster variants require a primary poster request."
             raise ValueError(msg)
         primary_provider = provider_for(primary.provider, providers)
-        primary_batch = await self._primary_poster_variant_batch(primary_provider, primary)
+        primary_batch = await self._primary_poster_variant_batch(
+            primary_provider, primary, semaphore
+        )
         supplemental_batches = await asyncio.gather(
             *(
-                self._supplemental_poster_variant_batch(provider, primary)
+                self._supplemental_poster_variant_batch(provider, primary, semaphore)
                 for provider in providers
                 if provider.provider_name != primary.provider
                 and provider.supports(ProviderCapability.LIST_POSTERS_BY_EXTERNAL_ID)
@@ -623,7 +649,10 @@ class ArtworkCache:
         )
 
     async def _primary_poster_variant_batch(
-        self, provider: MetadataProvider, primary: ArtworkRequest
+        self,
+        provider: MetadataProvider,
+        primary: ArtworkRequest,
+        semaphore: asyncio.Semaphore,
     ) -> PosterVariantBatch:
         """Combine the matched poster with optional provider variants in display order."""
 
@@ -644,10 +673,20 @@ class ArtworkCache:
                 msg = f"Provider {primary.provider!r} advertises unsupported poster variants."
                 raise ValueError(msg)
             poster_provider = cast(PosterArtworkProvider, provider)
-            variants = await poster_provider.list_posters(
-                ProviderReference(provider=primary.provider, raw_id=primary.provider_id),
-                primary.media_kind,
-            )
+            try:
+                async with semaphore:
+                    variants = await poster_provider.list_posters(
+                        ProviderReference(provider=primary.provider, raw_id=primary.provider_id),
+                        primary.media_kind,
+                    )
+            except KourierError as error:
+                self._log_provider_artwork_failure(
+                    error,
+                    operation="poster variant lookup",
+                    provider=primary.provider,
+                    library_item_id=primary.library_item_id,
+                )
+                variants_listed = False
 
         unique: dict[str, ArtworkReference] = {primary_reference.raw_path: primary_reference}
         variant_revisions: set[str] = set()
@@ -684,7 +723,10 @@ class ArtworkCache:
         )
 
     async def _supplemental_poster_variant_batch(
-        self, provider: MetadataProvider, primary: ArtworkRequest
+        self,
+        provider: MetadataProvider,
+        primary: ArtworkRequest,
+        semaphore: asyncio.Semaphore,
     ) -> PosterVariantBatch | None:
         if not hasattr(provider, "list_posters_by_external_id"):
             msg = (
@@ -692,14 +734,26 @@ class ArtworkCache:
             )
             raise ValueError(msg)
         poster_provider = cast(ExternalPosterArtworkProvider, provider)
-        listing = await poster_provider.list_posters_by_external_id(
-            PosterLookup(
-                reference=ProviderReference(provider=primary.provider, raw_id=primary.provider_id),
-                media_kind=primary.media_kind,
-                external_ids=primary.external_ids,
-                season_number=primary.season_number,
+        try:
+            async with semaphore:
+                listing = await poster_provider.list_posters_by_external_id(
+                    PosterLookup(
+                        reference=ProviderReference(
+                            provider=primary.provider, raw_id=primary.provider_id
+                        ),
+                        media_kind=primary.media_kind,
+                        external_ids=primary.external_ids,
+                        season_number=primary.season_number,
+                    )
+                )
+        except KourierError as error:
+            self._log_provider_artwork_failure(
+                error,
+                operation="supplemental poster lookup",
+                provider=provider.provider_name,
+                library_item_id=primary.library_item_id,
             )
-        )
+            return None
         if listing is None:
             return None
         self._validate_poster_listing(provider, listing)
@@ -770,6 +824,20 @@ class ArtworkCache:
             if reference.source_url is None:
                 msg = f"Provider {listing.provider!r} returned a poster without a source URL."
                 raise ValueError(msg)
+
+    @staticmethod
+    def _log_provider_artwork_failure(
+        error: KourierError, *, operation: str, provider: str, library_item_id: int
+    ) -> None:
+        _LOGGER.warning(
+            "Skipping %s after provider failure: provider=%s library_item_id=%s category=%s "
+            "detail=%s",
+            operation,
+            provider,
+            library_item_id,
+            error.category.value,
+            error,
+        )
 
     async def _cache_artwork(
         self, provider: MetadataProvider, request: ArtworkRequest

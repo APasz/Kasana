@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import socket
@@ -51,6 +52,8 @@ from kasana.katalog.public import (
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPair,
     JobStatus,
+    LibraryItemKind,
+    LibraryItemPage,
     LibraryItemUpdate,
     UserAuthentication,
     UserCreate,
@@ -310,14 +313,39 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
     first_payload = first.json()
     assert [item["title"] for item in first_payload["items"]] == ["Alpha", "Beta"]
     assert first_payload["items"][0]["context_label"] == "Extended"
+    assert first_payload["previous_cursor"] is None
     assert first_payload["next_cursor"]
 
     second = await api_fixture.client.get(
         "/api/v1/library/items",
-        params={"limit": 2, "cursor": first_payload["next_cursor"]},
+        params={"limit": 2, "tag": "genre", "cursor": first_payload["next_cursor"]},
     )
     assert [item["title"] for item in second.json()["items"]] == ["Gamma"]
+    assert second.json()["previous_cursor"]
     assert second.json()["next_cursor"] is None
+
+    previous = await api_fixture.client.get(
+        "/api/v1/library/items",
+        params={"limit": 2, "tag": "genre", "cursor": second.json()["previous_cursor"]},
+    )
+    assert [item["title"] for item in previous.json()["items"]] == ["Alpha", "Beta"]
+    assert previous.json()["previous_cursor"] is None
+    assert previous.json()["next_cursor"]
+
+    legacy_cursor_payload = json.loads(
+        base64.urlsafe_b64decode(first_payload["next_cursor"] + "===")
+    )
+    del legacy_cursor_payload["values"]["direction"]
+    legacy_cursor = (
+        base64.urlsafe_b64encode(json.dumps(legacy_cursor_payload, separators=(",", ":")).encode())
+        .decode()
+        .rstrip("=")
+    )
+    legacy_cursor_response = await api_fixture.client.get(
+        "/api/v1/library/items",
+        params={"limit": 2, "tag": "genre", "cursor": legacy_cursor},
+    )
+    assert [item["title"] for item in legacy_cursor_response.json()["items"]] == ["Gamma"]
 
     assert (await api_fixture.client.get("/api/v1/library/items", params={"year": 2002})).json()[
         "items"
@@ -342,6 +370,32 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
             await api_fixture.client.get("/api/v1/library/items", params={"tag": "movies"})
         ).json()["items"]
     ] == ["Alpha", "Beta", "Gamma"]
+    recently_added = await api_fixture.client.get("/api/v1/library/recently-added")
+    assert "previous_cursor" not in recently_added.json()
+
+
+async def test_typed_client_keeps_the_single_kind_filter_shorthand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = KatalogClient("http://katalog.test", bearer_token="test-token")
+    requested_parameters: list[tuple[str, object]] = []
+
+    async def get_model(
+        _path: str, _model: object, *, params: list[tuple[str, object]]
+    ) -> LibraryItemPage:
+        requested_parameters.extend(params)
+        return LibraryItemPage(items=(), limit=50)
+
+    monkeypatch.setattr(client, "_get_model", get_model)
+
+    await client.list_library_items(kind=LibraryItemKind.MOVIE)
+
+    assert ("kind", "movie") in requested_parameters
+    with pytest.raises(ValueError, match="either kind or kinds"):
+        await client.list_library_items(
+            kind=LibraryItemKind.MOVIE,
+            kinds=(LibraryItemKind.SERIES,),
+        )
 
 
 async def test_missing_library_root_is_status_only_and_recovers(api_fixture: ApiFixture) -> None:

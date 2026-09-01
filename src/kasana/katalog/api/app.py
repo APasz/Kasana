@@ -49,6 +49,7 @@ from kasana.katalog.api.contracts import (
     LibraryItemEditAudit,
     LibraryItemKind,
     LibraryItemMutationResult,
+    LibraryItemPage,
     LibraryItemSummary,
     LibraryItemUpdate,
     LibraryRootCreate,
@@ -357,14 +358,16 @@ def create_app(
 
     @app.get(
         "/api/v1/library/items",
-        response_model=PaginatedResponse[LibraryItemSummary],
+        response_model=LibraryItemPage,
         operation_id="v1_list_library_items",
         responses=_ERROR_RESPONSES,
     )
     async def list_library_items(
         cursor: str | None = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
-        kind: LibraryItemKind | None = None,
+        kind: Annotated[
+            list[LibraryItemKind] | None, Query(max_length=len(LibraryItemKind))
+        ] = None,
         tag: Annotated[list[str] | None, Query(max_length=50)] = None,
         year: Annotated[int | None, Query(ge=1, le=9999)] = None,
         watched: WatchedFilter | None = None,
@@ -373,9 +376,9 @@ def create_app(
         collection_id: Annotated[int | None, Query(gt=0)] = None,
         search: Annotated[str | None, Query(min_length=1, max_length=500)] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
-    ) -> PaginatedResponse[LibraryItemSummary]:
+    ) -> LibraryItemPage:
         filters = LibraryItemFilters(
-            kind=kind,
+            kinds=tuple(kind or ()),
             tags=tuple(tag or ()),
             year=year,
             watched=watched,

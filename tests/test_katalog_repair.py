@@ -940,3 +940,235 @@ def test_hierarchy_repair_reparents_extras_specials_and_orphan_season_branches(
         None,
         "Standalone Film",
     )
+
+
+def test_hierarchy_repair_reidentifies_a_container_movie_as_the_correct_remake(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        original = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        container = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="00's",
+        )
+        attach_media_file(
+            session,
+            library_item_id=container.id,
+            absolute_path=movies / "00's" / "Ghostbusters (2016).mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        return original.id, container.id
+
+    original_id, container_id = database.run_transaction(seed)
+    service = HierarchyRepairService(database)
+
+    preview = service.preview()
+
+    rename = next(action for action in preview.actions if action.item_id == container_id)
+    assert rename.kind is RepairActionKind.RENAME
+    assert rename.target_title == "Ghostbusters"
+    assert rename.target_release_year == 2016
+    backup = repair_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(backup_path=backup)
+
+    def repaired_identities(
+        session: Session,
+    ) -> tuple[tuple[str, int | None], tuple[str, int | None]]:
+        original = session.get(Zaisan, original_id)
+        container = session.get(Zaisan, container_id)
+        assert original is not None
+        assert container is not None
+        return (original.title, original.release_year), (container.title, container.release_year)
+
+    assert database.run_transaction(repaired_identities) == (
+        ("Ghostbusters", 1984),
+        ("Ghostbusters", 2016),
+    )
+
+
+def test_hierarchy_repair_merges_a_yearless_path_with_its_known_remake(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        remake = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=2016,
+        )
+        container = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="00's",
+            release_year=2016,
+        )
+        attach_media_file(
+            session,
+            library_item_id=container.id,
+            absolute_path=movies / "00's" / "Ghostbusters.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        return remake.id, container.id
+
+    remake_id, container_id = database.run_transaction(seed)
+    service = HierarchyRepairService(database)
+
+    preview = service.preview()
+
+    merge = next(action for action in preview.actions if action.kind is RepairActionKind.MERGE)
+    assert (merge.item_id, merge.target_item_id) == (container_id, remake_id)
+    backup = repair_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(backup_path=backup)
+
+    def repaired_media_owner(session: Session) -> tuple[bool, int]:
+        media_owner_id = session.scalar(select(MediaFile.library_item_id))
+        assert media_owner_id is not None
+        return session.get(Zaisan, container_id) is None, media_owner_id
+
+    assert database.run_transaction(repaired_media_owner) == (True, remake_id)
+
+
+def test_hierarchy_repair_retypes_an_episode_as_the_correct_movie_remake(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        original = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        misclassified = Zaisan(
+            library_root_id=root.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="Wrong episode",
+            sort_title="Wrong episode",
+            season_number=1,
+            episode_number=1,
+        )
+        session.add(misclassified)
+        session.flush()
+        attach_media_file(
+            session,
+            library_item_id=misclassified.id,
+            absolute_path=movies / "Ghostbusters (2016).mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        return original.id, misclassified.id
+
+    original_id, misclassified_id = database.run_transaction(seed)
+    service = HierarchyRepairService(database)
+
+    preview = service.preview()
+
+    actions = tuple(action for action in preview.actions if action.item_id == misclassified_id)
+    assert [action.kind for action in actions] == [RepairActionKind.RETYPE, RepairActionKind.RENAME]
+    assert actions[-1].target_title == "Ghostbusters"
+    assert actions[-1].target_release_year == 2016
+    backup = repair_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(backup_path=backup)
+
+    def repaired_identities(
+        session: Session,
+    ) -> tuple[tuple[ZaisanKind, str, int | None], tuple[ZaisanKind, str, int | None]]:
+        original = session.get(Zaisan, original_id)
+        misclassified = session.get(Zaisan, misclassified_id)
+        assert original is not None
+        assert misclassified is not None
+        return (
+            (original.item_kind, original.title, original.release_year),
+            (misclassified.item_kind, misclassified.title, misclassified.release_year),
+        )
+
+    assert database.run_transaction(repaired_identities) == (
+        (ZaisanKind.MOVIE, "Ghostbusters", 1984),
+        (ZaisanKind.MOVIE, "Ghostbusters", 2016),
+    )
+
+
+def test_hierarchy_repair_reparents_an_extra_to_the_correct_movie_remake(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        remake = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=2016,
+        )
+        orphan = Zaisan(
+            library_root_id=root.id,
+            item_kind=ZaisanKind.EXTRA,
+            title="Trailer",
+            sort_title="Trailer",
+        )
+        session.add(orphan)
+        session.flush()
+        attach_media_file(
+            session,
+            library_item_id=orphan.id,
+            absolute_path=movies / "Ghostbusters (2016)" / "Extras" / "Trailer.mkv",
+            size_bytes=1,
+            mtime_ns=1,
+            container="matroska",
+        )
+        return orphan.id, remake.id
+
+    orphan_id, remake_id = database.run_transaction(seed)
+    service = HierarchyRepairService(database)
+
+    preview = service.preview()
+
+    reparent = next(action for action in preview.actions if action.item_id == orphan_id)
+    assert reparent.kind is RepairActionKind.REPARENT
+    assert reparent.target_release_year == 2016
+    backup = repair_backup_path(database.database_path)
+    database.backup_to(backup)
+    service.apply(backup_path=backup)
+
+    def repaired_parent_id(session: Session) -> int | None:
+        orphan = session.get(Zaisan, orphan_id)
+        assert orphan is not None
+        return orphan.parent_id
+
+    assert database.run_transaction(repaired_parent_id) == remake_id

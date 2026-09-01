@@ -942,6 +942,16 @@ class PaginatedResponse[ItemT](APIModel):
     limit: int = Field(ge=1, le=100)
 
 
+class LibraryItemPage(PaginatedResponse[LibraryItemSummary]):
+    """The Library's bidirectional cursor response.
+
+    Other paginated API resources remain forward-only and keep their existing
+    response shape.
+    """
+
+    previous_cursor: str | None = Field(default=None, max_length=500)
+
+
 class WatchOrderDetail(APIModel):
     watch_order: WatchOrderSummary
     entries: PaginatedResponse[WatchOrderEntryDetail]

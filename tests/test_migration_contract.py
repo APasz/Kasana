@@ -5,15 +5,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
-from kasana.katalog.models import Base, PlaybackState, ZaisanKind
+from kasana.katalog.models import Base, PlaybackState, Zaisan, ZaisanKind
 from kasana.katalog.services import create_library_item, create_library_root, create_user
 
 
@@ -54,6 +57,71 @@ def test_initial_migration_is_immutable_and_does_not_import_runtime_metadata() -
     assert "metadata.create_all" not in source
     assert "metadata.drop_all" not in source
     assert "op.create_table(" in source
+
+
+def test_remake_migration_allows_distinct_years_and_refuses_an_unsafe_downgrade(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "catalogue.sqlite3"
+    repository_root = Path(__file__).parents[1]
+    config = Config(str(repository_root / "alembic.ini"))
+    config.set_main_option("script_location", str(repository_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
+    command.upgrade(config, "20260829_0025")
+
+    database = KatalogDatabase(database_path)
+    try:
+
+        def seed(session: Session) -> None:
+            root = create_library_root(
+                session,
+                path=tmp_path / "Movies",
+                expected_media_kind=ZaisanKind.MOVIE,
+            )
+            create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.MOVIE,
+                title="Ghostbusters",
+                release_year=1984,
+            )
+
+        database.run_transaction(seed)
+    finally:
+        database.close()
+
+    command.upgrade(config, "head")
+    database = KatalogDatabase(database_path)
+    try:
+
+        def add_remake_item(session: Session) -> None:
+            root = session.scalar(select(Zaisan.library_root_id).limit(1))
+            assert root is not None
+            create_library_item(
+                session,
+                library_root_id=root,
+                item_kind=ZaisanKind.MOVIE,
+                title="Ghostbusters",
+                release_year=2016,
+            )
+
+        database.run_transaction(add_remake_item)
+        assert database.run_transaction(
+            lambda session: tuple(
+                session.scalars(
+                    select(Zaisan.release_year)
+                    .where(Zaisan.item_kind == ZaisanKind.MOVIE)
+                    .order_by(Zaisan.release_year)
+                )
+            )
+        ) == (1984, 2016)
+        with pytest.raises(IntegrityError):
+            database.run_transaction(add_remake_item)
+    finally:
+        database.close()
+
+    with pytest.raises(RuntimeError, match="same-titled movie remakes"):
+        command.downgrade(config, "20260829_0025")
 
 
 def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_path: Path) -> None:

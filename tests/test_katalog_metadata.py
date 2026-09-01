@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import AnyHttpUrl
@@ -16,6 +17,7 @@ from kasana.katalog.metadata import (
     MetadataWorkflow,
     score_search_result,
 )
+from kasana.katalog.metadata.review import MetadataIdentityConflictError
 from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
@@ -59,6 +61,9 @@ class _FakeProvider:
         artwork: ArtworkContent | None = None,
         posters: tuple[ArtworkReference, ...] = (),
         season_details: dict[tuple[str, int], SeasonDetails] | None = None,
+        *,
+        artwork_error: KourierError | None = None,
+        poster_listing_error: KourierError | None = None,
     ) -> None:
         self.results = results
         self.details = details
@@ -71,6 +76,8 @@ class _FakeProvider:
         self.season_details = season_details or {}
         self.season_calls: list[tuple[ProviderReference, int]] = []
         self.missing_seasons: set[tuple[str, int]] = set()
+        self.artwork_error = artwork_error
+        self.poster_listing_error = poster_listing_error
 
     @property
     def capabilities(self) -> frozenset[ProviderCapability]:
@@ -115,6 +122,8 @@ class _FakeProvider:
     async def get_artwork(self, reference: ArtworkReference) -> ArtworkContent:
         del reference
         self.artwork_calls += 1
+        if self.artwork_error is not None:
+            raise self.artwork_error
         assert self.artwork is not None
         return self.artwork
 
@@ -124,7 +133,34 @@ class _FakeProvider:
         assert reference.provider == self.provider_name
         assert media_kind is ProviderMediaKind.MOVIE
         self.poster_list_calls += 1
+        if self.poster_listing_error is not None:
+            raise self.poster_listing_error
         return self.posters
+
+
+class _ConcurrencyTrackingPosterProvider(_FakeProvider):
+    """Expose the maximum concurrent variant requests made by the artwork cache."""
+
+    def __init__(
+        self,
+        results: tuple[SearchResult, ...],
+        details: dict[str, MovieDetails | SeriesDetails],
+        artwork: ArtworkContent,
+    ) -> None:
+        super().__init__(results, details, artwork)
+        self.active_poster_lookups = 0
+        self.maximum_poster_lookups = 0
+
+    async def list_posters(
+        self, reference: ProviderReference, media_kind: ProviderMediaKind
+    ) -> tuple[ArtworkReference, ...]:
+        self.active_poster_lookups += 1
+        self.maximum_poster_lookups = max(self.maximum_poster_lookups, self.active_poster_lookups)
+        try:
+            await asyncio.sleep(0)
+            return await super().list_posters(reference, media_kind)
+        finally:
+            self.active_poster_lookups -= 1
 
 
 class _SupplementalPosterProvider(_FakeProvider):
@@ -136,8 +172,17 @@ class _SupplementalPosterProvider(_FakeProvider):
         posters: tuple[ArtworkReference, ...],
         *,
         provider_id: str,
+        artwork_error: KourierError | None = None,
+        poster_listing_error: KourierError | None = None,
     ) -> None:
-        super().__init__((), {}, artwork, posters)
+        super().__init__(
+            (),
+            {},
+            artwork,
+            posters,
+            artwork_error=artwork_error,
+            poster_listing_error=poster_listing_error,
+        )
         self.provider_id = provider_id
         self.lookups: list[PosterLookup] = []
 
@@ -153,6 +198,8 @@ class _SupplementalPosterProvider(_FakeProvider):
     async def list_posters_by_external_id(self, lookup: PosterLookup) -> PosterListing:
         self.lookups.append(lookup)
         self.poster_list_calls += 1
+        if self.poster_listing_error is not None:
+            raise self.poster_listing_error
         return PosterListing(
             provider=self.provider_name,
             provider_id=self.provider_id,
@@ -265,10 +312,13 @@ def _create_movie(
     return database.run_transaction(create)
 
 
-def _workflow(database: KatalogDatabase, cache_path: Path) -> MetadataWorkflow:
+def _workflow(
+    database: KatalogDatabase, cache_path: Path, *, artwork_concurrency: int = 4
+) -> MetadataWorkflow:
     return MetadataWorkflow(
         database,
         artwork_cache_path=cache_path,
+        artwork_concurrency=artwork_concurrency,
         thresholds=MatchThresholds(auto_match=0.94, suggestion=0.7, ambiguity_margin=0.08),
     )
 
@@ -447,6 +497,135 @@ async def test_auto_match_retains_a_suggested_candidate_when_metadata_would_coll
     item, binding = database.run_transaction(load)
     assert item.title == "Everything, Everywhere, All At Once"
     assert binding is None
+
+
+async def test_manual_match_allows_same_titled_movies_with_different_years(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create(session: Session) -> tuple[int, int]:
+        root = create_library_root(
+            session,
+            path=tmp_path / "Movies",
+            expected_media_kind=ZaisanKind.MOVIE,
+        )
+        original = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        reboot = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters (2016)",
+            sort_title="Ghostbusters (2016)",
+            release_year=2016,
+        )
+        return original.id, reboot.id
+
+    original_id, reboot_id = database.run_transaction(create)
+    provider = _FakeProvider(
+        (),
+        {"7027": _movie_details("7027", "Ghostbusters", year=2016)},
+    )
+
+    binding = await _workflow(database, tmp_path / "cache").match_item(reboot_id, provider, "7027")
+
+    assert binding.provider_id == "7027"
+
+    def load(session: Session) -> tuple[Zaisan, Zaisan]:
+        original = session.get(Zaisan, original_id)
+        reboot = session.get(Zaisan, reboot_id)
+        assert original is not None
+        assert reboot is not None
+        return original, reboot
+
+    original, reboot = database.run_transaction(load)
+    assert (original.title, original.sort_title, original.release_year) == (
+        "Ghostbusters",
+        "Ghostbusters",
+        1984,
+    )
+    assert (reboot.title, reboot.sort_title, reboot.release_year) == (
+        "Ghostbusters",
+        "Ghostbusters",
+        2016,
+    )
+
+
+async def test_metadata_match_rejects_a_release_year_collision_when_sort_title_is_locked(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create(session: Session) -> int:
+        root = create_library_root(
+            session,
+            path=tmp_path / "Movies",
+            expected_media_kind=ZaisanKind.MOVIE,
+        )
+        create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        return create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=2016,
+            locked_metadata_fields=frozenset({MetadataField.SORT_TITLE}),
+        ).id
+
+    reboot_id = database.run_transaction(create)
+    provider = _FakeProvider(
+        (),
+        {"7027": _movie_details("7027", "Ghostbusters", year=1984)},
+    )
+
+    with pytest.raises(MetadataIdentityConflictError, match="conflicts with library item"):
+        await _workflow(database, tmp_path / "cache").match_item(reboot_id, provider, "7027")
+
+
+async def test_metadata_refresh_rejects_a_release_year_collision_when_sort_title_is_locked(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    def create(session: Session) -> int:
+        root = create_library_root(
+            session,
+            path=tmp_path / "Movies",
+            expected_media_kind=ZaisanKind.MOVIE,
+        )
+        create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=1984,
+        )
+        return create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Ghostbusters",
+            release_year=2016,
+            locked_metadata_fields=frozenset({MetadataField.SORT_TITLE}),
+        ).id
+
+    reboot_id = database.run_transaction(create)
+    provider = _FakeProvider(
+        (),
+        {"7027": _movie_details("7027", "Ghostbusters", year=2016)},
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+    await workflow.match_item(reboot_id, provider, "7027")
+    provider.details["7027"] = _movie_details("7027", "Ghostbusters", year=1984)
+
+    with pytest.raises(MetadataIdentityConflictError, match="conflicts with library item"):
+        await workflow.refresh_item(reboot_id, (provider,))
 
 
 async def test_remake_ambiguity_and_title_only_results_require_review(
@@ -1033,6 +1212,57 @@ async def test_artwork_cache_fetches_ordered_poster_variants_for_one_shared_pick
     assert not obsolete_path.exists()
 
 
+async def test_artwork_cache_limits_concurrent_poster_variant_lookups(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    first_poster = _poster_reference("/first.png")
+    second_poster = _poster_reference("/second.png")
+
+    def create(session: Session) -> tuple[int, int, int]:
+        root = create_library_root(
+            session,
+            path=tmp_path / "Movies",
+            expected_media_kind=ZaisanKind.MOVIE,
+        )
+        first = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="First",
+            release_year=2001,
+        )
+        second = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Second",
+            release_year=2002,
+        )
+        return root.id, first.id, second.id
+
+    root_id, first_id, second_id = database.run_transaction(create)
+    provider = _ConcurrencyTrackingPosterProvider(
+        (),
+        {
+            "first": _movie_details("first", "First", year=2001, poster=first_poster),
+            "second": _movie_details("second", "Second", year=2002, poster=second_poster),
+        },
+        ArtworkContent(
+            reference=first_poster,
+            content=b"\x89PNG\r\n\x1a\nminimal",
+            media_type="image/png",
+        ),
+    )
+    workflow = _workflow(database, tmp_path / "cache", artwork_concurrency=1)
+
+    await workflow.match_item(first_id, provider, "first")
+    await workflow.match_item(second_id, provider, "second")
+    await workflow.fetch_posters((provider,), root_id=root_id, include_variants=True)
+
+    assert provider.poster_list_calls == 2
+    assert provider.maximum_poster_lookups == 1
+
+
 async def test_artwork_cache_interleaves_supplemental_poster_sources_and_prunes_them_by_owner(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -1140,6 +1370,79 @@ async def test_artwork_cache_interleaves_supplemental_poster_sources_and_prunes_
     await workflow.match_item(item_id, metadata_provider, "52")
 
     assert await workflow.prune_artwork() == (4, len(image) * 4)
+
+
+@pytest.mark.parametrize(
+    ("unavailable_provider", "failure_operation", "expected_providers"),
+    (
+        ("fake", "download", frozenset({"fanart"})),
+        ("fanart", "download", frozenset({"fake"})),
+        ("fake", "poster lookup", frozenset({"fake", "fanart"})),
+        ("fanart", "poster lookup", frozenset({"fake"})),
+    ),
+)
+async def test_artwork_cache_uses_artwork_from_reachable_providers(
+    database: KatalogDatabase,
+    tmp_path: Path,
+    unavailable_provider: Literal["fake", "fanart"],
+    failure_operation: Literal["download", "poster lookup"],
+    expected_providers: frozenset[str],
+) -> None:
+    item_id = _create_movie(database, tmp_path / "Movies", title="Paprika", year=2006)
+    primary = _poster_reference("/primary.png")
+    supplemental = ArtworkReference(
+        provider="fanart",
+        kind=ArtworkKind.POSTER,
+        raw_path="fanart-primary",
+        source_url=AnyHttpUrl("https://fanart.example.test/primary.png"),
+    )
+    image = b"\x89PNG\r\n\x1a\nminimal"
+    failure = KourierError(
+        ProviderErrorCategory.TRANSIENT,
+        f"{unavailable_provider} is unavailable.",
+        provider=unavailable_provider,
+    )
+    primary_artwork_error = (
+        failure if (unavailable_provider, failure_operation) == ("fake", "download") else None
+    )
+    primary_listing_error = (
+        failure if (unavailable_provider, failure_operation) == ("fake", "poster lookup") else None
+    )
+    supplemental_artwork_error = (
+        failure if (unavailable_provider, failure_operation) == ("fanart", "download") else None
+    )
+    supplemental_listing_error = (
+        failure
+        if (unavailable_provider, failure_operation) == ("fanart", "poster lookup")
+        else None
+    )
+    metadata_provider = _FakeProvider(
+        (_search_result("51", "Paprika", year=2006, poster=primary),),
+        {"51": _movie_details("51", "Paprika", year=2006, poster=primary)},
+        ArtworkContent(reference=primary, content=image, media_type="image/png"),
+        artwork_error=primary_artwork_error,
+        poster_listing_error=primary_listing_error,
+    )
+    fanart_provider = _SupplementalPosterProvider(
+        ArtworkContent(reference=supplemental, content=image, media_type="image/png"),
+        (supplemental,),
+        provider_id="tmdb:51",
+        artwork_error=supplemental_artwork_error,
+        poster_listing_error=supplemental_listing_error,
+    )
+    workflow = _workflow(database, tmp_path / "cache")
+
+    await workflow.search_item(item_id, (metadata_provider,))
+    cached = await workflow.fetch_posters(
+        (metadata_provider, fanart_provider), item_id=item_id, include_variants=True
+    )
+
+    expected_fanart_artwork_calls = (
+        0 if (unavailable_provider, failure_operation) == ("fanart", "poster lookup") else 1
+    )
+    assert {artwork.provider for artwork in cached} == expected_providers
+    assert metadata_provider.artwork_calls == 1
+    assert fanart_provider.artwork_calls == expected_fanart_artwork_calls
 
 
 async def test_artwork_cache_fetches_only_the_requested_item(

@@ -83,6 +83,7 @@ class RepairAction(BaseModel):
     target_title: str | None = Field(
         default=None, min_length=1, max_length=1_000, alias="targetTitle"
     )
+    target_release_year: int | None = Field(default=None, ge=1, le=9999, alias="targetReleaseYear")
     target_series_title: str | None = Field(
         default=None, min_length=1, max_length=1_000, alias="targetSeriesTitle"
     )
@@ -254,6 +255,22 @@ class _HierarchyIndex:
                 item
                 for item in self.top_level_by_identity.get(_hierarchy_title_key(kind, title), ())
                 if item.id != exclude_id
+            ),
+            None,
+        )
+
+    def movie_item(
+        self, title: str, release_year: int | None, *, exclude_id: int | None = None
+    ) -> Zaisan | None:
+        """Find the exact movie identity, including its optional release year."""
+
+        return next(
+            (
+                item
+                for item in self.top_level_by_identity.get(
+                    _hierarchy_title_key(ZaisanKind.MOVIE, title), ()
+                )
+                if item.id != exclude_id and item.release_year == release_year
             ),
             None,
         )
@@ -736,9 +753,8 @@ def _plan_container_movie(
     parsed: Sequence[ParsedMedia],
     hierarchy: _HierarchyIndex,
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
-    movies = tuple(entry for entry in parsed if entry.kind is ParsedMediaKind.MOVIE)
-    titles = {entry.title for entry in movies}
-    if len(titles) != 1:
+    identities = _parsed_movie_identities(parsed)
+    if len(identities) != 1:
         return [], [
             RepairManualReview(
                 rootId=item.library_root_id,
@@ -746,8 +762,8 @@ def _plan_container_movie(
                 reason="Container-like movie item has multiple or no provable feature identities.",
             )
         ]
-    title = movies[0].title
-    if title == item.title:
+    title, release_year = next(iter(identities))
+    if title == item.title and (release_year is None or release_year == item.release_year):
         return [], []
     if _title_locked(item):
         return [], [
@@ -757,7 +773,17 @@ def _plan_container_movie(
                 reason="Container-like movie title is manually locked and will not be renamed.",
             )
         ]
-    target = hierarchy.top_level_item(ZaisanKind.MOVIE, title, exclude_id=item.id)
+    if _release_year_locked(item, release_year):
+        return [], [
+            RepairManualReview(
+                rootId=item.library_root_id,
+                itemId=item.id,
+                reason="Container-like movie release date is manually locked and will not change.",
+            )
+        ]
+    target = hierarchy.movie_item(
+        title, _resolved_movie_release_year(item, release_year), exclude_id=item.id
+    )
     if target is not None:
         return _merge_actions(item, target)
     return [
@@ -765,7 +791,8 @@ def _plan_container_movie(
             kind=RepairActionKind.RENAME,
             itemId=item.id,
             targetTitle=title,
-            explanation="Rename the container-derived movie title while preserving its item ID.",
+            targetReleaseYear=release_year,
+            explanation="Reidentify the container-derived movie while preserving its item ID.",
         )
     ], []
 
@@ -908,7 +935,10 @@ def _plan_top_level_extra(
     if item.item_kind is not ZaisanKind.EXTRA or item.parent_id is not None:
         return [], []
     extras = tuple(entry for entry in parsed if entry.kind is ParsedMediaKind.EXTRA)
-    parents = {(entry.parent_movie_title, entry.parent_series_title) for entry in extras}
+    parents = {
+        (entry.parent_movie_title, entry.parent_movie_release_year, entry.parent_series_title)
+        for entry in extras
+    }
     if len(parents) != 1:
         return [], [
             RepairManualReview(
@@ -917,15 +947,18 @@ def _plan_top_level_extra(
                 reason="Top-level extra does not have one path-proven parent identity.",
             )
         ]
-    movie_title, series_title = parents.pop()
+    movie_title, movie_release_year, series_title = parents.pop()
     if movie_title is not None:
-        actions = _ensure_movie_actions(root.id, movie_title, hierarchy, creation_keys)
+        actions = _ensure_movie_actions(
+            root.id, movie_title, movie_release_year, hierarchy, creation_keys
+        )
         actions.append(
             RepairAction(
                 kind=RepairActionKind.REPARENT,
                 itemId=item.id,
                 targetKind=ZaisanKind.MOVIE,
                 targetTitle=movie_title,
+                targetReleaseYear=movie_release_year,
                 explanation="Attach the top-level extra beneath its path-proven movie.",
             )
         )
@@ -994,12 +1027,13 @@ def _plan_episode_as_movie(
 ) -> tuple[list[RepairAction], list[RepairManualReview]]:
     if item.item_kind is not ZaisanKind.EPISODE:
         return [], []
-    movies = tuple(entry for entry in parsed if entry.kind is ParsedMediaKind.MOVIE)
-    titles = {entry.title for entry in movies}
-    if len(titles) != 1:
+    identities = _parsed_movie_identities(parsed)
+    if len(identities) != 1:
         return [], []
-    title = movies[0].title
-    target = hierarchy.top_level_item(ZaisanKind.MOVIE, title, exclude_id=item.id)
+    title, release_year = next(iter(identities))
+    target = hierarchy.movie_item(
+        title, _resolved_movie_release_year(item, release_year), exclude_id=item.id
+    )
     if target is not None:
         return _merge_actions(item, target)
     if _title_locked(item):
@@ -1008,6 +1042,14 @@ def _plan_episode_as_movie(
                 rootId=item.library_root_id,
                 itemId=item.id,
                 reason="Episode classified as a movie has manually locked title metadata.",
+            )
+        ]
+    if _release_year_locked(item, release_year):
+        return [], [
+            RepairManualReview(
+                rootId=item.library_root_id,
+                itemId=item.id,
+                reason="Episode classified as a movie has manually locked release date metadata.",
             )
         ]
     return [
@@ -1021,6 +1063,7 @@ def _plan_episode_as_movie(
             kind=RepairActionKind.RENAME,
             itemId=item.id,
             targetTitle=title,
+            targetReleaseYear=release_year,
             explanation="Use the movie identity proven by the physical media path.",
         ),
     ], []
@@ -1029,12 +1072,13 @@ def _plan_episode_as_movie(
 def _ensure_movie_actions(
     root_id: int,
     title: str,
+    release_year: int | None,
     hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
-    if hierarchy.top_level_item(ZaisanKind.MOVIE, title) is not None:
+    if hierarchy.movie_item(title, release_year) is not None:
         return []
-    key = (ZaisanKind.MOVIE, title.casefold(), None)
+    key = (ZaisanKind.MOVIE, title.casefold(), release_year)
     if key in creation_keys:
         return []
     creation_keys.add(key)
@@ -1044,6 +1088,7 @@ def _ensure_movie_actions(
             rootId=root_id,
             targetKind=ZaisanKind.MOVIE,
             targetTitle=title,
+            targetReleaseYear=release_year,
             explanation=f"Create movie {title!r} required as the proven extra parent.",
         )
     ]
@@ -1210,6 +1255,42 @@ def _top_level_item(
     )
 
 
+def _parsed_movie_identities(parsed: Sequence[ParsedMedia]) -> set[tuple[str, int | None]]:
+    return {
+        (entry.title, entry.release_year) for entry in parsed if entry.kind is ParsedMediaKind.MOVIE
+    }
+
+
+def _resolved_movie_release_year(item: Zaisan, parsed_release_year: int | None) -> int | None:
+    """Retain an item's existing year when its path cannot prove a replacement."""
+
+    return parsed_release_year if parsed_release_year is not None else item.release_year
+
+
+def _movie_item(
+    items: Iterable[Zaisan],
+    title: str,
+    release_year: int | None,
+    *,
+    exclude_id: int | None = None,
+) -> Zaisan | None:
+    """Find an exact top-level movie identity without conflating remakes."""
+
+    expected = title.casefold()
+    return next(
+        (
+            item
+            for item in items
+            if item.id != exclude_id
+            and item.parent_id is None
+            and item.item_kind is ZaisanKind.MOVIE
+            and item.sort_title.casefold() == expected
+            and item.release_year == release_year
+        ),
+        None,
+    )
+
+
 def _season_item(items: Iterable[Zaisan], series_id: int, number: int) -> Zaisan | None:
     return next(
         (
@@ -1227,6 +1308,14 @@ def _title_locked(item: Zaisan) -> bool:
     return bool(
         {MetadataField.TITLE.value, MetadataField.SORT_TITLE.value}
         & set(item.locked_metadata_fields)
+    )
+
+
+def _release_year_locked(item: Zaisan, target_release_year: int | None) -> bool:
+    return (
+        target_release_year is not None
+        and target_release_year != item.release_year
+        and MetadataField.RELEASE_DATE.value in item.locked_metadata_fields
     )
 
 
@@ -1319,6 +1408,12 @@ def _apply_action(session: Session, action: RepairAction) -> None:
             if not _title_locked(item):
                 item.title = action.target_title
                 item.sort_title = action.target_title
+            if action.target_release_year is not None:
+                if _release_year_locked(item, action.target_release_year):
+                    raise ValueError(
+                        "Hierarchy repair cannot change a manually locked release date."
+                    )
+                item.release_year = action.target_release_year
         case RepairActionKind.REPARENT:
             assert action.item_id is not None
             item = _require_item(session, action.item_id)
@@ -1334,12 +1429,13 @@ def _apply_create(session: Session, action: RepairAction) -> None:
     assert action.target_kind is not None
     if action.target_kind in {ZaisanKind.MOVIE, ZaisanKind.SERIES}:
         assert action.target_title is not None
-        existing = _top_level_item(
-            session.scalars(
-                select(Zaisan).where(Zaisan.library_root_id == _action_root_id(session, action))
-            ).all(),
-            action.target_kind,
-            action.target_title,
+        items = session.scalars(
+            select(Zaisan).where(Zaisan.library_root_id == _action_root_id(session, action))
+        ).all()
+        existing = (
+            _movie_item(items, action.target_title, action.target_release_year)
+            if action.target_kind is ZaisanKind.MOVIE
+            else _top_level_item(items, action.target_kind, action.target_title)
         )
         if existing is None:
             session.add(
@@ -1348,6 +1444,11 @@ def _apply_create(session: Session, action: RepairAction) -> None:
                     item_kind=action.target_kind,
                     title=action.target_title,
                     sort_title=action.target_title,
+                    release_year=(
+                        action.target_release_year
+                        if action.target_kind is ZaisanKind.MOVIE
+                        else None
+                    ),
                 )
             )
             session.flush()
@@ -1442,10 +1543,10 @@ def _resolve_parent(session: Session, root_id: int, action: RepairAction) -> Zai
         return _find_or_create_series(session, root_id, action.target_series_title)
     if action.target_kind is ZaisanKind.MOVIE:
         assert action.target_title is not None
-        movie = _top_level_item(
+        movie = _movie_item(
             session.scalars(select(Zaisan).where(Zaisan.library_root_id == root_id)).all(),
-            ZaisanKind.MOVIE,
             action.target_title,
+            action.target_release_year,
         )
         if movie is None:
             movie = Zaisan(
@@ -1453,6 +1554,7 @@ def _resolve_parent(session: Session, root_id: int, action: RepairAction) -> Zai
                 item_kind=ZaisanKind.MOVIE,
                 title=action.target_title,
                 sort_title=action.target_title,
+                release_year=action.target_release_year,
             )
             session.add(movie)
             session.flush()

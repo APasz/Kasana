@@ -82,6 +82,7 @@ from kasana.kanvas.viewmodels.library import (
     LibraryErrorView,
     LibraryFilters,
     LibraryPageEnvelope,
+    LibraryPageRequest,
     PosterState,
     PosterView,
 )
@@ -428,10 +429,12 @@ async def library_data(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Select a profile."}, status_code=401)
     request_id = _library_request_id(request)
     try:
-        filters = LibraryFilters.from_query(
-            dict(request.query_params), tags=request.query_params.getlist("tag")
+        page_request = LibraryPageRequest.from_query(
+            dict(request.query_params),
+            kinds=request.query_params.getlist("kind"),
+            tags=request.query_params.getlist("tag"),
         )
-    except ValidationError:
+    except ValidationError, ValueError:
         return _library_error_response(
             request_id,
             status_code=422,
@@ -440,8 +443,10 @@ async def library_data(request: Request) -> JSONResponse:
 
     cursor = request.query_params.get("cursor")
     try:
-        posters, next_cursor = await KanvasKatalogService(_settings, profile.user.id).library_page(
-            filters, cursor=cursor
+        page = await KanvasKatalogService(_settings, profile.user.id).library_page(
+            page_request.filters,
+            kinds=page_request.kinds,
+            cursor=cursor,
         )
     except KatalogClientError as error:
         _LOGGER.warning(
@@ -464,8 +469,9 @@ async def library_data(request: Request) -> JSONResponse:
 
     try:
         envelope = LibraryPageEnvelope(
-            items=posters,
-            nextCursor=next_cursor,
+            items=page.items,
+            previousCursor=page.previous_cursor,
+            nextCursor=page.next_cursor,
             requestId=request_id,
         )
         validated_envelope = LibraryPageEnvelope.model_validate(

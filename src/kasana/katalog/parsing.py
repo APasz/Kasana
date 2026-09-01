@@ -65,6 +65,7 @@ class ParsedMedia:
     episode_end_season_number: int | None = None
     episode_end_number: int | None = None
     parent_movie_title: str | None = None
+    parent_movie_release_year: int | None = None
     parent_series_title: str | None = None
     is_directory_movie: bool = False
 
@@ -313,6 +314,7 @@ def _parse_movie_path(
                 kind=ParsedMediaKind.EXTRA,
                 title=filename_stem,
                 parent_movie_title=title,
+                parent_movie_release_year=release_year,
             )
         return ParsedMedia(
             kind=ParsedMediaKind.MOVIE,
@@ -321,11 +323,14 @@ def _parse_movie_path(
             is_directory_movie=True,
         )
     if len(effective_directories) == 2 and effective_directories[1].casefold() == "extras":
-        parent_movie_title, _ = _movie_title_and_year(effective_directories[0])
+        parent_movie_title, parent_movie_release_year = _movie_title_and_year(
+            effective_directories[0]
+        )
         return ParsedMedia(
             kind=ParsedMediaKind.EXTRA,
             title=filename_stem,
             parent_movie_title=parent_movie_title,
+            parent_movie_release_year=parent_movie_release_year,
         )
     return ParseFailure(
         "Movie files must be direct children of a title directory or its extras directory."

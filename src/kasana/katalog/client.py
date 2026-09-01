@@ -45,6 +45,7 @@ from kasana.katalog.api.contracts import (
     LibraryItemEditAudit,
     LibraryItemKind,
     LibraryItemMutationResult,
+    LibraryItemPage,
     LibraryItemSummary,
     LibraryItemUpdate,
     LibraryRootCreate,
@@ -142,6 +143,7 @@ _PLAYBACK_STATE_ADAPTER: TypeAdapter[PlaybackStateResponse | None] = TypeAdapter
 class _LibraryItemFilters(TypedDict, total=False):
     limit: int
     kind: LibraryItemKind | None
+    kinds: tuple[LibraryItemKind, ...]
     tags: tuple[str, ...]
     year: int | None
     watched: WatchedFilter | None
@@ -315,6 +317,7 @@ class KatalogClient:
         cursor: str | None = None,
         limit: int = 50,
         kind: LibraryItemKind | None = None,
+        kinds: tuple[LibraryItemKind, ...] = (),
         tags: tuple[str, ...] = (),
         year: int | None = None,
         watched: WatchedFilter | None = None,
@@ -322,11 +325,15 @@ class KatalogClient:
         availability: Availability | None = None,
         collection_id: int | None = None,
         search: str | None = None,
-    ) -> PaginatedResponse[LibraryItemSummary]:
+    ) -> LibraryItemPage:
+        if kind is not None and kinds:
+            raise ValueError("Specify either kind or kinds, not both.")
+        requested_kinds = kinds or ((kind,) if kind is not None else ())
+        if len(set(requested_kinds)) != len(requested_kinds):
+            raise ValueError("Library item kinds must not repeat.")
         params = _params(
             cursor=cursor,
             limit=limit,
-            kind=kind.value if kind is not None else None,
             year=year,
             watched=watched.value if watched is not None else None,
             user_id=user_id,
@@ -334,10 +341,9 @@ class KatalogClient:
             collection_id=collection_id,
             search=search,
         )
+        params.extend(("kind", requested_kind.value) for requested_kind in requested_kinds)
         params.extend(("tag", tag) for tag in tags)
-        return await self._get_model(
-            "/api/v1/library/items", PaginatedResponse[LibraryItemSummary], params=params
-        )
+        return await self._get_model("/api/v1/library/items", LibraryItemPage, params=params)
 
     async def list_library_tags(self) -> tuple[str, ...]:
         response = await self._request("GET", "/api/v1/library/tags")

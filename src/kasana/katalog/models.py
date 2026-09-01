@@ -430,7 +430,26 @@ class Zaisan(Base):
             "item_kind",
             "sort_title",
             unique=True,
-            sqlite_where=parent_id.is_(None),
+            sqlite_where=parent_id.is_(None) & (item_kind != ZaisanKind.MOVIE),
+        ),
+        Index(
+            "ix_library_item_movie_identity_known_year",
+            "library_root_id",
+            "sort_title",
+            "release_year",
+            unique=True,
+            sqlite_where=(
+                parent_id.is_(None) & (item_kind == ZaisanKind.MOVIE) & release_year.is_not(None)
+            ),
+        ),
+        Index(
+            "ix_library_item_movie_identity_unknown_year",
+            "library_root_id",
+            "sort_title",
+            unique=True,
+            sqlite_where=(
+                parent_id.is_(None) & (item_kind == ZaisanKind.MOVIE) & release_year.is_(None)
+            ),
         ),
         Index(
             "ix_library_item_child_identity",

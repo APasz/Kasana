@@ -2,7 +2,10 @@
   'use strict';
 
   const MAX_MOUNTED_POSTERS = 144;
+  const LIBRARY_VIRTUAL_OVERSCAN_PX = 960;
   const GRID_ROW_TOP_TOLERANCE_PX = 1;
+  const GRID_TRIM_VIEWPORT_BUFFER_PX = 0;
+  const LIBRARY_FILTER_INPUT_DELAY_MS = 260;
   const PROFILE_ACCENT_DEFAULT = '#e8e8e8';
   const PROFILE_PIN_MIN_LENGTH = 2;
   const PROFILE_PIN_MAX_LENGTH = 16;
@@ -60,6 +63,57 @@
       window.location.assign(finalUrl);
     }).catch(() => HTMLFormElement.prototype.submit.call(form));
   });
+
+  const libraryFilterUrl = (action, values) => {
+    const url = new URL(action, window.location.origin);
+    url.search = '';
+    for (const [name, rawValue] of values) {
+      const value = String(rawValue).trim();
+      if (value) url.searchParams.append(name, value);
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  };
+
+  const libraryFilterTimers = new WeakMap();
+  const clearLibraryFilterTimer = (form) => {
+    const timer = libraryFilterTimers.get(form);
+    if (timer !== undefined) window.clearTimeout(timer);
+    libraryFilterTimers.delete(form);
+  };
+
+  const submitLibraryFilters = (form) => {
+    clearLibraryFilterTimer(form);
+    const action = form.getAttribute('action') || window.location.pathname;
+    window.location.assign(libraryFilterUrl(action, new FormData(form)));
+  };
+
+  const scheduleLibraryFilterSubmit = (form, delay) => {
+    clearLibraryFilterTimer(form);
+    libraryFilterTimers.set(form, window.setTimeout(() => submitLibraryFilters(form), delay));
+  };
+
+  const libraryFilterForm = (target) => target instanceof Element
+    ? target.closest('form[data-kanvas-library-filters="true"]')
+    : null;
+
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-kanvas-library-filters')) return;
+    event.preventDefault();
+    submitLibraryFilters(form);
+  });
+
+  document.addEventListener('change', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
+    const form = libraryFilterForm(target);
+    if (!(form instanceof HTMLFormElement)) return;
+    const delay = target instanceof HTMLInputElement && target.type === 'checkbox'
+      ? LIBRARY_FILTER_INPUT_DELAY_MS
+      : 0;
+    scheduleLibraryFilterSubmit(form, delay);
+  });
+
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
@@ -68,6 +122,7 @@
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
   const POSTER_ARTWORK_SHAPES = new Set(['portrait', 'landscape']);
+  const LIBRARY_GRID_LAYOUTS = new Set(['portrait', 'landscape']);
   const POSTER_ACTIONS = {
     resume: {
       label: 'Resume',
@@ -630,6 +685,7 @@
     const poster = normalisePoster(value);
     if (!poster) throw new TypeError('Invalid poster payload');
     const element = document.createElement('kanvas-poster');
+    element.dataset.libraryPosterId = String(poster.id);
     element.setAttribute('poster', JSON.stringify(poster));
     return element;
   };
@@ -703,19 +759,63 @@
     const columns = gridColumnCount(grid);
     const requestedCount = columns >= children.length ? overflow : Math.ceil(overflow / columns) * columns;
     const removeCount = Math.min(children.length - 1, requestedCount);
-    const removed = children.slice(0, removeCount);
-    if (!removed.length || removed.some((child) => child.contains(document.activeElement))) {
-      return 0;
+    const completeRowCount = Math.floor(removeCount / columns) * columns;
+    const maximumSafeRemoval = completeRowCount || removeCount;
+    let safeRemovalCount = 0;
+
+    for (let count = columns; count <= maximumSafeRemoval; count += columns) {
+      const lastCandidate = children[count - 1];
+      if (!lastCandidate) break;
+      const bounds = lastCandidate.getBoundingClientRect();
+      const bottom = Number.isFinite(bounds.bottom) ? bounds.bottom : bounds.top + bounds.height;
+      if (bottom > GRID_TRIM_VIEWPORT_BUFFER_PX) break;
+      safeRemovalCount = count;
     }
-    const anchor = children[removeCount] || null;
+    if (safeRemovalCount === 0 && maximumSafeRemoval < columns) {
+      const lastCandidate = children[maximumSafeRemoval - 1];
+      if (lastCandidate) {
+        const bounds = lastCandidate.getBoundingClientRect();
+        const bottom = Number.isFinite(bounds.bottom) ? bounds.bottom : bounds.top + bounds.height;
+        if (bottom <= GRID_TRIM_VIEWPORT_BUFFER_PX) safeRemovalCount = maximumSafeRemoval;
+      }
+    }
+
+    const removed = children.slice(0, safeRemovalCount);
+    const anchor = children[safeRemovalCount] || null;
+    if (!removed.length || !anchor) return 0;
+    if (removed.some((child) => child.contains(document.activeElement))) {
+      const focusTarget = anchor.querySelector('.k-poster');
+      if (!focusTarget || typeof focusTarget.focus !== 'function') return 0;
+      focusTarget.focus({preventScroll: true});
+    }
     const anchorTop = anchor?.getBoundingClientRect().top ?? null;
     for (const child of removed) child.remove();
     if (anchor && anchorTop !== null) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
     return removed.length;
   };
 
-  const LIBRARY_GRID_SCHEMA_VERSION = 5;
-  const LIBRARY_RESPONSE_SCHEMA_VERSION = 1;
+  const LIBRARY_GRID_SCHEMA_VERSION = 9;
+  const LIBRARY_RESPONSE_SCHEMA_VERSION = 2;
+  const LibraryPageDirection = Object.freeze({
+    INITIAL: 'initial',
+    PREVIOUS: 'previous',
+    NEXT: 'next'
+  });
+  const libraryGridLayout = (value) => LIBRARY_GRID_LAYOUTS.has(value) ? value : 'portrait';
+  const libraryGridMarkup = (layout) => {
+    const skeletonCount = layout === 'landscape' ? 3 : 6;
+    const loading = Array.from(
+      {length: skeletonCount}, () => '<span class="k-library-grid__skeleton"></span>'
+    ).join('');
+    return '<div class="k-library-grid__loading k-library-grid__loading--' + layout + '" aria-hidden="true">' + loading + '</div>'
+      + '<div class="k-grid-spacer" data-library-spacer="before" aria-hidden="true"></div>'
+      + '<div class="k-grid-status k-grid-status--head" data-library-status="previous" aria-live="polite"></div>'
+      + '<div class="k-grid-sentinel" data-library-sentinel="previous" aria-hidden="true"></div>'
+      + '<div class="k-grid k-grid--' + layout + '" data-library-grid="' + layout + '" aria-busy="true"></div>'
+      + '<div class="k-grid-status k-grid-status--tail" data-library-status="next" aria-live="polite">Loading library…</div>'
+      + '<div class="k-grid-sentinel" data-library-sentinel="next" aria-hidden="true"></div>'
+      + '<div class="k-grid-spacer" data-library-spacer="after" aria-hidden="true"></div>';
+  };
   const libraryAssetVersion = () => {
     const scripts = Array.from(document.scripts);
     const script = scripts.find((candidate) => candidate.src.includes('/_kanvas/kanvas.js'));
@@ -729,14 +829,15 @@
     const entries = Array.from(url.searchParams.entries())
       .sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue));
     url.search = new URLSearchParams(entries).toString();
-    return `${url.pathname}${url.search}`;
+    return url.pathname + url.search;
   };
 
+  const libraryCursor = (value) => value === null || typeof value === 'string';
   const libraryGridPayload = (payload) => {
     if (!payload || typeof payload !== 'object' || payload.schemaVersion !== LIBRARY_RESPONSE_SCHEMA_VERSION || !Array.isArray(payload.items)) {
       throw new LibraryLoadError('invalid_envelope');
     }
-    if (payload.nextCursor != null && typeof payload.nextCursor !== 'string') {
+    if (!libraryCursor(payload.previousCursor) || !libraryCursor(payload.nextCursor)) {
       throw new LibraryLoadError('invalid_envelope');
     }
     const requestId = safeRequestId(payload.requestId);
@@ -748,33 +849,73 @@
       if (poster) items.push(poster);
       else invalidPosterIds.push(safePosterId(item));
     }
-    return {items, invalidPosterIds, nextCursor: payload.nextCursor ?? null, requestId};
+    return {
+      items,
+      invalidPosterIds,
+      previousCursor: payload.previousCursor ?? null,
+      nextCursor: payload.nextCursor ?? null,
+      requestId
+    };
   };
+
+  const savedLibraryPage = (value) => {
+    if (!value || typeof value !== 'object' || !Array.isArray(value.items) || !libraryCursor(value.previousCursor) || !libraryCursor(value.nextCursor)) {
+      throw new TypeError('Invalid saved library page');
+    }
+    const items = value.items.map(normalisePoster);
+    if (!items.length || items.some((item) => item === null)) {
+      throw new TypeError('Invalid saved library posters');
+    }
+    return {
+      items,
+      previousCursor: value.previousCursor ?? null,
+      nextCursor: value.nextCursor ?? null
+    };
+  };
+
+  const virtualHeight = (value) => (
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 10_000_000
+      ? value
+      : null
+  );
 
   class KanvasPosterGrid extends HTMLElement {
     static get observedAttributes() {
-      return ['source', 'catalogue-revision'];
+      return ['source', 'catalogue-revision', 'grid-layout', 'result-label', 'max-mounted'];
     }
 
     constructor() {
       super();
-      this.cursor = null;
-      this.loading = false;
-      this.done = false;
+      this.pages = [];
+      this.leadingHeight = 0;
+      this.trailingHeight = 0;
+      this.loadingDirection = null;
+      this.retryDirection = null;
       this.observer = null;
       this.grid = null;
-      this.status = null;
-      this.sentinel = null;
+      this.previousStatus = null;
+      this.nextStatus = null;
+      this.previousSentinel = null;
+      this.nextSentinel = null;
+      this.leadingSpacer = null;
+      this.trailingSpacer = null;
+      this.loadingView = null;
       this.stateKey = null;
-      this.posters = [];
-      this.mountedStart = 0;
       this.requestController = null;
       this.generation = 0;
       this.requestId = null;
       this.invalidPosterCount = 0;
-      this.retryRequired = false;
       this.hasSuccessfulPage = false;
+      this.viewportCheckQueued = false;
+      this.gridHeight = 0;
+      this.pendingFocus = null;
       this.onPageHide = () => this.saveState();
+      this.onScroll = () => {
+        if (this.trimMountedPages()) this.scheduleGridMeasurement();
+        this.scheduleViewportCheck();
+      };
+      this.onResize = () => this.handleResize();
+      this.onKeyDown = (event) => this.handleKeyDown(event);
     }
 
     connectedCallback() {
@@ -782,7 +923,11 @@
     }
 
     attributeChangedCallback(name, previous, current) {
-      if ((name === 'source' || name === 'catalogue-revision') && this.isConnected && previous !== current) this.initialise();
+      if (
+        ['source', 'catalogue-revision', 'grid-layout', 'result-label', 'max-mounted'].includes(name)
+        && this.isConnected
+        && previous !== current
+      ) this.initialise();
     }
 
     disconnectedCallback() {
@@ -791,7 +936,10 @@
       this.requestController = null;
       this.observer?.disconnect();
       this.observer = null;
+      this.removeEventListener('keydown', this.onKeyDown);
       window.removeEventListener('pagehide', this.onPageHide);
+      window.removeEventListener('scroll', this.onScroll);
+      window.removeEventListener('resize', this.onResize);
     }
 
     initialise() {
@@ -800,67 +948,200 @@
       this.requestController = null;
       this.observer?.disconnect();
       const source = this.getAttribute('source');
-      this.cursor = null;
-      this.done = false;
-      this.loading = false;
-      this.posters = [];
-      this.mountedStart = 0;
+      this.pages = [];
+      this.leadingHeight = 0;
+      this.trailingHeight = 0;
+      this.loadingDirection = null;
+      this.retryDirection = null;
       this.requestId = null;
       this.invalidPosterCount = 0;
-      this.retryRequired = false;
       this.hasSuccessfulPage = false;
+      this.gridHeight = 0;
+      this.pendingFocus = null;
       this.stateKey = source ? this.buildStateKey(source) : null;
-      this.innerHTML = '<div class="k-grid-status" aria-live="polite">Loading library…</div><div class="k-grid" aria-busy="true"></div><div class="k-grid-sentinel" aria-hidden="true"></div>';
-      this.status = this.querySelector('.k-grid-status');
-      this.grid = this.querySelector('.k-grid');
-      this.sentinel = this.querySelector('.k-grid-sentinel');
-      if (!source || !this.grid || !this.status || !this.sentinel) {
-        if (this.status) this.status.textContent = 'The library grid could not be configured.';
+      this.innerHTML = libraryGridMarkup(this.gridLayout());
+      this.grid = this.querySelector('[data-library-grid]');
+      this.previousStatus = this.querySelector('[data-library-status="previous"]');
+      this.nextStatus = this.querySelector('[data-library-status="next"]');
+      this.previousSentinel = this.querySelector('[data-library-sentinel="previous"]');
+      this.nextSentinel = this.querySelector('[data-library-sentinel="next"]');
+      this.leadingSpacer = this.querySelector('[data-library-spacer="before"]');
+      this.trailingSpacer = this.querySelector('[data-library-spacer="after"]');
+      this.loadingView = this.querySelector('.k-library-grid__loading');
+      if (
+        !source ||
+        !(this.grid instanceof HTMLElement) ||
+        !(this.previousStatus instanceof HTMLElement) ||
+        !(this.nextStatus instanceof HTMLElement) ||
+        !(this.previousSentinel instanceof HTMLElement) ||
+        !(this.nextSentinel instanceof HTMLElement) ||
+        !(this.leadingSpacer instanceof HTMLElement) ||
+        !(this.trailingSpacer instanceof HTMLElement)
+      ) {
+        if (this.nextStatus) this.nextStatus.textContent = 'The library grid could not be configured.';
         return;
       }
       this.observer = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) this.loadNext();
-      }, {rootMargin: '640px 0px'});
-      this.observer.observe(this.sentinel);
+        for (const entry of entries) {
+          if (!entry.isIntersecting || !(entry.target instanceof HTMLElement)) continue;
+          const direction = entry.target.dataset.librarySentinel;
+          if (direction === LibraryPageDirection.PREVIOUS || direction === LibraryPageDirection.NEXT) {
+            void this.load(direction);
+          }
+        }
+      }, {rootMargin: String(LIBRARY_VIRTUAL_OVERSCAN_PX) + 'px 0px'});
+      this.observer.observe(this.previousSentinel);
+      this.observer.observe(this.nextSentinel);
+      this.removeEventListener('keydown', this.onKeyDown);
+      this.addEventListener('keydown', this.onKeyDown);
       window.removeEventListener('pagehide', this.onPageHide);
       window.addEventListener('pagehide', this.onPageHide);
-      if (!this.restoreState()) this.loadNext();
+      window.removeEventListener('scroll', this.onScroll);
+      window.addEventListener('scroll', this.onScroll, {passive: true});
+      window.removeEventListener('resize', this.onResize);
+      window.addEventListener('resize', this.onResize, {passive: true});
+      if (this.restoreState()) {
+        this.scheduleViewportCheck();
+      } else {
+        void this.load(LibraryPageDirection.INITIAL);
+      }
+    }
+
+    gridLayout() {
+      return libraryGridLayout(this.getAttribute('grid-layout'));
+    }
+
+    resultLabel() {
+      const label = this.getAttribute('result-label')?.trim() || '';
+      return label.toLowerCase() === 'library' ? null : label;
+    }
+
+    loadingStatus() {
+      const label = this.resultLabel();
+      return label ? 'Loading ' + label.toLowerCase() + '…' : 'Loading library…';
+    }
+
+    emptyStatus() {
+      const label = this.resultLabel();
+      return label ? 'No ' + label.toLowerCase() + ' match these filters.' : 'No items match these filters.';
+    }
+
+    endStatus() {
+      const label = this.resultLabel();
+      return label ? 'End of ' + label.toLowerCase() + '.' : 'End of library.';
+    }
+
+    maximumMountedPosters() {
+      const requested = Number(this.getAttribute('max-mounted'));
+      if (!Number.isSafeInteger(requested) || requested < 1) return MAX_MOUNTED_POSTERS;
+      return Math.min(requested, MAX_MOUNTED_POSTERS);
+    }
+
+    posterElements() {
+      return this.grid ? Array.from(this.grid.children) : [];
+    }
+
+    mountedPosterCount() {
+      return this.pages.reduce((count, page) => count + page.items.length, 0);
+    }
+
+    edgeCursor(direction) {
+      if (!this.pages.length) return null;
+      if (direction === LibraryPageDirection.PREVIOUS) return this.pages[0].previousCursor;
+      if (direction === LibraryPageDirection.NEXT) return this.pages.at(-1).nextCursor;
+      return null;
+    }
+
+    canLoad(direction, retry) {
+      if (this.loadingDirection !== null || !(this.grid instanceof HTMLElement)) return false;
+      if (direction === LibraryPageDirection.INITIAL) return this.pages.length === 0;
+      if (this.retryDirection === direction && !retry) return false;
+      return this.edgeCursor(direction) !== null;
+    }
+
+    setGridBusy(busy) {
+      this.grid?.setAttribute('aria-busy', String(busy));
+    }
+
+    clearLoadingView() {
+      this.loadingView?.remove();
+      this.loadingView = null;
+    }
+
+    setLeadingHeight(height) {
+      this.leadingHeight = Math.max(0, height);
+      if (this.leadingSpacer) this.leadingSpacer.style.height = String(this.leadingHeight) + 'px';
+    }
+
+    setTrailingHeight(height) {
+      this.trailingHeight = Math.max(0, height);
+      if (this.trailingSpacer) this.trailingSpacer.style.height = String(this.trailingHeight) + 'px';
+    }
+
+    appendPage(page) {
+      if (!this.grid) throw new TypeError('Library grid is unavailable');
+      const fragment = document.createDocumentFragment();
+      for (const poster of page.items) fragment.append(posterElement(poster));
+      this.grid.append(fragment);
+    }
+
+    prependPage(page) {
+      if (!this.grid) throw new TypeError('Library grid is unavailable');
+      const fragment = document.createDocumentFragment();
+      for (const poster of page.items) fragment.append(posterElement(poster));
+      this.grid.prepend(fragment);
+    }
+
+    renderPages() {
+      if (!this.grid) throw new TypeError('Library grid is unavailable');
+      this.grid.replaceChildren();
+      for (const page of this.pages) this.appendPage(page);
     }
 
     buildStateKey(source) {
       const user = this.getAttribute('state-user') || 'anonymous';
       const catalogueRevision = this.catalogueRevision();
-      return `kanvas:grid:v${LIBRARY_GRID_SCHEMA_VERSION}:asset=${libraryAssetVersion()}:catalogue=${encodeURIComponent(catalogueRevision)}:user=${encodeURIComponent(user)}:filters=${encodeURIComponent(normalisedGridSource(source))}`;
+      return 'kanvas:grid:v' + LIBRARY_GRID_SCHEMA_VERSION
+        + ':asset=' + libraryAssetVersion()
+        + ':catalogue=' + encodeURIComponent(catalogueRevision)
+        + ':user=' + encodeURIComponent(user)
+        + ':max-mounted=' + this.maximumMountedPosters()
+        + ':filters=' + encodeURIComponent(normalisedGridSource(source));
     }
 
     catalogueRevision() {
       return this.getAttribute('catalogue-revision') || 'unknown';
     }
 
-    async loadNext({retry = false} = {}) {
-      if (this.loading || this.done || this.retryRequired && !retry || !this.grid || !this.status) return;
+    async load(direction, {retry = false, focusColumn = null} = {}) {
+      if (!this.canLoad(direction, retry)) return;
       const source = this.getAttribute('source');
       if (!source) return;
-      if (retry) this.retryRequired = false;
+      const cursor = direction === LibraryPageDirection.INITIAL ? null : this.edgeCursor(direction);
       const generation = this.generation;
       const controller = new AbortController();
-      this.requestController?.abort();
       this.requestController = controller;
-      this.loading = true;
-      this.grid.setAttribute('aria-busy', 'true');
-      this.status.textContent = this.posters.length ? 'Loading more…' : 'Loading library…';
+      this.loadingDirection = direction;
+      this.pendingFocus = focusColumn === null ? null : {direction, column: focusColumn};
+      if (retry) this.retryDirection = null;
+      this.setGridBusy(true);
+      const status = direction === LibraryPageDirection.PREVIOUS ? this.previousStatus : this.nextStatus;
+      if (status) {
+        status.textContent = direction === LibraryPageDirection.INITIAL
+          ? this.loadingStatus()
+          : direction === LibraryPageDirection.PREVIOUS ? 'Loading earlier items…' : 'Loading more…';
+      }
+      let completed = false;
       try {
         const url = new URL(source, window.location.origin);
-        if (this.cursor) url.searchParams.set('cursor', this.cursor);
+        if (cursor) url.searchParams.set('cursor', cursor);
         const response = await fetch(url, {
           headers: {'Accept': 'application/json'},
           credentials: 'same-origin',
           signal: controller.signal
         });
         const responseRequestId = safeRequestId(response.headers.get('X-Request-ID'));
-        if (!response.ok) {
-          throw await this.httpFailure(response, responseRequestId);
-        }
+        if (!response.ok) throw await this.httpFailure(response, responseRequestId);
         const contentType = response.headers.get('content-type') || '';
         if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
           throw new LibraryLoadError('invalid_content_type', {
@@ -897,43 +1178,95 @@
         this.requestId = payload.requestId;
         if (payload.invalidPosterIds.length) this.reportInvalidPosters(payload.invalidPosterIds);
         this.invalidPosterCount += payload.invalidPosterIds.length;
-        if (!payload.items.length && !this.posters.length && !payload.invalidPosterIds.length) {
-          this.status.textContent = 'No items match these filters.';
-        } else {
-          try {
-            const fragment = document.createDocumentFragment();
-            for (const item of payload.items) fragment.append(posterElement(item));
-            this.posters.push(...payload.items);
-            this.grid.append(fragment);
-            this.trimMountedPosters();
-          } catch (error) {
-            throw new LibraryLoadError('rendering_failure', {
-              status: response.status,
-              requestId: payload.requestId,
-              cause: error
-            });
-          }
-          this.status.textContent = this.pageStatus(payload.nextCursor);
+        const page = {
+          items: payload.items,
+          previousCursor: payload.previousCursor,
+          nextCursor: payload.nextCursor
+        };
+        try {
+          this.integratePage(page, direction);
+        } catch (error) {
+          throw new LibraryLoadError('rendering_failure', {
+            status: response.status,
+            requestId: payload.requestId,
+            cause: error
+          });
         }
-        this.cursor = payload.nextCursor;
-        this.done = this.cursor === null;
+        this.clearLoadingView();
         this.hasSuccessfulPage = true;
-        this.retryRequired = false;
+        this.retryDirection = null;
+        this.updateEdgeStatus();
+        this.trimMountedPages();
+        this.focusInsertedPage();
+        completed = true;
       } catch (error) {
         if (controller.signal.aborted || generation !== this.generation) return;
         const failure = error instanceof LibraryLoadError
           ? error
           : new LibraryLoadError('network_failure', {cause: error});
         this.requestId = failure.requestId || this.requestId;
-        this.retryRequired = true;
-        this.showFailure(failure);
+        this.retryDirection = direction;
+        this.clearLoadingView();
+        this.showFailure(direction, failure);
         this.reportFailure(failure);
       } finally {
         if (generation !== this.generation) return;
-        this.loading = false;
+        this.loadingDirection = null;
         this.requestController = null;
-        this.grid?.setAttribute('aria-busy', 'false');
+        this.setGridBusy(false);
+        if (!completed) return;
+        this.scheduleGridMeasurement();
+        if (!this.mountedPosterCount() && this.edgeCursor(LibraryPageDirection.NEXT) !== null) {
+          requestAnimationFrame(() => { void this.load(LibraryPageDirection.NEXT); });
+        } else {
+          this.scheduleViewportCheck();
+        }
       }
+    }
+
+    integratePage(page, direction) {
+      if (direction === LibraryPageDirection.INITIAL) {
+        if (!page.items.length) {
+          this.pages = page.nextCursor === null && !this.invalidPosterCount ? [] : [page];
+          return;
+        }
+        this.pages = [page];
+        this.renderPages();
+        return;
+      }
+      if (!page.items.length) {
+        this.updateEmptyEdge(page, direction);
+        return;
+      }
+      if (direction === LibraryPageDirection.PREVIOUS) {
+        const anchor = this.posterElements()[0] || null;
+        const anchorTop = anchor?.getBoundingClientRect().top ?? null;
+        this.pages.unshift(page);
+        this.prependPage(page);
+        if (anchor && anchorTop !== null) {
+          const insertedHeight = Math.max(0, anchor.getBoundingClientRect().top - anchorTop);
+          this.setLeadingHeight(this.leadingHeight - insertedHeight);
+          window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
+        }
+        return;
+      }
+      const trailingBottom = this.trailingSpacer?.getBoundingClientRect().bottom ?? null;
+      this.pages.push(page);
+      this.appendPage(page);
+      if (trailingBottom !== null && this.trailingSpacer) {
+        const insertedHeight = Math.max(0, this.trailingSpacer.getBoundingClientRect().bottom - trailingBottom);
+        this.setTrailingHeight(this.trailingHeight - insertedHeight);
+      }
+    }
+
+    updateEmptyEdge(page, direction) {
+      if (!this.pages.length) {
+        this.pages = [page];
+        return;
+      }
+      const edge = direction === LibraryPageDirection.PREVIOUS ? this.pages[0] : this.pages.at(-1);
+      if (direction === LibraryPageDirection.PREVIOUS) edge.previousCursor = page.previousCursor;
+      else edge.nextCursor = page.nextCursor;
     }
 
     async httpFailure(response, responseRequestId) {
@@ -956,33 +1289,46 @@
       return new LibraryLoadError('http_failure', {status: response.status, requestId});
     }
 
-    pageStatus(nextCursor) {
-      const invalid = this.invalidPosterCount
-        ? `${this.invalidPosterCount} item${this.invalidPosterCount === 1 ? '' : 's'} could not be displayed.`
-        : '';
-      if (nextCursor !== null) return invalid;
-      return invalid ? `${invalid} End of library.` : 'End of library.';
+    updateEdgeStatus() {
+      if (!this.previousStatus || !this.nextStatus) return;
+      this.previousStatus.textContent = '';
+      if (!this.pages.length) {
+        this.nextStatus.textContent = this.emptyStatus();
+        return;
+      }
+      this.nextStatus.textContent = this.pageStatus(this.edgeCursor(LibraryPageDirection.NEXT));
     }
 
-    showFailure(failure) {
-      if (!this.status) return;
-      this.status.textContent = 'Could not load this part of the library.';
+    pageStatus(nextCursor) {
+      const invalid = this.invalidPosterCount
+        ? String(this.invalidPosterCount) + ' item' + (this.invalidPosterCount === 1 ? '' : 's') + ' could not be displayed.'
+        : '';
+      if (nextCursor !== null) return invalid;
+      return invalid ? invalid + ' ' + this.endStatus() : this.endStatus();
+    }
+
+    showFailure(direction, failure) {
+      const status = direction === LibraryPageDirection.PREVIOUS ? this.previousStatus : this.nextStatus;
+      if (!status) return;
+      status.textContent = 'Could not load this part of the library.';
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'k-button k-grid-retry';
       retry.textContent = 'Retry';
       retry.addEventListener('click', () => {
         retry.remove();
-        this.loadNext({retry: true});
+        void this.load(direction, {retry: true});
       }, {once: true});
       const diagnostic = document.createElement('details');
       diagnostic.className = 'k-grid-diagnostic';
       const summary = document.createElement('summary');
       summary.textContent = 'Details';
       const content = document.createElement('div');
-      content.textContent = `Category: ${failure.category}\nHTTP status: ${failure.status ?? '—'}\nRequest ID: ${failure.requestId ?? '—'}`;
+      content.textContent = 'Category: ' + failure.category
+        + '\nHTTP status: ' + (failure.status ?? '—')
+        + '\nRequest ID: ' + (failure.requestId ?? '—');
       diagnostic.append(summary, content);
-      this.status.append(retry, diagnostic);
+      status.append(retry, diagnostic);
     }
 
     reportFailure(failure) {
@@ -1001,32 +1347,205 @@
       }
     }
 
-    trimMountedPosters() {
-      if (!this.grid) return;
-      this.mountedStart += trimOldestGridRows(this.grid, MAX_MOUNTED_POSTERS);
+    trimMountedPages() {
+      let evicted = false;
+      while (this.mountedPosterCount() > this.maximumMountedPosters()) {
+        if (this.canEvictPreviousPage()) {
+          this.evictPreviousPage();
+          evicted = true;
+          continue;
+        }
+        if (this.canEvictNextPage()) {
+          this.evictNextPage();
+          evicted = true;
+          continue;
+        }
+        return evicted;
+      }
+      return evicted;
+    }
+
+    canEvictPreviousPage() {
+      if (this.pages.length < 2) return false;
+      const count = this.pages[0].items.length;
+      const last = this.posterElements()[count - 1];
+      if (!last || last.contains(document.activeElement)) return false;
+      return last.getBoundingClientRect().bottom < -LIBRARY_VIRTUAL_OVERSCAN_PX;
+    }
+
+    canEvictNextPage() {
+      if (this.pages.length < 2) return false;
+      const count = this.pages.at(-1).items.length;
+      const posters = this.posterElements();
+      const first = posters[posters.length - count];
+      if (!first || first.contains(document.activeElement)) return false;
+      return first.getBoundingClientRect().top > window.innerHeight + LIBRARY_VIRTUAL_OVERSCAN_PX;
+    }
+
+    evictPreviousPage() {
+      const page = this.pages[0];
+      const posters = this.posterElements();
+      const anchor = posters[page.items.length];
+      if (!anchor) return;
+      const anchorTop = anchor.getBoundingClientRect().top;
+      for (const poster of posters.slice(0, page.items.length)) poster.remove();
+      this.setLeadingHeight(this.leadingHeight + Math.max(0, anchorTop - anchor.getBoundingClientRect().top));
+      this.pages.shift();
+    }
+
+    evictNextPage() {
+      const page = this.pages.at(-1);
+      const posters = this.posterElements();
+      const firstIndex = posters.length - page.items.length;
+      const before = this.trailingSpacer?.getBoundingClientRect().bottom ?? null;
+      for (const poster of posters.slice(firstIndex)) poster.remove();
+      if (before !== null && this.trailingSpacer) {
+        this.setTrailingHeight(
+          this.trailingHeight + Math.max(0, before - this.trailingSpacer.getBoundingClientRect().bottom)
+        );
+      }
+      this.pages.pop();
+    }
+
+    focusInsertedPage() {
+      const pending = this.pendingFocus;
+      this.pendingFocus = null;
+      if (!pending || !this.grid) return;
+      const page = pending.direction === LibraryPageDirection.PREVIOUS ? this.pages[0] : this.pages.at(-1);
+      if (!page?.items.length) return;
+      const posters = this.posterElements();
+      const columns = gridColumnCount(this.grid);
+      const pageStart = pending.direction === LibraryPageDirection.PREVIOUS
+        ? 0
+        : posters.length - page.items.length;
+      const offset = pending.direction === LibraryPageDirection.PREVIOUS
+        ? Math.max(0, page.items.length - columns + Math.min(pending.column, columns - 1))
+        : Math.min(pending.column, page.items.length - 1);
+      posters[pageStart + Math.min(offset, page.items.length - 1)]
+        ?.querySelector('.k-poster')
+        ?.focus({preventScroll: true});
+    }
+
+    handleKeyDown(event) {
+      if (!(event.target instanceof HTMLElement) || !/^Arrow(?:Up|Down)$/.test(event.key)) return;
+      const card = event.target.closest('kanvas-poster');
+      if (!card || card.parentElement !== this.grid) return;
+      const posters = this.posterElements();
+      const index = posters.indexOf(card);
+      if (index < 0 || !this.grid) return;
+      const columns = gridColumnCount(this.grid);
+      const direction = event.key === 'ArrowUp'
+        ? LibraryPageDirection.PREVIOUS
+        : LibraryPageDirection.NEXT;
+      const reachesEdge = direction === LibraryPageDirection.PREVIOUS
+        ? index < columns
+        : index + columns >= posters.length;
+      if (!reachesEdge || this.edgeCursor(direction) === null) return;
+      event.preventDefault();
+      void this.load(direction, {focusColumn: index % columns});
+    }
+
+    scheduleViewportCheck() {
+      if (this.viewportCheckQueued) return;
+      this.viewportCheckQueued = true;
+      requestAnimationFrame(() => {
+        this.viewportCheckQueued = false;
+        this.ensureViewportCoverage();
+      });
+    }
+
+    scheduleGridMeasurement() {
+      requestAnimationFrame(() => {
+        if (this.grid) this.gridHeight = this.grid.getBoundingClientRect().height;
+      });
+    }
+
+    handleResize() {
+      const previousHeight = this.gridHeight;
+      requestAnimationFrame(() => {
+        if (!this.grid) return;
+        const nextHeight = this.grid.getBoundingClientRect().height;
+        if (previousHeight > 0 && nextHeight > 0) {
+          const scale = nextHeight / previousHeight;
+          this.setLeadingHeight(this.leadingHeight * scale);
+          this.setTrailingHeight(this.trailingHeight * scale);
+        }
+        this.gridHeight = nextHeight;
+        this.scheduleViewportCheck();
+      });
+    }
+
+    ensureViewportCoverage() {
+      if (!this.grid || this.loadingDirection !== null) return;
+      const bounds = this.grid.getBoundingClientRect();
+      const previousCursor = this.edgeCursor(LibraryPageDirection.PREVIOUS);
+      const nextCursor = this.edgeCursor(LibraryPageDirection.NEXT);
+      if (
+        this.leadingHeight > 0 &&
+        bounds.top > window.innerHeight + LIBRARY_VIRTUAL_OVERSCAN_PX &&
+        previousCursor !== null
+      ) {
+        void this.load(LibraryPageDirection.PREVIOUS);
+        return;
+      }
+      if (
+        this.trailingHeight > 0 &&
+        bounds.bottom < -LIBRARY_VIRTUAL_OVERSCAN_PX &&
+        nextCursor !== null
+      ) void this.load(LibraryPageDirection.NEXT);
+      else if (
+        previousCursor !== null &&
+        this.previousSentinel &&
+        this.previousSentinel.getBoundingClientRect().bottom >= -LIBRARY_VIRTUAL_OVERSCAN_PX
+      ) void this.load(LibraryPageDirection.PREVIOUS);
+      else if (
+        nextCursor !== null &&
+        this.nextSentinel &&
+        this.nextSentinel.getBoundingClientRect().top <= window.innerHeight + LIBRARY_VIRTUAL_OVERSCAN_PX
+      ) void this.load(LibraryPageDirection.NEXT);
+    }
+
+    visibleAnchor() {
+      const anchor = this.posterElements().find((poster) => poster.getBoundingClientRect().bottom >= 0);
+      if (!anchor) return null;
+      const id = Number(anchor.dataset.libraryPosterId);
+      if (!Number.isSafeInteger(id) || id < 1) return null;
+      return {id, top: anchor.getBoundingClientRect().top};
     }
 
     saveState() {
-      if (!this.stateKey || !this.posters.length || !this.hasSuccessfulPage || this.retryRequired) {
+      if (
+        !this.stateKey ||
+        !this.mountedPosterCount() ||
+        !this.hasSuccessfulPage ||
+        this.retryDirection !== null
+      ) {
         if (this.stateKey) sessionStorage.removeItem(this.stateKey);
         return;
       }
-      sessionStorage.setItem(this.stateKey, JSON.stringify({
-        schemaVersion: LIBRARY_GRID_SCHEMA_VERSION,
-        asset: libraryAssetVersion(),
-        catalogueRevision: this.catalogueRevision(),
-        filters: normalisedGridSource(this.getAttribute('source') || ''),
-        user: this.getAttribute('state-user') || 'anonymous',
-        cursor: this.cursor,
-        completed: this.done,
-        outcome: 'success',
-        posters: this.posters,
-        scrollY: window.scrollY
-      }));
+      try {
+        sessionStorage.setItem(this.stateKey, JSON.stringify({
+          schemaVersion: LIBRARY_GRID_SCHEMA_VERSION,
+          asset: libraryAssetVersion(),
+          catalogueRevision: this.catalogueRevision(),
+          filters: normalisedGridSource(this.getAttribute('source') || ''),
+          layout: this.gridLayout(),
+          user: this.getAttribute('state-user') || 'anonymous',
+          maxMounted: this.maximumMountedPosters(),
+          pages: this.pages,
+          leadingHeight: this.leadingHeight,
+          trailingHeight: this.trailingHeight,
+          scrollY: window.scrollY,
+          anchor: this.visibleAnchor(),
+          outcome: 'success'
+        }));
+      } catch (_) {
+        sessionStorage.removeItem(this.stateKey);
+      }
     }
 
     restoreState() {
-      if (!this.stateKey || !this.grid || !this.status) return false;
+      if (!this.stateKey || !this.grid || !this.nextStatus) return false;
       const stored = sessionStorage.getItem(this.stateKey);
       if (!stored) return false;
       try {
@@ -1037,32 +1556,61 @@
           state.asset !== libraryAssetVersion() ||
           state.catalogueRevision !== this.catalogueRevision() ||
           state.filters !== expectedFilters ||
+          state.layout !== this.gridLayout() ||
           state.user !== (this.getAttribute('state-user') || 'anonymous') ||
-          !Array.isArray(state.posters) ||
-          !state.posters.length ||
-          state.outcome !== 'success' ||
-          typeof state.completed !== 'boolean' ||
-          (state.cursor != null && typeof state.cursor !== 'string')
+          state.maxMounted !== this.maximumMountedPosters() ||
+          !Array.isArray(state.pages) ||
+          !state.pages.length ||
+          state.outcome !== 'success'
         ) throw new TypeError('Incompatible library grid state');
-        const posters = state.posters.map(normalisePoster);
-        if (posters.some((poster) => poster === null)) throw new TypeError('Invalid saved poster');
-        this.posters = posters;
-        this.mountedStart = Math.max(0, posters.length - MAX_MOUNTED_POSTERS);
-        const mounted = document.createDocumentFragment();
-        for (const poster of posters.slice(this.mountedStart)) mounted.append(posterElement(poster));
-        this.grid.replaceChildren(mounted);
-        this.cursor = state.cursor ?? null;
-        this.done = state.completed;
+        const pages = state.pages.map(savedLibraryPage);
+        const itemCount = pages.reduce((count, page) => count + page.items.length, 0);
+        const leadingHeight = virtualHeight(state.leadingHeight);
+        const trailingHeight = virtualHeight(state.trailingHeight);
+        if (
+          itemCount > this.maximumMountedPosters() ||
+          leadingHeight === null ||
+          trailingHeight === null ||
+          !Number.isFinite(state.scrollY) ||
+          state.scrollY < 0
+        ) throw new TypeError('Invalid library grid state');
+        if (
+          state.anchor !== null &&
+          (typeof state.anchor !== 'object' ||
+          !Number.isSafeInteger(state.anchor.id) ||
+          state.anchor.id < 1 ||
+          !Number.isFinite(state.anchor.top))
+        ) throw new TypeError('Invalid library scroll anchor');
+        this.pages = pages;
+        this.setLeadingHeight(leadingHeight);
+        this.setTrailingHeight(trailingHeight);
+        this.renderPages();
         this.hasSuccessfulPage = true;
-        this.retryRequired = false;
-        this.grid.setAttribute('aria-busy', 'false');
-        this.status.textContent = this.done ? 'End of library.' : '';
-        if (Number.isFinite(state.scrollY)) requestAnimationFrame(() => window.scrollTo(0, state.scrollY));
+        this.retryDirection = null;
+        this.clearLoadingView();
+        this.setGridBusy(false);
+        this.updateEdgeStatus();
+        this.scheduleGridMeasurement();
+        requestAnimationFrame(() => this.restoreScroll(state));
         return true;
       } catch (_) {
         sessionStorage.removeItem(this.stateKey);
         return false;
       }
+    }
+
+    restoreScroll(state) {
+      const savedAnchor = state.anchor;
+      if (savedAnchor) {
+        const anchor = this.posterElements().find(
+          (poster) => Number(poster.dataset.libraryPosterId) === savedAnchor.id
+        );
+        if (anchor) {
+          window.scrollBy(0, anchor.getBoundingClientRect().top - savedAnchor.top);
+          return;
+        }
+      }
+      window.scrollTo(0, state.scrollY);
     }
   }
 
@@ -1093,7 +1641,7 @@
     const posters = Array.from(grid.querySelectorAll('.k-poster'));
     const index = posters.indexOf(current);
     if (index < 0) return false;
-    const columns = Math.max(1, Math.round(grid.clientWidth / Math.max(1, current.getBoundingClientRect().width + 10)));
+    const columns = gridColumnCount(grid);
     const offsets = {ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns};
     const target = posters[index + offsets[key]];
     if (!target) return false;

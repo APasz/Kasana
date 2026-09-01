@@ -6,6 +6,8 @@ class FakeElement {
   constructor(tagName = 'div') {
     this.tagName = tagName;
     this.attributes = new Map();
+    this.dataset = {};
+    this.style = {};
     this.children = [];
     this.listeners = new Map();
     this.parentElement = null;
@@ -16,6 +18,7 @@ class FakeElement {
     this.isConnected = true;
     this.columnCount = 5;
     this.rowHeight = 100;
+    this.viewportOffset = 0;
   }
 
   get firstElementChild() {
@@ -41,6 +44,18 @@ class FakeElement {
     }
   }
 
+  prepend(...nodes) {
+    for (const node of [...nodes].reverse()) {
+      if (node instanceof FakeFragment) {
+        this.prepend(...node.children);
+        continue;
+      }
+      if (node.parentElement) node.remove();
+      node.parentElement = this;
+      this.children.unshift(node);
+    }
+  }
+
   replaceChildren(...nodes) {
     this.children = [];
     this.append(...nodes);
@@ -59,6 +74,11 @@ class FakeElement {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, listener) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter((entry) => entry.listener !== listener));
+  }
+
   click() {
     const listeners = this.listeners.get('click') || [];
     for (const entry of [...listeners]) {
@@ -67,14 +87,15 @@ class FakeElement {
     }
   }
 
-  contains() {
-    return false;
+  contains(candidate) {
+    return candidate === this || this.children.some((child) => child.contains(candidate));
   }
 
   getBoundingClientRect() {
     const index = this.parentElement ? this.parentElement.children.indexOf(this) : 0;
     const row = index >= 0 ? Math.floor(index / (this.parentElement?.columnCount || this.columnCount)) : 0;
-    return {height: this.rowHeight, width: 100, top: row * this.rowHeight};
+    const top = row * this.rowHeight - (this.parentElement?.viewportOffset || 0);
+    return {bottom: top + this.rowHeight, height: this.rowHeight, width: 100, top};
   }
 
   querySelector() {
@@ -89,9 +110,13 @@ const elementRegistry = new Map();
 const storage = new Map();
 const consoleErrors = [];
 const railElements = [];
+const documentListeners = new Map();
+const timerDelays = [];
 let throwPosterCreation = false;
 
+global.Element = FakeElement;
 global.HTMLElement = FakeHTMLElement;
+global.HTMLFormElement = class extends FakeHTMLElement {};
 global.HTMLInputElement = class extends FakeHTMLElement {};
 global.HTMLTextAreaElement = class extends FakeHTMLElement {};
 global.HTMLSelectElement = class extends FakeHTMLElement {};
@@ -107,7 +132,11 @@ global.customElements = {
 global.document = {
   scripts: [{src: 'http://kanvas.test/_kanvas/kanvas.js?v=test-asset'}],
   activeElement: null,
-  addEventListener() {},
+  addEventListener(name, listener) {
+    const listeners = documentListeners.get(name) || [];
+    listeners.push(listener);
+    documentListeners.set(name, listeners);
+  },
   querySelector() {
     return null;
   },
@@ -125,6 +154,7 @@ global.document = {
 };
 global.window = {
   location: {origin: 'http://kanvas.test', pathname: '/library'},
+  innerHeight: 800,
   scrollY: 42,
   scrollByCalls: [],
   addEventListener() {},
@@ -135,7 +165,10 @@ global.window = {
   scrollTo() {},
   history: {back() {}},
   clearTimeout() {},
-  setTimeout() {}
+  setTimeout(_callback, delay) {
+    timerDelays.push(delay);
+    return timerDelays.length;
+  }
 };
 global.navigator = {getGamepads: () => []};
 global.sessionStorage = {
@@ -162,7 +195,7 @@ const source = [
 ].join('\n');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
-  "globalThis.__libraryTest = {KanvasPosterGrid, normalisePoster, posterMarkup, libraryGridPayload, updateRailControls};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
+  "globalThis.__libraryTest = {KanvasPosterGrid, LibraryPageDirection, normalisePoster, posterMarkup, libraryGridPayload, updateRailControls, libraryFilterUrl, libraryGridLayout, libraryGridMarkup};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
 ).replace(
   "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
   "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
@@ -186,8 +219,9 @@ const validPoster = (id = 7) => ({
 });
 
 const validEnvelope = (items = [validPoster()]) => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   items,
+  previousCursor: null,
   nextCursor: null,
   requestId: 'request-123'
 });
@@ -208,9 +242,16 @@ const grid = (developmentMode = true) => {
   instance.setAttribute('state-user', '4');
   instance.setAttribute('catalogue-revision', '1:2026-07-24T11:50:00+00:00');
   instance.setAttribute('development-mode', String(developmentMode));
-  instance.grid = new FakeElement('div');
-  instance.status = new FakeElement('div');
-  instance.sentinel = new FakeElement('div');
+  instance.grid = new FakeHTMLElement('div');
+  instance.previousStatus = new FakeHTMLElement('div');
+  instance.nextStatus = new FakeHTMLElement('div');
+  instance.leadingSpacer = new FakeHTMLElement('div');
+  instance.trailingSpacer = new FakeHTMLElement('div');
+  instance.previousSentinel = new FakeHTMLElement('div');
+  instance.nextSentinel = new FakeHTMLElement('div');
+  const distantBounds = () => ({bottom: 10_001, height: 1, top: 10_000, width: 100});
+  instance.previousSentinel.getBoundingClientRect = distantBounds;
+  instance.nextSentinel.getBoundingClientRect = distantBounds;
   instance.stateKey = instance.buildStateKey(instance.getAttribute('source'));
   instance.generation = 1;
   return instance;
@@ -218,15 +259,19 @@ const grid = (developmentMode = true) => {
 
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
 
+const dispatchDocumentEvent = (name, event) => {
+  for (const listener of documentListeners.get(name) || []) listener(event);
+};
+
 async function testValidPageRetainsAvailable() {
   const instance = grid();
   global.fetch = async () => response({});
-  await instance.loadNext();
-  assert.equal(instance.posters.length, 1);
-  assert.equal(instance.posters[0].available, true);
+  await instance.load(globalThis.__libraryTest.LibraryPageDirection.INITIAL);
+  assert.equal(instance.pages.length, 1);
+  assert.equal(instance.pages[0].items[0].available, true);
   assert.equal(instance.grid.children.length, 1);
   assert.equal(instance.requestId, 'request-123');
-  assert.equal(instance.status.textContent, 'End of library.');
+  assert.equal(instance.nextStatus.textContent, 'End of library.');
 }
 
 function testPosterPlaceholderNormalisation() {
@@ -270,6 +315,92 @@ function testLandscapePosterMarkup() {
   assert.equal(
     globalThis.__libraryTest.normalisePoster({...validPoster(25), artworkShape: 'square'}),
     null
+  );
+}
+
+function testLibraryFilterUrlKeepsOnlyActiveUrlState() {
+  assert.equal(
+    globalThis.__libraryTest.libraryFilterUrl('/library', [
+      ['search', ' Ghost '],
+      ['kind', 'all'],
+      ['tag', 'anime'],
+      ['tag', 'favourite'],
+      ['watched', ''],
+      ['year', '2001']
+    ]),
+    '/library?search=Ghost&kind=all&tag=anime&tag=favourite&year=2001'
+  );
+}
+
+function testLibraryFilterInputsWaitForCommit() {
+  const form = new global.HTMLFormElement('form');
+  const input = new global.HTMLInputElement('input');
+  input.closest = (selector) => (
+    selector === 'form[data-kanvas-library-filters="true"]' ? form : null
+  );
+  const timersBefore = timerDelays.length;
+
+  input.type = 'number';
+  dispatchDocumentEvent('input', {target: input});
+  assert.equal(timerDelays.length, timersBefore);
+
+  input.type = 'search';
+  dispatchDocumentEvent('input', {target: input});
+  assert.equal(timerDelays.length, timersBefore);
+
+  dispatchDocumentEvent('change', {target: input});
+  assert.deepEqual(timerDelays.slice(timersBefore), [0]);
+}
+
+function testLibraryGridKeepsOneCardGeometryPerResultSet() {
+  const portrait = globalThis.__libraryTest.libraryGridMarkup('portrait');
+  const landscape = globalThis.__libraryTest.libraryGridMarkup('landscape');
+
+  assert.match(portrait, /k-grid--portrait/);
+  assert.doesNotMatch(portrait, /k-grid--landscape/);
+  assert.match(landscape, /k-grid--landscape/);
+  assert.doesNotMatch(landscape, /k-grid--portrait/);
+  assert.doesNotMatch(portrait, /mixed/);
+  assert.equal(globalThis.__libraryTest.libraryGridLayout('landscape'), 'landscape');
+  assert.equal(globalThis.__libraryTest.libraryGridLayout('invalid'), 'portrait');
+}
+
+function testLibraryGridMarkupUsesOneGeometryPerFocusedResult() {
+  const portrait = globalThis.__libraryTest.libraryGridMarkup('portrait');
+  const landscape = globalThis.__libraryTest.libraryGridMarkup('landscape');
+
+  assert.match(portrait, /data-library-grid="portrait"/);
+  assert.doesNotMatch(portrait, /data-library-grid="landscape"/);
+  assert.match(landscape, /data-library-grid="landscape"/);
+  assert.doesNotMatch(landscape, /data-library-grid="portrait"/);
+  assert.match(landscape, /k-library-grid__loading--landscape/);
+  assert.match(portrait, /k-grid-status--tail/);
+  assert.match(portrait, /data-library-sentinel="previous"/);
+  assert.match(portrait, /data-library-sentinel="next"/);
+  assert.ok(portrait.indexOf('k-grid-status--tail') > portrait.indexOf('data-library-grid="portrait"'));
+}
+
+function testGridLayoutDoesNotConflictWithFrameworkProperties() {
+  const instance = grid();
+  instance.setAttribute('grid-layout', 'landscape');
+  instance.layout = 'portrait';
+
+  assert.equal(instance.gridLayout(), 'landscape');
+}
+
+function testLibraryGridStylesUseResponsiveGeometryWithoutCardSpans() {
+  const stylesheet = fs.readFileSync('src/kasana/kanvas/static/kanvas.css', 'utf8');
+
+  assert.match(stylesheet, /\.k-grid--portrait \{ grid-template-columns: repeat\(auto-fill, minmax\(138px, 1fr\)\)/);
+  assert.match(stylesheet, /\.k-grid--landscape \{/);
+  assert.match(stylesheet, /\.k-grid--portrait \.k-poster__art \{ aspect-ratio: 2 \/ 3; \}/);
+  assert.match(stylesheet, /\.k-grid--landscape \.k-poster__art \{ aspect-ratio: 16 \/ 9; \}/);
+  assert.match(stylesheet, /\.k-grid > kanvas-poster:has\(.k-poster--landscape\) \{ width: 100%; \}/);
+  assert.match(stylesheet, /@media \(max-width: 700px\)/);
+  assert.match(stylesheet, /@media \(max-width: 440px\)/);
+  assert.doesNotMatch(
+    stylesheet,
+    /\.k-grid > kanvas-poster:has\(.+?\) \{ grid-column: span 2; \}/
   );
 }
 
@@ -406,9 +537,9 @@ function testWatchOrderInsertionSlotsRejectOnlyNoOpMoves() {
     operation: 'add_sources', sourceItemIds: [4, 5], beforeEntryId: 2, revision: 9
   });
 }
-
 async function testCategorisedFailureAndRetry() {
   const instance = grid();
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
   let calls = 0;
   global.fetch = async () => {
     calls += 1;
@@ -416,92 +547,96 @@ async function testCategorisedFailureAndRetry() {
       ? response({status: 503, body: {error: {requestId: 'retry-request'}}})
       : response({});
   };
-  await instance.loadNext();
-  assert.equal(instance.retryRequired, true);
-  assert.equal(instance.status.textContent, 'Could not load this part of the library.');
-  const diagnostic = instance.status.children.find((child) => child.tagName === 'details');
+  await instance.load(initial);
+  assert.equal(instance.retryDirection, initial);
+  assert.equal(instance.nextStatus.textContent, 'Could not load this part of the library.');
+  const diagnostic = instance.nextStatus.children.find((child) => child.tagName === 'details');
   assert.match(diagnostic.children[1].textContent, /Category: http_failure/);
   assert.match(diagnostic.children[1].textContent, /HTTP status: 503/);
   assert.match(diagnostic.children[1].textContent, /Request ID: retry-request/);
-  instance.status.children.find((child) => child.tagName === 'button').click();
+  instance.nextStatus.children.find((child) => child.tagName === 'button').click();
   await nextTick();
   assert.equal(calls, 2);
-  assert.equal(instance.posters.length, 1);
-  assert.equal(instance.retryRequired, false);
+  assert.equal(instance.pages[0].items.length, 1);
+  assert.equal(instance.retryDirection, null);
 }
 
 async function testMalformedResponsesAndPosters() {
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
+
   const invalidContentType = grid();
   global.fetch = async () => response({contentType: 'text/html'});
-  await invalidContentType.loadNext();
-  assert.match(invalidContentType.status.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_content_type/);
+  await invalidContentType.load(initial);
+  assert.match(invalidContentType.nextStatus.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_content_type/);
 
   const invalidJson = grid();
   global.fetch = async () => response({jsonError: new SyntaxError('bad json')});
-  await invalidJson.loadNext();
-  assert.match(invalidJson.status.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_json/);
+  await invalidJson.load(initial);
+  assert.match(invalidJson.nextStatus.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_json/);
 
   const invalidEnvelope = grid();
   global.fetch = async () => response({body: {items: []}});
-  await invalidEnvelope.loadNext();
-  assert.match(invalidEnvelope.status.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_envelope/);
+  await invalidEnvelope.load(initial);
+  assert.match(invalidEnvelope.nextStatus.children.find((child) => child.tagName === 'details').children[1].textContent, /invalid_envelope/);
 
   const oneMalformed = grid();
   global.fetch = async () => response({body: validEnvelope([validPoster(7), {id: 8, title: 'Broken'}])});
-  await oneMalformed.loadNext();
-  assert.equal(oneMalformed.posters.length, 1);
+  await oneMalformed.load(initial);
+  assert.equal(oneMalformed.pages[0].items.length, 1);
   assert.equal(oneMalformed.invalidPosterCount, 1);
-  assert.match(oneMalformed.status.textContent, /1 item could not be displayed/);
+  assert.match(oneMalformed.nextStatus.textContent, /1 item could not be displayed/);
   assert.deepEqual(consoleErrors.at(-1)[1], {itemIds: [8]});
 
   const allMalformed = grid();
   global.fetch = async () => response({body: validEnvelope([{id: 9, title: 'Broken'}])});
-  await allMalformed.loadNext();
-  assert.equal(allMalformed.posters.length, 0);
-  assert.equal(allMalformed.done, true);
-  assert.equal(allMalformed.retryRequired, false);
-  assert.match(allMalformed.status.textContent, /1 item could not be displayed/);
+  await allMalformed.load(initial);
+  assert.equal(allMalformed.mountedPosterCount(), 0);
+  assert.equal(allMalformed.retryDirection, null);
+  assert.match(allMalformed.nextStatus.textContent, /1 item could not be displayed/);
 }
 
 async function testCancellationStateAndDevelopmentDiagnostics() {
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
   const stale = grid();
   global.fetch = (_url, options) => new Promise((_resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
   });
-  const pending = stale.loadNext();
+  const pending = stale.load(initial);
   await nextTick();
   stale.generation += 1;
   stale.requestController.abort();
   await pending;
-  assert.notEqual(stale.status.textContent, 'Could not load this part of the library.');
+  assert.notEqual(stale.nextStatus.textContent, 'Could not load this part of the library.');
 
   const production = grid(false);
   const errorsBefore = consoleErrors.length;
   global.fetch = async () => { throw new TypeError('offline'); };
-  await production.loadNext();
+  await production.load(initial);
   assert.equal(consoleErrors.length, errorsBefore);
 
   const development = grid(true);
-  await development.loadNext();
+  await development.load(initial);
   assert.equal(consoleErrors.at(-1)[1].category, 'network_failure');
 }
 
 async function testStateInvalidationAndRenderingFailure() {
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
   const instance = grid();
-  assert.match(instance.stateKey, /v5:asset=test-asset:catalogue=1%3A2026-07-24T11%3A50%3A00%2B00%3A00:user=4:filters=/);
+  assert.match(instance.stateKey, /v9:asset=test-asset:catalogue=1%3A2026-07-24T11%3A50%3A00%2B00%3A00:user=4:max-mounted=144:filters=/);
   assert.match(decodeURIComponent(instance.stateKey), /kind=movie&search=alpha/);
   const previousKey = instance.stateKey;
   instance.setAttribute('catalogue-revision', '1:2026-07-24T12:00:00+00:00');
+  assert.notEqual(instance.buildStateKey(instance.getAttribute('source')), previousKey);
+  instance.setAttribute('catalogue-revision', '1:2026-07-24T11:50:00+00:00');
+  instance.setAttribute('max-mounted', '72');
   assert.notEqual(instance.buildStateKey(instance.getAttribute('source')), previousKey);
   storage.set(instance.stateKey, JSON.stringify({
     schemaVersion: 5,
     asset: 'test-asset',
     filters: '/kanvas/data/library?kind=movie&search=alpha',
     user: '4',
-    cursor: null,
-    completed: true,
+    pages: [],
     outcome: 'success',
-    posters: [validPoster()],
     scrollY: 0
   }));
   assert.equal(instance.restoreState(), false);
@@ -510,23 +645,103 @@ async function testStateInvalidationAndRenderingFailure() {
   const renderer = grid();
   throwPosterCreation = true;
   global.fetch = async () => response({});
-  await renderer.loadNext();
+  await renderer.load(initial);
   throwPosterCreation = false;
-  const diagnostic = renderer.status.children.find((child) => child.tagName === 'details');
+  const diagnostic = renderer.nextStatus.children.find((child) => child.tagName === 'details');
   assert.match(diagnostic.children[1].textContent, /rendering_failure/);
 }
 
-async function testRowAwareTrimPreservesScrollAnchor() {
+async function testBidirectionalVirtualPagesRehydrateEvictedCards() {
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
+  const next = globalThis.__libraryTest.LibraryPageDirection.NEXT;
+  const previous = globalThis.__libraryTest.LibraryPageDirection.PREVIOUS;
   const instance = grid();
-  for (let index = 1; index <= 150; index += 1) {
-    instance.grid.append(new FakeElement('kanvas-poster'));
+  instance.setAttribute('max-mounted', '5');
+  instance.grid.viewportOffset = 1200;
+  const requests = [];
+  const first = Array.from({length: 5}, (_value, index) => validPoster(index + 1));
+  const second = Array.from({length: 5}, (_value, index) => validPoster(index + 6));
+  const pages = [
+    validEnvelope(first),
+    {...validEnvelope(second), previousCursor: 'before-6', nextCursor: 'after-10'},
+    {...validEnvelope(first), previousCursor: null, nextCursor: 'after-5'}
+  ];
+  pages[0].nextCursor = 'after-5';
+  global.fetch = async (url) => {
+    requests.push(new URL(url).searchParams.get('cursor'));
+    return response({body: pages.shift()});
+  };
+
+  await instance.load(initial);
+  await instance.load(next);
+
+  assert.equal(instance.pages.length, 1);
+  assert.deepEqual(instance.pages[0].items.map((item) => item.id), [6, 7, 8, 9, 10]);
+  assert.equal(instance.leadingHeight, 100);
+  instance.hasSuccessfulPage = true;
+  instance.saveState();
+  const savedState = JSON.parse(storage.get(instance.stateKey));
+  assert.equal(savedState.maxMounted, 5);
+  assert.equal(savedState.pages.length, 1);
+
+  instance.grid.viewportOffset = 0;
+  await instance.load(previous);
+
+  assert.deepEqual(requests, [null, 'after-5', 'before-6']);
+  assert.deepEqual(instance.pages.flatMap((page) => page.items.map((item) => item.id)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(instance.leadingHeight, 0);
+}
+
+async function testVisibleTailLoadsTheNextPageWithoutObserverChurn() {
+  const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
+  const instance = grid();
+  instance.nextSentinel.getBoundingClientRect = () => ({bottom: 101, height: 1, top: 100, width: 100});
+  const pages = [
+    {...validEnvelope([validPoster(1)]), nextCursor: 'after-1'},
+    validEnvelope([validPoster(2)])
+  ];
+  global.fetch = async () => response({body: pages.shift()});
+
+  await instance.load(initial);
+  await nextTick();
+
+  assert.deepEqual(instance.pages.flatMap((page) => page.items.map((item) => item.id)), [1, 2]);
+}
+
+function testResponsiveVirtualSpacersTrackMountedGridGeometry() {
+  const instance = grid();
+  instance.gridHeight = 100;
+  instance.setLeadingHeight(240);
+  instance.setTrailingHeight(360);
+  instance.grid.getBoundingClientRect = () => ({bottom: 200, height: 200, top: 0});
+
+  instance.handleResize();
+
+  assert.equal(instance.leadingHeight, 480);
+  assert.equal(instance.trailingHeight, 720);
+}
+
+function testKeyboardNavigationLoadsAcrossVirtualPageEdges() {
+  const next = globalThis.__libraryTest.LibraryPageDirection.NEXT;
+  const instance = grid();
+  instance.pages = [{items: Array.from({length: 5}, (_value, index) => validPoster(index + 1)), previousCursor: null, nextCursor: 'after-5'}];
+  const cards = Array.from({length: 5}, () => new FakeHTMLElement('kanvas-poster'));
+  for (const card of cards) {
+    card.closest = (selector) => selector === 'kanvas-poster' ? card : null;
+    instance.grid.append(card);
   }
-  const scrollByCallsBefore = window.scrollByCalls.length;
-  instance.trimMountedPosters();
-  assert.equal(instance.grid.children.length, 140);
-  assert.equal(instance.mountedStart, 10);
-  assert.equal(window.scrollByCalls.length, scrollByCallsBefore + 1);
-  assert.deepEqual(window.scrollByCalls.at(-1), [0, -200]);
+  let request = null;
+  instance.load = (direction, options) => { request = {direction, options}; return Promise.resolve(); };
+  let prevented = false;
+
+  instance.handleKeyDown({
+    key: 'ArrowDown',
+    preventDefault() { prevented = true; },
+    target: cards[4]
+  });
+
+  assert.equal(prevented, true);
+  assert.deepEqual(request, {direction: next, options: {focusColumn: 4}});
 }
 
 async function testAdministrationPollingWaitsForOpenDialog() {
@@ -867,6 +1082,12 @@ async function main() {
   testPosterPlaceholderNormalisation();
   testPosterPartialWatchNormalisation();
   testLandscapePosterMarkup();
+  testLibraryFilterUrlKeepsOnlyActiveUrlState();
+  testLibraryFilterInputsWaitForCommit();
+  testLibraryGridKeepsOneCardGeometryPerResultSet();
+  testLibraryGridMarkupUsesOneGeometryPerFocusedResult();
+  testGridLayoutDoesNotConflictWithFrameworkProperties();
+  testLibraryGridStylesUseResponsiveGeometryWithoutCardSpans();
   testPosterMosaicAndHomeActionNormalisation();
   testPosterStatusBadgeMarkup();
   testRailControlsHideWhenViewportDoesNotOverflow();
@@ -876,7 +1097,10 @@ async function main() {
   await testMalformedResponsesAndPosters();
   await testCancellationStateAndDevelopmentDiagnostics();
   await testStateInvalidationAndRenderingFailure();
-  await testRowAwareTrimPreservesScrollAnchor();
+  await testBidirectionalVirtualPagesRehydrateEvictedCards();
+  await testVisibleTailLoadsTheNextPageWithoutObserverChurn();
+  testResponsiveVirtualSpacersTrackMountedGridGeometry();
+  testKeyboardNavigationLoadsAcrossVirtualPageEdges();
   await testAdministrationPollingWaitsForOpenDialog();
   await testAdministrationReportsTrackedJobProgressWithoutChangingTab();
   testAdministrationPollsTrackedJobsFrequently();

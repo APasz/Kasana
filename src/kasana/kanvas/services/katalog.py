@@ -66,6 +66,7 @@ from kasana.kanvas.viewmodels.item import (
 )
 from kasana.kanvas.viewmodels.library import (
     LibraryFilters,
+    LibraryPosterPage,
     PlaceholderArtView,
     PosterState,
     PosterView,
@@ -464,15 +465,19 @@ class KanvasKatalogService:
             await client.delete_library_root(root_id, confirm=confirm)
 
     async def library_page(
-        self, filters: LibraryFilters, *, cursor: str | None
-    ) -> tuple[tuple[PosterView, ...], str | None]:
-        """Load one deliberately bounded poster page."""
+        self,
+        filters: LibraryFilters,
+        *,
+        kinds: tuple[LibraryItemKind, ...],
+        cursor: str | None,
+    ) -> LibraryPosterPage:
+        """Load one bidirectional, deliberately bounded poster page."""
 
         async with self._client() as client:
             page = await client.list_library_items(
                 cursor=cursor,
                 limit=_GRID_PAGE_SIZE,
-                kind=filters.kind,
+                kinds=kinds,
                 tags=filters.tags,
                 year=filters.year,
                 watched=filters.watched,
@@ -491,7 +496,11 @@ class KanvasKatalogService:
                     extra={"library_item_id": item.id, "library_item_fields": field_names},
                 )
                 raise LibraryPosterTransformationError(item.id, field_names) from None
-        return tuple(posters), page.next_cursor
+        return LibraryPosterPage(
+            items=tuple(posters),
+            previous_cursor=page.previous_cursor,
+            next_cursor=page.next_cursor,
+        )
 
     async def library_tags(self) -> tuple[str, ...]:
         """Load the real tag vocabulary used by the generic library filter."""

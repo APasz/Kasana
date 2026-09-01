@@ -644,7 +644,10 @@ def hierarchy_target_label(action: RepairAction, item_labels: dict[int, str]) ->
         title = action.target_series_title or action.target_title
         return f"Series: {title}" if title is not None else None
     if action.target_kind is ZaisanKind.MOVIE:
-        return f"Movie: {action.target_title}" if action.target_title is not None else None
+        if action.target_title is None:
+            return None
+        year = f" ({action.target_release_year})" if action.target_release_year is not None else ""
+        return f"Movie: {action.target_title}{year}"
     if action.target_title is not None:
         return action.target_title
     return None

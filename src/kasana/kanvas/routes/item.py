@@ -19,6 +19,7 @@ from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.item import DownloadOptionView, ItemDetailView
+from kasana.kanvas.viewmodels.library import ArtworkShape, PosterView
 from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
@@ -99,9 +100,20 @@ async def render_item(
         if detail.children:
             with ui.element("section").classes("k-item-children").props('aria-label="Children"'):
                 section_title(detail.child_section_title)
-                with ui.element("div").classes("k-child-grid"):
+                child_layout = _child_grid_layout(detail.children)
+                with ui.element("div").classes(f"k-child-grid k-child-grid--{child_layout.value}"):
                     for child in detail.children:
                         poster_card(child)
+
+
+def _child_grid_layout(children: tuple[PosterView, ...]) -> ArtworkShape:
+    """Keep normal item hierarchies in one coherent card geometry."""
+
+    return (
+        ArtworkShape.LANDSCAPE
+        if all(child.artwork_shape is ArtworkShape.LANDSCAPE for child in children)
+        else ArtworkShape.PORTRAIT
+    )
 
 
 def _item_actions(

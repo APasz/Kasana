@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlencode
 
 from nicegui import ui
@@ -16,7 +18,7 @@ from kasana.kanvas.components.inputs import (
     text_input,
 )
 from kasana.kanvas.components.shell import page_shell
-from kasana.kanvas.components.typography import page_title
+from kasana.kanvas.components.typography import page_title, section_title
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
@@ -28,11 +30,39 @@ from kasana.katalog.public import (
     WatchedFilter,
 )
 
+_MAX_MOUNTED_LIBRARY_POSTERS = 144
+
+
+class _LibraryGridLayout(StrEnum):
+    """The deliberate card geometry for one bounded library result set."""
+
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+
+_PORTRAIT_LIBRARY_KINDS: tuple[LibraryItemKind, ...] = (
+    LibraryItemKind.MOVIE,
+    LibraryItemKind.SERIES,
+    LibraryItemKind.SEASON,
+    LibraryItemKind.SPECIAL,
+    LibraryItemKind.EXTRA,
+)
+
+
+@dataclass(frozen=True)
+class _LibraryGrid:
+    """One independently paged visual result group on the Library page."""
+
+    title: str
+    filters: LibraryFilters
+    kinds: tuple[LibraryItemKind, ...]
+    layout: _LibraryGridLayout
+
 
 async def render_library(
     settings: Kanvas_Settings, profile: SessionProfile, filters: LibraryFilters
 ) -> None:
-    """Render the native filter strip and a lazy client-side bounded grid."""
+    """Render compact URL-backed filters and coherently shaped bounded grids."""
 
     with page_shell(settings, "/library", "Library", profile):
         page_title("Library")
@@ -41,18 +71,10 @@ async def render_library(
         _filter_strip(filters, tag_options)
         if tag_error is not None:
             feedback_state("Tags unavailable", tag_error)
-        source = "/kanvas/data/library?" + urlencode(_filter_query(filters))
-        grid = mount_browser_component(
-            BrowserComponent.POSTER_GRID,
-            {
-                "source": source,
-                "state-user": profile.user.id,
-                "catalogue-revision": grid_revision,
-                "development-mode": settings.development_mode,
-            },
-        )
-        with grid:
-            ui.label("Loading library…").classes("k-grid-status").props('aria-live="polite"')
+        grids = _library_grids(filters)
+        max_mounted = _MAX_MOUNTED_LIBRARY_POSTERS // len(grids)
+        for grid in grids:
+            _render_library_grid(settings, profile, grid_revision, grid, max_mounted)
 
 
 async def _library_grid_revision(settings: Kanvas_Settings, profile: SessionProfile) -> str:
@@ -83,56 +105,87 @@ async def _tag_options(
 
 
 def _filter_strip(filters: LibraryFilters, tag_options: tuple[SelectOption, ...]) -> None:
-    with ui.element("form").classes("k-filter-strip").props('method="get" action="/library"'):
-        search = text_input(
-            name="search",
-            input_type="search",
-            value=filters.search,
-            placeholder="Search",
-            aria_label="Search library",
-            autofocus=True,
+    with (
+        ui.element("form")
+        .classes("k-filter-strip k-library-filter")
+        .props(
+            'method="get" action="/library" data-kanvas-library-filters="true" '
+            'aria-label="Filter library"'
         )
-        search.props('data-kanvas-search="true"')
-        select_input(
-            name="kind",
-            aria_label="Kind",
-            options=_kind_options(),
-            value=filters.kind.value if filters.kind else "",
+    ):
+        with ui.element("div").classes("k-library-filter__primary"):
+            search = text_input(
+                name="search",
+                input_type="search",
+                value=filters.search,
+                placeholder="Search",
+                aria_label="Search library",
+                shell_classes="k-library-filter__search",
+                autofocus=True,
+            )
+            search.props('data-kanvas-search="true"')
+            select_input(
+                name="kind",
+                aria_label="Kind",
+                options=_kind_options(),
+                value=_selected_kind(filters),
+                shell_classes="k-library-filter__kind",
+            )
+            multi_select_input(
+                name="tag",
+                aria_label="Tags",
+                options=tag_options,
+                values=filters.tags,
+                classes="k-library-filter__tags",
+            )
+        secondary_open = any(
+            value is not None for value in (filters.watched, filters.availability, filters.year)
         )
-        select_input(
-            name="watched",
-            aria_label="Watched",
-            options=_watched_options(),
-            value=filters.watched.value if filters.watched else "",
-        )
-        select_input(
-            name="availability",
-            aria_label="Availability",
-            options=_availability_options(),
-            value=filters.availability.value if filters.availability else "",
-        )
-        multi_select_input(
-            name="tag",
-            aria_label="Tags",
-            options=tag_options,
-            values=filters.tags,
-        )
-        year = text_input(
-            name="year",
-            input_type="number",
-            value=str(filters.year) if filters.year is not None else None,
-            placeholder="Year",
-            aria_label="Release year",
-            classes="k-input--year",
-            shell_classes="k-input-shell--year",
-        )
-        year.props('min="1" max="9999"')
-        action_button("Apply", button_type=ButtonType.SUBMIT)
+        secondary = ui.element("details").classes("k-library-filter__secondary")
+        if secondary_open:
+            secondary.props("open")
+        with secondary:
+            with ui.element("summary").classes("k-library-filter__secondary-summary"):
+                ui.label("More filters")
+            with ui.element("div").classes("k-library-filter__secondary-controls"):
+                select_input(
+                    name="watched",
+                    aria_label="Progress",
+                    options=_watched_options(),
+                    value=filters.watched.value if filters.watched else "",
+                    shell_classes="k-library-filter__progress",
+                )
+                select_input(
+                    name="availability",
+                    aria_label="Availability",
+                    options=_availability_options(),
+                    value=filters.availability.value if filters.availability else "",
+                    shell_classes="k-library-filter__availability",
+                )
+                year = text_input(
+                    name="year",
+                    input_type="number",
+                    value=str(filters.year) if filters.year is not None else None,
+                    placeholder="Year",
+                    aria_label="Release year",
+                    classes="k-input--year",
+                    shell_classes="k-input-shell--year k-library-filter__year",
+                )
+                year.props('min="1" max="9999"')
+        with ui.element("div").classes("k-library-filter__actions"):
+            action_button("Search", button_type=ButtonType.SUBMIT)
+            with (
+                ui.element("a")
+                .classes("k-button k-library-filter__clear")
+                .props('href="/library" aria-label="Clear library filters"')
+            ):
+                ui.label("Clear").classes("k-button__label")
 
 
 def _kind_options() -> tuple[SelectOption, ...]:
     return (
-        SelectOption("", "All kinds"),
+        SelectOption("", "Movies & series"),
+        SelectOption("all", "All kinds"),
         *(SelectOption(kind.value, kind.value.title()) for kind in LibraryItemKind),
     )
 
@@ -157,12 +210,105 @@ def _availability_options() -> tuple[SelectOption, ...]:
     )
 
 
-def _filter_query(filters: LibraryFilters) -> list[tuple[str, str]]:
+def _selected_kind(filters: LibraryFilters) -> str:
+    """Return the native select value without leaking UI-only state into Katalog."""
+
+    if filters.all_kinds:
+        return "all"
+    return filters.kind.value if filters.kind is not None else ""
+
+
+def _library_grids(filters: LibraryFilters) -> tuple[_LibraryGrid, ...]:
+    """Split default catalogue browsing into top-level title grids only."""
+
+    if filters.is_default_catalogue_browse:
+        return (
+            _LibraryGrid(
+                title="Movies",
+                filters=filters,
+                kinds=(LibraryItemKind.MOVIE,),
+                layout=_LibraryGridLayout.PORTRAIT,
+            ),
+            _LibraryGrid(
+                title="Series",
+                filters=filters,
+                kinds=(LibraryItemKind.SERIES,),
+                layout=_LibraryGridLayout.PORTRAIT,
+            ),
+        )
+    if filters.all_kinds:
+        return (
+            _LibraryGrid(
+                title="Titles & collections",
+                filters=filters,
+                kinds=_PORTRAIT_LIBRARY_KINDS,
+                layout=_LibraryGridLayout.PORTRAIT,
+            ),
+            _LibraryGrid(
+                title="Episodes",
+                filters=filters,
+                kinds=(LibraryItemKind.EPISODE,),
+                layout=_LibraryGridLayout.LANDSCAPE,
+            ),
+        )
+    if filters.kind is None:
+        msg = "Library filters must select a concrete kind or all kinds."
+        raise RuntimeError(msg)
+    layout = (
+        _LibraryGridLayout.LANDSCAPE
+        if filters.kind is LibraryItemKind.EPISODE
+        else _LibraryGridLayout.PORTRAIT
+    )
+    return (
+        _LibraryGrid(
+            title=filters.kind.value.title(),
+            filters=filters,
+            kinds=(filters.kind,),
+            layout=layout,
+        ),
+    )
+
+
+def _render_library_grid(
+    settings: Kanvas_Settings,
+    profile: SessionProfile,
+    grid_revision: str,
+    grid: _LibraryGrid,
+    max_mounted: int,
+) -> None:
+    """Mount one independently paged result group with its intentional geometry."""
+
+    with (
+        ui.element("section")
+        .classes("k-library-results-section")
+        .props(f'aria-label="{grid.title}"')
+    ):
+        section_title(grid.title)
+        source = "/kanvas/data/library?" + urlencode(_filter_query(grid.filters, grid.kinds))
+        browser_grid = mount_browser_component(
+            BrowserComponent.POSTER_GRID,
+            {
+                "source": source,
+                "grid-layout": grid.layout.value,
+                "result-label": grid.title,
+                "max-mounted": max_mounted,
+                "state-user": profile.user.id,
+                "catalogue-revision": grid_revision,
+                "development-mode": settings.development_mode,
+            },
+        )
+        loading_label = f"Loading {grid.title.lower()}…"
+        with browser_grid:
+            ui.label(loading_label).classes("k-grid-status").props('aria-live="polite"')
+
+
+def _filter_query(
+    filters: LibraryFilters, kinds: tuple[LibraryItemKind, ...]
+) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
     if filters.search is not None:
         values.append(("search", filters.search))
-    if filters.kind is not None:
-        values.append(("kind", filters.kind.value))
+    values.extend(("kind", kind.value) for kind in kinds)
     values.extend(("tag", tag) for tag in filters.tags)
     if filters.watched is not None:
         values.append(("watched", filters.watched.value))

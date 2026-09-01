@@ -23,6 +23,7 @@ from kasana.katalog.models import (
     MetadataReviewAction,
     MetadataReviewEvent,
     Zaisan,
+    ZaisanKind,
 )
 from kasana.shared.metadata import MovieDetails, SeriesDetails
 
@@ -64,7 +65,7 @@ def accept_binding(
 
     def accept(session: Session) -> MetadataBindingView:
         item = require_item(session, item_id)
-        _assert_unlocked_sort_title_available(session, item, details)
+        _assert_resulting_identity_available(session, item, details)
         reference = details.reference
         binding = session.scalar(
             select(MetadataBinding).where(
@@ -237,6 +238,7 @@ def refresh_binding(
             msg = f"Metadata binding {binding_id} does not exist."
             raise MetadataWorkflowError(msg)
         item = require_item(session, binding.library_item_id)
+        _assert_resulting_identity_available(session, item, details)
         binding.provider_title = details.title
         binding.provider_original_title = details.original_title
         binding.provider_release_year = details.release_date.year if details.release_date else None
@@ -266,28 +268,61 @@ def apply_unlocked_metadata(item: Zaisan, details: ProviderDetails) -> None:
         item.overview = details.overview
 
 
-def _assert_unlocked_sort_title_available(
+def _assert_resulting_identity_available(
     session: Session, item: Zaisan, details: ProviderDetails
 ) -> None:
-    if MetadataField.SORT_TITLE in locked_fields(item):
+    """Reject provider metadata that would collide with the resulting local identity."""
+
+    locks = locked_fields(item)
+    sort_title_can_change = MetadataField.SORT_TITLE not in locks
+    release_year_can_change = (
+        item.item_kind is ZaisanKind.MOVIE
+        and MetadataField.RELEASE_DATE not in locks
+        and details.release_date is not None
+    )
+    if not sort_title_can_change and not release_year_can_change:
         return
+    sort_title = _resulting_sort_title(item, details, locks)
     statement = select(Zaisan.id).where(
         Zaisan.library_root_id == item.library_root_id,
         Zaisan.item_kind == item.item_kind,
-        Zaisan.sort_title == details.title,
+        Zaisan.sort_title == sort_title,
         Zaisan.id != item.id,
     )
     if item.parent_id is None:
         statement = statement.where(Zaisan.parent_id.is_(None))
     else:
         statement = statement.where(Zaisan.parent_id == item.parent_id)
+    if item.item_kind is ZaisanKind.MOVIE:
+        release_year = _resulting_release_year(item, details, locks)
+        statement = statement.where(
+            Zaisan.release_year == release_year
+            if release_year is not None
+            else Zaisan.release_year.is_(None)
+        )
     conflict_id = session.scalar(statement.limit(1))
     if conflict_id is not None:
         msg = (
-            f"Provider title {details.title!r} conflicts with library item {conflict_id}. "
+            f"Provider metadata conflicts with library item {conflict_id}. "
             "Lock the sort title or resolve the duplicate before matching."
         )
         raise MetadataIdentityConflictError(msg)
+
+
+def _resulting_sort_title(
+    item: Zaisan, details: ProviderDetails, locks: frozenset[MetadataField]
+) -> str:
+    if MetadataField.SORT_TITLE not in locks:
+        return details.title
+    return item.sort_title
+
+
+def _resulting_release_year(
+    item: Zaisan, details: ProviderDetails, locks: frozenset[MetadataField]
+) -> int | None:
+    if MetadataField.RELEASE_DATE not in locks and details.release_date is not None:
+        return details.release_date.year
+    return item.release_year
 
 
 def locked_fields(item: Zaisan) -> frozenset[MetadataField]:

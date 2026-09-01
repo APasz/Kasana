@@ -55,6 +55,7 @@ from kasana.katalog.api.contracts import (
     LibraryItemEditAudit,
     LibraryItemKind,
     LibraryItemMutationResult,
+    LibraryItemPage,
     LibraryItemPlaybackDefaults,
     LibraryItemSummary,
     LibraryItemUpdate,
@@ -241,7 +242,10 @@ class _ExpiredDownloadGrantError(LookupError):
 
 @dataclass(frozen=True)
 class LibraryItemFilters:
+    """Typed library filters with a compatible single-kind shorthand."""
+
     kind: LibraryItemKind | None = None
+    kinds: tuple[LibraryItemKind, ...] = ()
     tags: tuple[str, ...] = ()
     year: int | None = None
     watched: WatchedFilter | None = None
@@ -249,6 +253,18 @@ class LibraryItemFilters:
     availability: Availability | None = None
     collection_id: int | None = None
     search: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is not None and self.kinds:
+            raise ValueError("Specify either kind or kinds, not both.")
+        if len(set(self.kinds)) != len(self.kinds):
+            raise ValueError("Library item kinds must not repeat.")
+
+    @property
+    def selected_kinds(self) -> tuple[LibraryItemKind, ...]:
+        """Return the explicit multi-kind filter or the legacy shorthand."""
+
+        return self.kinds or ((self.kind,) if self.kind is not None else ())
 
 
 @dataclass(frozen=True)
@@ -627,11 +643,12 @@ class KatalogQueryService:
 
     def list_items(
         self, *, filters: LibraryItemFilters, cursor: str | None, limit: int
-    ) -> PaginatedResponse[LibraryItemSummary]:
+    ) -> LibraryItemPage:
         normalised_limit = _page_limit(limit)
         cursor_value = _decode_cursor(cursor, "library-items")
+        direction = _library_cursor_direction(cursor_value)
 
-        def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
+        def load(session: Session) -> LibraryItemPage:
             statement: Select[tuple[Zaisan]] = select(Zaisan).join(Kura)
             statement = _apply_item_filters(statement, filters)
             sort_key = func.natural_sort_key(Zaisan.sort_title)
@@ -643,31 +660,78 @@ class KatalogQueryService:
                 )
                 sort_title: str = _cursor_string(cursor_value, "sort_title")
                 item_id: int = _cursor_int(cursor_value, "id")
-                statement = statement.where(
-                    or_(
-                        sort_key > natural_key,
-                        and_(
-                            sort_key == natural_key,
-                            or_(
-                                Zaisan.sort_title > sort_title,
-                                and_(Zaisan.sort_title == sort_title, Zaisan.id > item_id),
+                if direction is _LibraryCursorDirection.AFTER:
+                    statement = statement.where(
+                        or_(
+                            sort_key > natural_key,
+                            and_(
+                                sort_key == natural_key,
+                                or_(
+                                    Zaisan.sort_title > sort_title,
+                                    and_(Zaisan.sort_title == sort_title, Zaisan.id > item_id),
+                                ),
                             ),
-                        ),
+                        )
                     )
-                )
+                else:
+                    statement = statement.where(
+                        or_(
+                            sort_key < natural_key,
+                            and_(
+                                sort_key == natural_key,
+                                or_(
+                                    Zaisan.sort_title < sort_title,
+                                    and_(Zaisan.sort_title == sort_title, Zaisan.id < item_id),
+                                ),
+                            ),
+                        )
+                    )
             rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
                 session.scalars(
-                    statement.order_by(sort_key, Zaisan.sort_title, Zaisan.id).limit(
-                        normalised_limit + 1
-                    )
+                    statement.order_by(
+                        *(
+                            (sort_key, Zaisan.sort_title, Zaisan.id)
+                            if direction is _LibraryCursorDirection.AFTER
+                            else (sort_key.desc(), Zaisan.sort_title.desc(), Zaisan.id.desc())
+                        )
+                    ).limit(normalised_limit + 1)
                 )
             )
-            return _item_page(
-                session,
-                rows,
-                normalised_limit,
-                cursor_scope="library-items",
-                cursor_values=_library_item_cursor_values,
+            page, has_more = _split_page(rows, normalised_limit)
+            if direction is _LibraryCursorDirection.BEFORE:
+                page = tuple(reversed(page))
+            if not page:
+                return LibraryItemPage(items=(), limit=normalised_limit)
+            has_previous = (
+                has_more
+                if direction is _LibraryCursorDirection.BEFORE
+                else cursor_value is not None
+            )
+            has_next = (
+                cursor_value is not None
+                if direction is _LibraryCursorDirection.BEFORE
+                else has_more
+            )
+            summaries = _summaries_for(session, page)
+            return LibraryItemPage(
+                items=tuple(summaries[item.id] for item in page),
+                previous_cursor=(
+                    _encode_cursor(
+                        "library-items",
+                        _library_item_cursor_values(page[0], _LibraryCursorDirection.BEFORE),
+                    )
+                    if has_previous
+                    else None
+                ),
+                next_cursor=(
+                    _encode_cursor(
+                        "library-items",
+                        _library_item_cursor_values(page[-1], _LibraryCursorDirection.AFTER),
+                    )
+                    if has_next
+                    else None
+                ),
+                limit=normalised_limit,
             )
 
         return self._database.run_transaction(load)
@@ -4122,8 +4186,10 @@ def _edit_audit(event: LibraryItemEditEvent) -> LibraryItemEditAudit:
 def _apply_item_filters(
     statement: Select[tuple[Zaisan]], filters: LibraryItemFilters
 ) -> Select[tuple[Zaisan]]:
-    if filters.kind is not None:
-        statement = statement.where(Zaisan.item_kind == ZaisanKind(filters.kind.value))
+    if selected_kinds := filters.selected_kinds:
+        statement = statement.where(
+            Zaisan.item_kind.in_(tuple(ZaisanKind(kind.value) for kind in selected_kinds))
+        )
     if filters.year is not None:
         statement = statement.where(Zaisan.release_year == filters.year)
     if filters.availability is not None:
@@ -4231,10 +4297,31 @@ def _item_page(
     )
 
 
-def _library_item_cursor_values(item: Zaisan) -> dict[str, str | int | float]:
+class _LibraryCursorDirection(StrEnum):
+    """The inclusive edge represented by a Library cursor."""
+
+    AFTER = "after"
+    BEFORE = "before"
+
+
+def _library_cursor_direction(cursor: dict[str, object] | None) -> _LibraryCursorDirection:
+    if cursor is None or "direction" not in cursor:
+        # Cursors were originally forward-only.  They remain valid after adding
+        # reverse navigation so saved links and API consumers do not break.
+        return _LibraryCursorDirection.AFTER
+    try:
+        return _LibraryCursorDirection(_cursor_string(cursor, "direction"))
+    except ValueError as error:
+        raise CatalogueValidationError("The cursor is invalid.") from error
+
+
+def _library_item_cursor_values(
+    item: Zaisan, direction: _LibraryCursorDirection
+) -> dict[str, str | int | float]:
     """Serialise the stable natural-order position of a library item."""
 
     return {
+        "direction": direction.value,
         "sort_key": natural_sort_key(item.sort_title),
         "sort_title": item.sort_title,
         "id": item.id,

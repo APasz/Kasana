@@ -415,6 +415,81 @@ def test_abbreviated_decade_directories_index_files_and_repair_legacy_grouping(
     assert database.run_transaction(item_details) == ("Cars", 2006)
 
 
+def test_scanner_keeps_same_titled_movies_with_different_years_separate(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    original = movies / "1980s" / "Ghostbusters (1984).mkv"
+    reboot = movies / "2010s" / "Ghostbusters (2016).mkv"
+    original.parent.mkdir(parents=True)
+    reboot.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+    reboot.write_bytes(b"reboot")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 2
+
+    def movies_by_year(session: Session) -> list[tuple[str, str, int | None, int]]:
+        return [
+            (movie.title, movie.sort_title, movie.release_year, len(movie.media_files))
+            for movie in session.scalars(
+                select(Zaisan)
+                .where(Zaisan.item_kind == ZaisanKind.MOVIE)
+                .order_by(Zaisan.release_year)
+            )
+        ]
+
+    assert database.run_transaction(movies_by_year) == [
+        ("Ghostbusters", "Ghostbusters", 1984, 1),
+        ("Ghostbusters", "Ghostbusters", 2016, 1),
+    ]
+
+
+def test_scanner_keeps_pending_parent_caches_distinct_within_one_scan(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    shows = tmp_path / "Series"
+    for path in (
+        movies / "Feature One (2001)" / "Extras" / "Trailer.mkv",
+        movies / "Feature Two (2002)" / "Extras" / "Trailer.mkv",
+        shows / "Show One" / "Season 01" / "Show One S01E01.mkv",
+        shows / "Show Two" / "Season 01" / "Show Two S01E01.mkv",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(path.as_posix().encode())
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    _register_root(database, shows, ZaisanKind.SERIES)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 4
+
+    def parent_titles(session: Session) -> tuple[set[tuple[str, int | None]], set[str]]:
+        extras = tuple(session.scalars(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.EXTRA)))
+        episodes = tuple(
+            session.scalars(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.EPISODE))
+        )
+        extra_parents = {
+            (extra.parent.title, extra.parent.release_year)
+            for extra in extras
+            if extra.parent is not None
+        }
+        episode_series = {
+            episode.parent.parent.title
+            for episode in episodes
+            if episode.parent is not None and episode.parent.parent is not None
+        }
+        return extra_parents, episode_series
+
+    assert database.run_transaction(parent_titles) == (
+        {("Feature One", 2001), ("Feature Two", 2002)},
+        {"Show One", "Show Two"},
+    )
+
+
 def test_scan_preserves_matched_movie_identity_when_local_filename_differs(
     database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
 ) -> None:

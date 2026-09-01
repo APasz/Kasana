@@ -54,16 +54,20 @@ def select_input(
     aria_label: str,
     options: tuple[SelectOption, ...],
     value: str,
+    classes: str = "",
+    shell_classes: str = "",
 ) -> Element:
     """Render a styled native select inside the shared focus-border shell."""
 
-    with ui.element("label").classes("k-control-shell k-select-wrap"):
+    shell = ui.element("label").classes("k-control-shell k-select-wrap")
+    if shell_classes:
+        shell.classes(shell_classes)
+    with shell:
         ui.label(aria_label).classes("k-sr-only")
-        with (
-            ui.element("select")
-            .classes("k-select")
-            .props(f"name={name!r} aria-label={aria_label!r}")
-        ) as select_element:
+        select_element = ui.element("select").classes("k-select")
+        if classes:
+            select_element.classes(classes)
+        with select_element.props(f"name={name!r} aria-label={aria_label!r}"):
             for option in options:
                 selected = " selected" if option.value == value else ""
                 with ui.element("option").props(f"value={option.value!r}{selected}"):
@@ -77,6 +81,7 @@ def multi_select_input(
     aria_label: str,
     options: tuple[SelectOption, ...],
     values: tuple[str, ...],
+    classes: str = "",
 ) -> Element:
     """Render a compact checkbox dropdown for a finite, server-provided vocabulary."""
 
@@ -86,11 +91,10 @@ def multi_select_input(
     if len(selected_labels) > 2:
         summary = f"{len(selected_labels)} {aria_label.casefold()}"
 
-    with (
-        ui.element("details")
-        .classes("k-control-shell k-check-menu")
-        .props(f"aria-label={aria_label!r}") as menu
-    ):
+    menu = ui.element("details").classes("k-control-shell k-check-menu")
+    if classes:
+        menu.classes(classes)
+    with menu.props(f"aria-label={aria_label!r}"):
         with ui.element("summary").classes("k-check-menu__summary"):
             ui.label(summary)
         with ui.element("div").classes("k-check-menu__options"):

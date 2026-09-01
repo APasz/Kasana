@@ -123,8 +123,9 @@ class LibraryPageEnvelope(BaseModel):
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
+    schema_version: Literal[2] = Field(default=2, alias="schemaVersion")
     items: tuple[PosterView, ...]
+    previous_cursor: str | None = Field(default=None, max_length=500, alias="previousCursor")
     next_cursor: str | None = Field(default=None, max_length=500, alias="nextCursor")
     request_id: str = Field(
         min_length=1,
@@ -132,6 +133,15 @@ class LibraryPageEnvelope(BaseModel):
         pattern=r"^[A-Za-z0-9_-]+$",
         alias="requestId",
     )
+
+
+@dataclass(frozen=True)
+class LibraryPosterPage:
+    """One bidirectional Library page projected into browser-safe poster views."""
+
+    items: tuple[PosterView, ...]
+    previous_cursor: str | None
+    next_cursor: str | None
 
 
 class LibraryErrorView(BaseModel):
@@ -165,6 +175,7 @@ class LibraryFilters(BaseModel):
 
     search: str | None = Field(default=None, max_length=200)
     kind: LibraryItemKind | None = None
+    all_kinds: bool = False
     tags: tuple[str, ...] = ()
     watched: WatchedFilter | None = None
     availability: Availability | None = None
@@ -186,17 +197,19 @@ class LibraryFilters(BaseModel):
             raise ValueError("Tags must not be blank or repeated.")
         return tags
 
-    def to_katalog_arguments(self) -> dict[str, object]:
-        """Map visible filters to the stable public Katalog contract exactly once."""
+    @model_validator(mode="after")
+    def kind_selection_is_unambiguous(self) -> LibraryFilters:
+        """Keep a concrete kind filter distinct from the explicit all-kinds view."""
 
-        return {
-            "kind": self.kind,
-            "tags": self.tags,
-            "year": self.year,
-            "watched": self.watched,
-            "availability": self.availability,
-            "search": self.search,
-        }
+        if self.kind is not None and self.all_kinds:
+            raise ValueError("A concrete kind cannot be combined with all kinds.")
+        return self
+
+    @property
+    def is_default_catalogue_browse(self) -> bool:
+        """Whether the UI should show its movie and series catalogue sections."""
+
+        return self.kind is None and not self.all_kinds
 
     @classmethod
     def from_query(
@@ -204,10 +217,12 @@ class LibraryFilters(BaseModel):
     ) -> LibraryFilters:
         """Parse the intentionally small browser query surface into typed filters."""
 
+        raw_kind = values.get("kind")
         return cls.model_validate(
             {
                 "search": values.get("search"),
-                "kind": values.get("kind") or None,
+                "kind": raw_kind if raw_kind not in {None, "", "all"} else None,
+                "all_kinds": raw_kind == "all",
                 "tags": tuple(tags) if tags is not None else _query_tags(values),
                 "watched": values.get("watched") or None,
                 "availability": values.get("availability") or None,
@@ -216,43 +231,38 @@ class LibraryFilters(BaseModel):
         )
 
 
+@dataclass(frozen=True)
+class LibraryPageRequest:
+    """Validated browser data-query filters with one or more concrete kinds."""
+
+    filters: LibraryFilters
+    kinds: tuple[LibraryItemKind, ...]
+
+    @classmethod
+    def from_query(
+        cls,
+        values: Mapping[str, str],
+        *,
+        kinds: Collection[str],
+        tags: Collection[str],
+    ) -> LibraryPageRequest:
+        try:
+            selected_kinds = tuple(LibraryItemKind(value) for value in kinds)
+        except ValueError as error:
+            raise ValueError("Library kinds are invalid.") from error
+        if not selected_kinds:
+            raise ValueError("Library data requests require at least one kind.")
+        if len(set(selected_kinds)) != len(selected_kinds):
+            raise ValueError("Library kinds must not repeat.")
+        filter_values = {name: value for name, value in values.items() if name != "kind"}
+        return cls(
+            filters=LibraryFilters.from_query(filter_values, tags=tags),
+            kinds=selected_kinds,
+        )
+
+
 def _query_tags(values: Mapping[str, str]) -> tuple[str, ...]:
     """Accept the one-value mapping used by small unit callers and API requests."""
 
     raw_tag = values.get("tag")
     return (raw_tag,) if raw_tag is not None else ()
-
-
-@dataclass
-class CursorPager:
-    """Small client-equivalent state machine for cursor request coordination."""
-
-    cursor: str | None = None
-    requesting: bool = False
-    exhausted: bool = False
-
-    def begin_request(self) -> str | None:
-        """Reserve the next cursor request or reject a duplicate/inapplicable request."""
-
-        if self.requesting or self.exhausted:
-            return None
-        self.requesting = True
-        return self.cursor
-
-    def complete_request(self, next_cursor: str | None) -> None:
-        """Accept a successful page and make a subsequent request available."""
-
-        if not self.requesting:
-            msg = "Cannot complete a cursor request that was not reserved."
-            raise RuntimeError(msg)
-        self.cursor = next_cursor
-        self.requesting = False
-        self.exhausted = next_cursor is None
-
-    def fail_request(self) -> None:
-        """Clear only the in-flight lock so an errored page can be retried safely."""
-
-        if not self.requesting:
-            msg = "Cannot fail a cursor request that was not reserved."
-            raise RuntimeError(msg)
-        self.requesting = False

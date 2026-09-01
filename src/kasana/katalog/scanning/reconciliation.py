@@ -24,15 +24,17 @@ from kasana.katalog.probe import ProbeResult
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile
 from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot, MediaSidecars
 
+type MovieIdentity = tuple[str, int | None]
+
 
 @dataclass
 class ItemCache:
-    movies: dict[str, Zaisan] = field(default_factory=dict)
+    movies: dict[MovieIdentity, Zaisan] = field(default_factory=dict)
     series: dict[str, Zaisan] = field(default_factory=dict)
-    seasons: dict[tuple[str, int], Zaisan] = field(default_factory=dict)
-    episodes: dict[tuple[str, int, int], Zaisan] = field(default_factory=dict)
-    specials: dict[tuple[str, str], Zaisan] = field(default_factory=dict)
-    extras: dict[tuple[str, str], Zaisan] = field(default_factory=dict)
+    seasons: dict[tuple[int, int], Zaisan] = field(default_factory=dict)
+    episodes: dict[tuple[int, int, int], Zaisan] = field(default_factory=dict)
+    specials: dict[tuple[int, str], Zaisan] = field(default_factory=dict)
+    extras: dict[tuple[int, str], Zaisan] = field(default_factory=dict)
 
 
 def apply_scan(
@@ -110,7 +112,7 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
     for item in item_list:
         title_key = item.sort_title.casefold()
         if item.item_kind is ZaisanKind.MOVIE and item.parent_id is None:
-            cache.movies[title_key] = item
+            cache.movies[_movie_identity(title_key, item.release_year)] = item
         elif item.item_kind is ZaisanKind.SERIES:
             cache.series[title_key] = item
     for item in item_list:
@@ -118,9 +120,8 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
         parent = by_id.get(item.parent_id) if item.parent_id is not None else None
         if parent is None:
             continue
-        parent_key = parent.sort_title.casefold()
         if item.item_kind is ZaisanKind.SEASON and item.season_number is not None:
-            cache.seasons[(parent_key, item.season_number)] = item
+            cache.seasons[(_cache_item_identity(parent), item.season_number)] = item
         elif (
             item.item_kind is ZaisanKind.EPISODE
             and parent.item_kind is ZaisanKind.SEASON
@@ -130,12 +131,12 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
             series = by_id.get(parent.parent_id) if parent.parent_id is not None else None
             if series is not None:
                 cache.episodes[
-                    (series.sort_title.casefold(), item.season_number, item.episode_number)
+                    (_cache_item_identity(series), item.season_number, item.episode_number)
                 ] = item
         elif item.item_kind is ZaisanKind.SPECIAL and parent.item_kind is ZaisanKind.SERIES:
-            cache.specials[(parent_key, title_key)] = item
+            cache.specials[(_cache_item_identity(parent), title_key)] = item
         elif item.item_kind is ZaisanKind.EXTRA:
-            cache.extras[(parent_key, title_key)] = item
+            cache.extras[(_cache_item_identity(parent), title_key)] = item
     return cache
 
 
@@ -147,7 +148,13 @@ def materialise_item(
             return get_movie(session, root_id, cache, parsed.title, parsed.release_year)
         case ParsedMediaKind.EXTRA:
             if parsed.parent_movie_title is not None:
-                parent = get_movie(session, root_id, cache, parsed.parent_movie_title)
+                parent = get_movie(
+                    session,
+                    root_id,
+                    cache,
+                    parsed.parent_movie_title,
+                    parsed.parent_movie_release_year,
+                )
             else:
                 assert parsed.parent_series_title is not None
                 parent = get_series(session, root_id, cache, parsed.parent_series_title)
@@ -155,7 +162,7 @@ def materialise_item(
         case ParsedMediaKind.SPECIAL:
             assert parsed.series_title is not None
             series = get_series(session, root_id, cache, parsed.series_title)
-            key = (series.sort_title.casefold(), parsed.title.casefold())
+            key = (_cache_item_identity(series), parsed.title.casefold())
             special = cache.specials.get(key)
             if special is None:
                 special = Zaisan(
@@ -174,7 +181,7 @@ def materialise_item(
             assert parsed.season_number is not None
             assert parsed.episode_number is not None
             series = get_series(session, root_id, cache, parsed.series_title)
-            season_key = (series.sort_title.casefold(), parsed.season_number)
+            season_key = (_cache_item_identity(series), parsed.season_number)
             season = cache.seasons.get(season_key)
             if season is None:
                 season = Zaisan(
@@ -188,7 +195,7 @@ def materialise_item(
                 session.add(season)
                 cache.seasons[season_key] = season
             episode_key = (
-                series.sort_title.casefold(),
+                _cache_item_identity(series),
                 parsed.season_number,
                 parsed.episode_number,
             )
@@ -220,8 +227,14 @@ def get_movie(
     title: str,
     release_year: int | None = None,
 ) -> Zaisan:
-    key = title.casefold()
+    key = _movie_identity(title, release_year)
     movie = cache.movies.get(key)
+    if movie is None and release_year is not None:
+        unknown_year_key = _movie_identity(title, None)
+        movie = cache.movies.pop(unknown_year_key, None)
+        if movie is not None:
+            movie.release_year = release_year
+            cache.movies[key] = movie
     if movie is None:
         movie = Zaisan(
             library_root_id=root_id,
@@ -232,8 +245,6 @@ def get_movie(
         )
         session.add(movie)
         cache.movies[key] = movie
-    elif movie.release_year is None and release_year is not None:
-        movie.release_year = release_year
     return movie
 
 
@@ -255,7 +266,7 @@ def get_series(session: Session, root_id: int, cache: ItemCache, title: str) -> 
 def get_extra(
     session: Session, root_id: int, cache: ItemCache, parent: Zaisan, title: str
 ) -> Zaisan:
-    key = (parent.sort_title.casefold(), title.casefold())
+    key = (_cache_item_identity(parent), title.casefold())
     extra = cache.extras.get(key)
     if extra is None:
         extra = Zaisan(
@@ -268,6 +279,21 @@ def get_extra(
         session.add(extra)
         cache.extras[key] = extra
     return extra
+
+
+def _movie_identity(title: str, release_year: int | None) -> MovieIdentity:
+    return title.casefold(), release_year
+
+
+def _cache_item_identity(item: Zaisan) -> int:
+    """Return one stable in-memory parent key for the duration of a scan.
+
+    Newly materialised rows all have ``id is None`` until the transaction flushes.
+    Their Python identity is stable both before and after that flush, unlike the
+    database identifier.
+    """
+
+    return id(item)
 
 
 def media_file(
