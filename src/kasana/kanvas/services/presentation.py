@@ -261,6 +261,7 @@ def poster_from_summary(
         if item.series_title
         else " · ".join(part for part in (item.year and str(item.year), item.kind.value) if part)
     )
+    placeholder = placeholder_art_for_summary(item, title=title, include_footer=False)
     return PosterView(
         id=item.id,
         title=title,
@@ -269,7 +270,8 @@ def poster_from_summary(
         href=href if href is not None else f"/item/{item.id}",
         posterUrl=poster_url,
         artworkShape=artwork_shape_for_summary(item),
-        placeholder=placeholder_art_for_summary(item, title=title),
+        artworkLabel=item.context_label if item.show_artwork_label else None,
+        placeholder=placeholder,
         progressPercent=progress_percent(playback),
         state=state,
         watched=playback.completed if playback is not None else False,
@@ -356,22 +358,20 @@ def primary_artwork_url(item: LibraryItemSummary) -> str | None:
 
 
 def placeholder_art_for_summary(
-    item: LibraryItemSummary, *, title: str | None = None
+    item: LibraryItemSummary, *, title: str | None = None, include_footer: bool = True
 ) -> PlaceholderArtView:
     """Build deterministic missing-poster text from the strongest known item label."""
 
     display = title if title is not None else item.title
+    footer = item.context_label if include_footer and item.show_artwork_label else None
     if item.kind is LibraryItemKind.EPISODE and is_generic_episode_title(
         display, item.episode_number, item.series_title
     ):
         episode_label = (
             f"Episode {item.episode_number}" if item.episode_number is not None else "Episode"
         )
-        return PlaceholderArtView(
-            lines=(episode_label,),
-            footer=item.context_label,
-        )
-    return PlaceholderArtView(lines=placeholder_title_lines(display), footer=item.context_label)
+        return PlaceholderArtView(lines=(episode_label,), footer=footer)
+    return PlaceholderArtView(lines=placeholder_title_lines(display), footer=footer)
 
 
 def placeholder_title_lines(title: str) -> tuple[str, ...]:

@@ -2289,6 +2289,7 @@ def _library_item_update_payload(payload: dict[str, object], *, actor: str) -> d
         "releaseYear": "release_year",
         "seasonNumber": "season_number",
         "episodeNumber": "episode_number",
+        "showArtworkLabel": "show_artwork_label",
         "kind": "kind",
         "parentId": "parent_id",
         "defaultAudioStreamIndex": "default_audio_stream_index",

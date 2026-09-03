@@ -293,6 +293,7 @@ def _summary_with_title(
     episode_number: int | None = None,
     series_title: str | None = None,
     context_label: str | None = None,
+    show_artwork_label: bool = True,
     artwork: tuple[ArtworkSelection, ...] = (),
 ) -> LibraryItemSummary:
     return LibraryItemSummary(
@@ -304,6 +305,7 @@ def _summary_with_title(
         episode_number=episode_number,
         series_title=series_title,
         context_label=context_label,
+        show_artwork_label=show_artwork_label,
         availability=Availability.AVAILABLE,
         artwork=artwork,
     )
@@ -381,6 +383,7 @@ def _library_summary(
     episode_end_number: int | None = None,
     series_title: str | None = None,
     context_label: str | None = None,
+    show_artwork_label: bool = True,
 ) -> LibraryItemSummary:
     return LibraryItemSummary(
         id=item_id,
@@ -394,6 +397,7 @@ def _library_summary(
         episode_end_number=episode_end_number,
         series_title=series_title,
         context_label=context_label,
+        show_artwork_label=show_artwork_label,
         availability=Availability.AVAILABLE,
     )
 
@@ -589,6 +593,46 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert repeated_context_poster.context is None
     assert "playback_url" not in json.dumps(poster.model_dump(mode="json"))
     assert "/tmp/" not in json.dumps(poster.model_dump(mode="json"))
+
+
+def test_poster_artwork_label_preserves_a_movie_edition_with_artwork() -> None:
+    artwork = ArtworkSelection(
+        id=8,
+        kind=ArtworkKind.POSTER,
+        url="/api/v1/library/items/9/artwork/8",
+        content_type="image/jpeg",
+        size_bytes=4,
+    )
+    poster = poster_from_summary(
+        _summary_with_title(
+            "Bad Boys",
+            context_label="Remastered",
+            artwork=(artwork,),
+        )
+    )
+
+    assert poster.poster_url == "/kanvas/artwork/9/8"
+    assert poster.artwork_label == "Remastered"
+    assert poster.placeholder.footer is None
+
+
+def test_poster_artwork_label_can_be_hidden_per_item() -> None:
+    poster = poster_from_summary(
+        _summary_with_title(
+            "Bad Boys",
+            context_label="Remastered",
+            show_artwork_label=False,
+        )
+    )
+
+    assert poster.artwork_label is None
+    assert placeholder_art_for_summary(
+        _summary_with_title(
+            "Bad Boys",
+            context_label="Remastered",
+            show_artwork_label=False,
+        )
+    ).footer is None
 
 
 async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: MonkeyPatch) -> None:
@@ -1767,6 +1811,7 @@ async def test_library_poster_transformation_logs_only_safe_item_diagnostics(
         "parent_id",
         "season_number",
         "series_title",
+        "show_artwork_label",
         "tags",
         "title",
         "year",
@@ -3044,6 +3089,7 @@ async def test_katalog_service_item_edit_contracts(
             assert request.selected_artwork == (
                 SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),
             )
+            assert request.show_artwork_label is False
             calls.append("update")
             return mutation
 
@@ -3113,6 +3159,7 @@ async def test_katalog_service_item_edit_contracts(
             actor="tester",
             title="Updated",
             selected_artwork=(SelectedArtwork(kind=ArtworkKind.POSTER, artwork_id=8),),
+            show_artwork_label=False,
         ),
     )
     audits = await service.item_edit_audit(7)
@@ -3280,6 +3327,7 @@ async def test_item_edit_endpoints_report_data_and_validation(
                     "tags": ["anime", "favourite"],
                     "seasonNumber": None,
                     "episodeNumber": None,
+                    "showArtworkLabel": False,
                     "lockedMetadataFields": ["title"],
                     "selectedArtwork": [{"kind": "poster", "artworkId": 8}],
                     "kind": "movie",
@@ -3394,6 +3442,17 @@ def test_item_edit_payload_omits_null_non_nullable_playback_flags() -> None:
     }
     update = LibraryItemUpdate.model_validate(payload)
     assert update.model_fields_set == {"actor", "title", "selected_artwork"}
+
+
+def test_item_edit_payload_maps_artwork_label_visibility() -> None:
+    payload = dashboard._library_item_update_payload(  # pyright: ignore[reportPrivateUsage]
+        {"showArtworkLabel": False}, actor="tester"
+    )
+
+    update = LibraryItemUpdate.model_validate(payload)
+
+    assert update.show_artwork_label is False
+    assert update.model_fields_set == {"actor", "show_artwork_label"}
 
 
 async def test_administration_error_states_and_local_section_routes(
@@ -4442,6 +4501,21 @@ def test_about_navigation_is_active_only_in_the_desktop_sidebar() -> None:
     assert len(about_links) == 1
     assert "k-nav-link--active" in _element_classes(about_links[0])
     assert "k-side-nav" in _element_classes(_parent_element(about_links[0]))
+
+
+def test_mobile_navigation_marks_only_the_active_link_and_keeps_profile_textual() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        ".k-bottom-nav .k-nav-link::before { top: -8px; left: 12px; width: 20px; height: 0; }"
+        in stylesheet
+    )
+    assert ".k-bottom-nav .k-nav-link--active::before { height: 2px; }" in stylesheet
+    assert ".k-bottom-nav .k-profile-switcher::after" not in stylesheet
+    assert "width: min(72px, 20vw);" in stylesheet
+    assert "font-size: 0.72rem;" in stylesheet
 
 
 def test_about_page_includes_project_and_required_notices() -> None:

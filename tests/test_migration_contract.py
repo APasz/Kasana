@@ -17,7 +17,91 @@ from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.models import Base, PlaybackState, Zaisan, ZaisanKind
-from kasana.katalog.services import create_library_item, create_library_root, create_user
+from kasana.katalog.services import create_library_item
+
+
+def _last_insert_id(session: Session) -> int:
+    identifier = session.scalar(text("SELECT last_insert_rowid()"))
+    assert isinstance(identifier, int)
+    return identifier
+
+
+def _insert_historical_root(
+    session: Session, *, path: Path, expected_media_kind: ZaisanKind
+) -> int:
+    session.execute(
+        text(
+            "INSERT INTO library_root (path, expected_media_kind, default_tags, enabled) "
+            "VALUES (:path, :expected_media_kind, '[]', 1)"
+        ),
+        {"path": str(path), "expected_media_kind": expected_media_kind.value},
+    )
+    return _last_insert_id(session)
+
+
+def _insert_historical_user(session: Session, *, username: str) -> int:
+    session.execute(
+        text("INSERT INTO user (username, role, is_disabled) VALUES (:username, 'user', 0)"),
+        {"username": username},
+    )
+    return _last_insert_id(session)
+
+
+def _insert_historical_item(
+    session: Session,
+    *,
+    library_root_id: int,
+    item_kind: ZaisanKind,
+    title: str,
+    parent_id: int | None = None,
+    release_year: int | None = None,
+    season_number: int | None = None,
+    episode_number: int | None = None,
+) -> int:
+    session.execute(
+        text(
+            """
+            INSERT INTO library_item (
+                library_root_id,
+                parent_id,
+                item_kind,
+                title,
+                sort_title,
+                release_year,
+                season_number,
+                episode_number,
+                tags,
+                availability,
+                locked_metadata_fields,
+                selected_artwork_ids
+            ) VALUES (
+                :library_root_id,
+                :parent_id,
+                :item_kind,
+                :title,
+                :sort_title,
+                :release_year,
+                :season_number,
+                :episode_number,
+                '[]',
+                'available',
+                '[]',
+                '{}'
+            )
+            """
+        ),
+        {
+            "library_root_id": library_root_id,
+            "parent_id": parent_id,
+            "item_kind": item_kind.value,
+            "title": title,
+            "sort_title": title,
+            "release_year": release_year,
+            "season_number": season_number,
+            "episode_number": episode_number,
+        },
+    )
+    return _last_insert_id(session)
 
 
 def test_migration_head_matches_katalog_orm_metadata(tmp_path: Path) -> None:
@@ -73,14 +157,14 @@ def test_remake_migration_allows_distinct_years_and_refuses_an_unsafe_downgrade(
     try:
 
         def seed(session: Session) -> None:
-            root = create_library_root(
+            root_id = _insert_historical_root(
                 session,
                 path=tmp_path / "Movies",
                 expected_media_kind=ZaisanKind.MOVIE,
             )
-            create_library_item(
+            _insert_historical_item(
                 session,
-                library_root_id=root.id,
+                library_root_id=root_id,
                 item_kind=ZaisanKind.MOVIE,
                 title="Ghostbusters",
                 release_year=1984,
@@ -135,58 +219,67 @@ def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_pat
     database = KatalogDatabase(database_path)
     try:
         with database.transaction() as session:
-            root = create_library_root(
+            root_id = _insert_historical_root(
                 session,
                 path=tmp_path / "library",
                 expected_media_kind=ZaisanKind.SERIES,
             )
-            user = create_user(session, username="viewer")
-            series = create_library_item(
+            user_id = _insert_historical_user(session, username="viewer")
+            series_id = _insert_historical_item(
                 session,
-                library_root_id=root.id,
+                library_root_id=root_id,
                 item_kind=ZaisanKind.SERIES,
                 title="Example Show",
             )
-            season = create_library_item(
+            season_id = _insert_historical_item(
                 session,
-                library_root_id=root.id,
+                library_root_id=root_id,
                 item_kind=ZaisanKind.SEASON,
-                parent_id=series.id,
+                parent_id=series_id,
                 season_number=1,
                 title="Season 1",
             )
             episodes = tuple(
-                create_library_item(
+                _insert_historical_item(
                     session,
-                    library_root_id=root.id,
+                    library_root_id=root_id,
                     item_kind=ZaisanKind.EPISODE,
-                    parent_id=season.id,
+                    parent_id=season_id,
                     season_number=1,
                     episode_number=episode_number,
                     title=f"Episode {episode_number}",
                 )
                 for episode_number in (1, 2)
             )
-            extra = create_library_item(
+            extra_id = _insert_historical_item(
                 session,
-                library_root_id=root.id,
+                library_root_id=root_id,
                 item_kind=ZaisanKind.EXTRA,
-                parent_id=season.id,
+                parent_id=season_id,
                 title="Interview",
             )
-            for episode in episodes:
-                session.add(
-                    PlaybackState(
-                        user_id=user.id,
-                        library_item_id=episode.id,
-                        position_seconds=1.0,
-                        duration_seconds=1.0,
-                        completed=True,
-                        play_count=1,
-                        last_played_at=datetime.now(UTC),
-                    )
+            for episode_id in episodes:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO playback_state (
+                            user_id,
+                            library_item_id,
+                            position_seconds,
+                            duration_seconds,
+                            completed,
+                            play_count,
+                            last_played_at
+                        ) VALUES (:user_id, :library_item_id, 1.0, 1.0, 1, 1, :last_played_at)
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "library_item_id": episode_id,
+                        "last_played_at": datetime.now(UTC).isoformat(),
+                    },
                 )
-            identifiers = (user.id, season.id, series.id, extra.id)
+            identifiers = (user_id, season_id, series_id, extra_id)
     finally:
         database.close()
 

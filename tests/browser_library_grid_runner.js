@@ -274,22 +274,36 @@ async function testValidPageRetainsAvailable() {
   assert.equal(instance.nextStatus.textContent, 'End of library.');
 }
 
-function testPosterPlaceholderNormalisation() {
+function testPosterArtworkLabelNormalisation() {
   const poster = globalThis.__libraryTest.normalisePoster({
     ...validPoster(11),
     context: ' The show ',
     posterUrl: null,
-    placeholder: {lines: [' Main title ', '', 'Subtitle'], footer: ' S01 E02 '}
+    artworkLabel: ' S01 E02 ',
+    placeholder: {lines: [' Main title ', '', 'Subtitle']}
   });
 
   assert.equal(poster.posterUrl, null);
   assert.equal(poster.context, 'The show');
   assert.deepEqual(poster.placeholder.lines, ['Main title', 'Subtitle']);
-  assert.equal(poster.placeholder.footer, 'S01 E02');
+  assert.equal(poster.artworkLabel, 'S01 E02');
   assert.deepEqual(
     globalThis.__libraryTest.normalisePoster(validPoster(12)).placeholder.lines,
     ['Poster 12']
   );
+}
+
+function testPosterArtworkLabelMarkup() {
+  const poster = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(13),
+    title: 'Bad Boys',
+    artworkLabel: 'Remastered'
+  });
+  const markup = globalThis.__libraryTest.posterMarkup(poster);
+
+  assert.match(markup, /class="k-poster__artwork-label">Remastered/);
+  assert.match(markup, /aria-label="Bad Boys — Remastered"/);
+  assert.equal((markup.match(/k-poster__artwork-label/g) || []).length, 1);
 }
 
 function testPosterPartialWatchNormalisation() {
@@ -895,6 +909,14 @@ function testItemEditorUsesTaskFocusedTabs() {
     editor.renderArtworkTab('', 'series', {provider: 'tmdb', provider_id: '63712'}),
     /Load artwork choices/
   );
+  assert.match(
+    editor.renderArtworkTab('', 'movie', null, true),
+    /name="showArtworkLabel"[^>]* checked/
+  );
+  assert.doesNotMatch(
+    editor.renderArtworkTab('', 'movie', null, false),
+    /name="showArtworkLabel"[^>]* checked/
+  );
   assert.match(editor.renderArtworkTab('', 'season', null), /Load artwork choices/);
   assert.match(editor.renderArtworkTab('', 'episode', null), /Load artwork choices/);
 }
@@ -997,7 +1019,13 @@ function testItemEditorHidesForceControlsForAutomaticDefaults() {
 
 function testItemEditorPayloadPreservesHiddenState() {
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
-  editor.currentItem = {kind: 'episode', season_number: 1, episode_number: 2, parent_id: 8};
+  editor.currentItem = {
+    kind: 'episode',
+    season_number: 1,
+    episode_number: 2,
+    parent_id: 8,
+    show_artwork_label: true
+  };
   editor.lockedMetadataFields = new Set(['overview', 'episode_number']);
   editor.initialSelectedArtwork = new Map([['poster', 8], ['still', 10]]);
   const form = {
@@ -1040,11 +1068,25 @@ function testItemEditorPayloadPreservesHiddenState() {
   assert.equal(payload.parentId, null);
   assert.equal(payload.seasonNumber, null);
   assert.equal(payload.episodeNumber, null);
+  assert.equal(payload.showArtworkLabel, false);
   assert.deepEqual(payload.lockedMetadataFields.sort(), ['episode_number', 'title']);
   assert.deepEqual(payload.selectedArtwork.sort((left, right) => left.kind.localeCompare(right.kind)), [
     {kind: 'backdrop', artworkId: 12},
     {kind: 'still', artworkId: 10}
   ]);
+
+  const labelledPayload = editor.payloadFromForm(form, fakeFormValues({
+    title: 'Movie',
+    sortTitle: 'Movie',
+    overview: '',
+    releaseDate: '',
+    releaseYear: '',
+    tags: 'anime, favourite',
+    kind: 'movie',
+    showArtworkLabel: 'on'
+  }));
+
+  assert.equal(labelledPayload.showArtworkLabel, true);
 }
 
 function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
@@ -1079,7 +1121,8 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
 
 async function main() {
   await testValidPageRetainsAvailable();
-  testPosterPlaceholderNormalisation();
+  testPosterArtworkLabelNormalisation();
+  testPosterArtworkLabelMarkup();
   testPosterPartialWatchNormalisation();
   testLandscapePosterMarkup();
   testLibraryFilterUrlKeepsOnlyActiveUrlState();

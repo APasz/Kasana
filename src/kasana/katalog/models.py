@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     false,
     func,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.orm import relationship as orm_relationship
@@ -343,6 +344,9 @@ class Zaisan(Base):
     # cache remains the source of bytes; this only stores the viewer's choice.
     selected_artwork_ids: Mapped[dict[str, int]] = mapped_column(
         JSON, nullable=False, default=dict, server_default="{}"
+    )
+    show_artwork_label: Mapped[bool] = mapped_column(
+        nullable=False, default=True, server_default=true()
     )
     default_audio_stream_index: Mapped[int | None] = mapped_column(Integer)
     force_default_audio_stream: Mapped[bool] = mapped_column(

@@ -82,6 +82,7 @@ class PosterView(BaseModel):
     href: str = Field(pattern=_POSTER_HREF_PATTERN)
     poster_url: str | None = Field(default=None, alias="posterUrl")
     artwork_shape: ArtworkShape = Field(default=ArtworkShape.PORTRAIT, alias="artworkShape")
+    artwork_label: str | None = Field(default=None, max_length=80, alias="artworkLabel")
     mosaic_urls: tuple[str, ...] = Field(default=(), max_length=4, alias="mosaicUrls")
     placeholder: PlaceholderArtView = Field(
         default_factory=lambda: PlaceholderArtView(lines=("Untitled",))
@@ -92,7 +93,7 @@ class PosterView(BaseModel):
     partially_watched: bool = Field(default=False, alias="partiallyWatched")
     available: bool
 
-    @field_validator("context", "detail")
+    @field_validator("context", "detail", "artwork_label")
     @classmethod
     def normalise_optional_copy(cls, value: str | None) -> str | None:
         """Keep optional card copy compact without emitting empty visual rows."""

@@ -868,6 +868,13 @@ class KatalogQueryService:
                     fields,
                     field_name="selected_artwork",
                 )
+            _set_item_value(
+                changes,
+                item,
+                "show_artwork_label",
+                request.show_artwork_label,
+                fields,
+            )
             _set_item_value(changes, item, "item_kind", target_kind, fields, field_name="kind")
             _set_item_value(changes, item, "parent_id", target_parent_id, fields)
             _set_item_value(
@@ -4391,6 +4398,7 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             episode_end_number=item.episode_end_number,
             series_title=_series_title_for_summary(item, parent_items, grandparent_items),
             context_label=_context_label_for_summary(item, first_media_paths.get(item.id)),
+            show_artwork_label=item.show_artwork_label,
             availability=Availability(item.availability.value),
             tags=tuple(sorted(root_tags[item.library_root_id] | frozenset(item.tags))),
             artwork=tuple(artworks[item.id][:MAX_ARTWORK_PER_ITEM]),

@@ -147,14 +147,11 @@
     const lines = value && typeof value === 'object' && Array.isArray(value.lines)
       ? value.lines
       : [title];
-    const footer = value && typeof value === 'object' && typeof value.footer === 'string'
-      ? value.footer.trim().slice(0, 80)
-      : null;
     const safeLines = lines
       .filter((line) => typeof line === 'string' && line.trim())
       .slice(0, 3)
       .map((line) => line.trim().slice(0, 160));
-    return {lines: safeLines.length ? safeLines : [title], footer: footer || null};
+    return {lines: safeLines.length ? safeLines : [title]};
   };
   const normaliseHexColour = (value) => (
     typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value) ? value : null
@@ -576,6 +573,7 @@
     const placeholder = normalisePlaceholder(poster.placeholder, poster.title);
     if (poster.context != null && typeof poster.context !== 'string') return null;
     if (poster.detail != null && typeof poster.detail !== 'string') return null;
+    if (poster.artworkLabel != null && typeof poster.artworkLabel !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
     if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
     if (poster.watched != null && typeof poster.watched !== 'boolean') return null;
@@ -593,6 +591,7 @@
       placeholder,
       context: poster.context?.trim() || null,
       detail: poster.detail?.trim() || null,
+      artworkLabel: poster.artworkLabel?.trim().slice(0, 80) || null,
       progressPercent: poster.progressPercent ?? null,
       state: poster.state,
       watched: poster.watched === true,
@@ -621,8 +620,8 @@
     const placeholderLines = poster.placeholder.lines
       .map((line) => `<span class="k-poster__fallback-line">${escapeHtml(line)}</span>`)
       .join('');
-    const placeholderFooter = poster.placeholder.footer
-      ? `<span class="k-poster__fallback-footer">${escapeHtml(poster.placeholder.footer)}</span>`
+    const artworkLabel = poster.artworkLabel
+      ? `<span class="k-poster__artwork-label">${escapeHtml(poster.artworkLabel)}</span>`
       : '';
     const mosaic = poster.mosaicUrls.length
       ? `<span class="k-poster-mosaic" aria-hidden="true">${poster.mosaicUrls
@@ -631,7 +630,7 @@
       : '';
     const artwork = poster.posterUrl
       ? `<img class="k-poster__image" src="${escapeHtml(poster.posterUrl)}" alt="" loading="lazy" decoding="async">`
-      : mosaic || `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}${placeholderFooter}</span>`;
+      : mosaic || `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}</span>`;
     const status = posterStatusMarkup(poster);
     const context = poster.context ? `<span class="k-poster__context">${escapeHtml(poster.context)}</span>` : '';
     const detail = poster.detail ? `<span class="k-poster__detail"><span class="k-poster__detail-text">${escapeHtml(poster.detail)}</span></span>` : '';
@@ -641,9 +640,10 @@
       : '';
     const artworkShapeClass = ` k-poster--${escapeHtml(poster.artworkShape)}`;
     const actionClass = actionView ? ` k-poster--has-action k-poster--action-${poster.action}` : '';
-    const accessibleLabel = actionView ? `${actionView.label} ${poster.title}` : poster.title;
+    const posterLabel = poster.artworkLabel ? `${poster.title} — ${poster.artworkLabel}` : poster.title;
+    const accessibleLabel = actionView ? `${actionView.label} ${posterLabel}` : posterLabel;
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}${artworkShapeClass}${actionClass}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
-      <span class="k-poster__art">${artwork}${progress}${status}${action}</span>
+      <span class="k-poster__art">${artwork}${artworkLabel}${progress}${status}${action}</span>
       <span class="k-poster__meta">${context}<span class="k-poster__title">${escapeHtml(poster.title)}</span>${detail}</span>
     </a>`;
   };
@@ -1946,7 +1946,8 @@
       href: `/item/${row.itemId}`,
       posterUrl: row.posterUrl ?? null,
       artworkShape: row.kind === 'episode' ? 'landscape' : 'portrait',
-      placeholder: {lines: [row.title], footer: row.kind},
+      artworkLabel: row.kind,
+      placeholder: {lines: [row.title]},
       detail: [row.year, row.kind].filter(Boolean).join(' · ') || null,
       state: row.available ? (row.posterUrl ? 'normal' : 'missing_artwork') : 'unavailable',
       available: row.available
@@ -2790,7 +2791,7 @@
       const playbackControls = this.renderPlaybackDefaults(item);
       const tabs = this.editorTabs(Boolean(playbackControls));
       this.activeTab = this.availableTab(this.activeTab, tabs);
-      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><div class="k-item-editor__heading"><strong title="${escapeHtml(item.title || `Item ${item.id || ''}`)}">Edit ${escapeHtml(item.title || `Item ${item.id || ''}`)}</strong><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span></div><button type="button" class="k-button" data-item-editor-close>Close</button></div>${this.renderTabNavigation(tabs)}<div class="k-item-editor__tab-panels">${this.renderTabPanel('details', this.renderDetailsTab(kind, item), 'Details')}${this.renderTabPanel('match', this.renderMatchTab(kind, locks, this.currentMetadataBinding, item.title), 'Match')}${this.renderTabPanel('organise', this.renderOrganiseTab(kind, item, collectionControls), 'Organise')}${this.renderTabPanel('artwork', this.renderArtworkTab(artworkRows, kind, this.currentMetadataBinding), 'Artwork')}${playbackControls ? this.renderTabPanel('playback', playbackControls, 'Playback') : ''}${this.renderTabPanel('history', this.renderHistoryTab(auditRows), 'History')}</div><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save local edits</button></div></form>`;
+      content.innerHTML = `<form class="k-item-editor__form" data-item-editor-form><div class="k-picker__header"><div class="k-item-editor__heading"><strong title="${escapeHtml(item.title || `Item ${item.id || ''}`)}">Edit ${escapeHtml(item.title || `Item ${item.id || ''}`)}</strong><span>${escapeHtml(ITEM_EDITOR_KIND_LABELS[kind])}</span></div><button type="button" class="k-button" data-item-editor-close>Close</button></div>${this.renderTabNavigation(tabs)}<div class="k-item-editor__tab-panels">${this.renderTabPanel('details', this.renderDetailsTab(kind, item), 'Details')}${this.renderTabPanel('match', this.renderMatchTab(kind, locks, this.currentMetadataBinding, item.title), 'Match')}${this.renderTabPanel('organise', this.renderOrganiseTab(kind, item, collectionControls), 'Organise')}${this.renderTabPanel('artwork', this.renderArtworkTab(artworkRows, kind, this.currentMetadataBinding, item.show_artwork_label !== false), 'Artwork')}${playbackControls ? this.renderTabPanel('playback', playbackControls, 'Playback') : ''}${this.renderTabPanel('history', this.renderHistoryTab(auditRows), 'History')}</div><div class="k-picker__status" data-item-editor-status aria-live="polite"></div><div class="k-action-row"><button type="submit" class="k-button k-button--primary">Save local edits</button></div></form>`;
       this.status = content.querySelector('[data-item-editor-status]');
       content.querySelector('[data-item-editor-close]')?.addEventListener('click', () => this.requestClose());
       const form = content.querySelector('[data-item-editor-form]');
@@ -3023,14 +3024,15 @@
       return `<section class="k-item-editor__section"><div><h3 class="k-item-editor__section-heading">Library organisation</h3><p class="k-item-editor__muted">Set the item type and its place in the library hierarchy.</p></div><div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" name="kind" aria-label="Kind" data-item-editor-kind>${ITEM_EDITOR_KINDS.map((kindOption) => `<option value="${kindOption}"${kindOption === kind ? ' selected' : ''}>${ITEM_EDITOR_KIND_LABELS[kindOption]}</option>`).join('')}</select></label><span data-item-editor-hierarchy-fields>${this.renderHierarchyFields(kind, item)}</span></div></section>${collectionControls}`;
     }
 
-    renderArtworkTab(artworkRows, kind, binding) {
+    renderArtworkTab(artworkRows, kind, binding, showArtworkLabel = true) {
       const canFetchArtwork = (ITEM_EDITOR_MATCHABLE_KINDS.has(kind) && binding)
         || kind === 'season'
         || kind === 'episode';
       const fetchControl = canFetchArtwork
         ? `<div class="k-action-row"><button type="button" class="k-button" data-item-artwork-fetch>Load artwork choices</button></div><div class="k-picker__status" data-item-artwork-status aria-live="polite"></div>`
         : '';
-      return `<section class="k-item-editor__section">${fetchControl}<div class="k-item-editor__artwork-grid" data-item-editor-artwork-grid>${artworkRows}</div></section>`;
+      const labelControl = `<div><h3 class="k-item-editor__section-heading">Artwork label</h3><p class="k-item-editor__muted">Show edition and episode labels, such as Remastered or S01 E03, over artwork.</p></div><label class="k-check"><input type="checkbox" name="showArtworkLabel"${showArtworkLabel ? ' checked' : ''}> Show label on artwork</label>`;
+      return `<section class="k-item-editor__section">${labelControl}${fetchControl}<div class="k-item-editor__artwork-grid" data-item-editor-artwork-grid>${artworkRows}</div></section>`;
     }
 
     bindArtworkFetchControl(content) {
@@ -3464,7 +3466,8 @@
         releaseYear: toNullableNumber('releaseYear'),
         tags: String(values.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean),
         lockedMetadataFields,
-        kind: String(values.get('kind') || '')
+        kind: String(values.get('kind') || ''),
+        showArtworkLabel: values.has('showArtworkLabel')
       };
       const kind = itemEditorKind(payload.kind);
       const current = this.currentItem || {};

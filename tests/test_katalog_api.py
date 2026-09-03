@@ -313,6 +313,7 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
     first_payload = first.json()
     assert [item["title"] for item in first_payload["items"]] == ["Alpha", "Beta"]
     assert first_payload["items"][0]["context_label"] == "Extended"
+    assert first_payload["items"][0]["show_artwork_label"] is True
     assert first_payload["previous_cursor"] is None
     assert first_payload["next_cursor"]
 
@@ -505,6 +506,7 @@ async def test_library_summaries_include_safe_context_labels(api_fixture: ApiFix
 
     assert episode_item["series_title"] == "Context Show"
     assert episode_item["context_label"] == "S01 E03"
+    assert episode_item["show_artwork_label"] is True
     assert special_item["context_label"] == "S00 E02"
     assert extra_item["context_label"] == "S01 X02"
     assert str(api_fixture.settings.database_path.parent) not in json.dumps(response.json())
@@ -604,6 +606,7 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
             "tags": ["anime", "favourite"],
             "locked_metadata_fields": ["title", "overview"],
             "selected_artwork": [{"kind": "poster", "artwork_id": 1}],
+            "show_artwork_label": False,
         },
     )
 
@@ -612,11 +615,13 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     assert payload["item"]["title"] == "Edited Alpha"
     assert payload["item"]["tags"] == ["anime", "favourite", "genre", "movies"]
     assert payload["item"]["selected_artwork"] == [{"kind": "poster", "artwork_id": 1}]
+    assert payload["item"]["show_artwork_label"] is False
     assert set(payload["audit"]["changed_fields"]) >= {
         "title",
         "sort_title",
         "overview",
         "release_date",
+        "show_artwork_label",
         "tags",
     }
     assert (await api_fixture.client.get("/api/v1/library/tags")).json() == [
@@ -645,6 +650,13 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     )
     assert invalid_force_flag.status_code == 422
     assert invalid_force_flag.json()["code"] == "validation_error"
+
+    invalid_artwork_label = await api_fixture.client.patch(
+        "/api/v1/library/items/1",
+        json={"actor": "owner", "show_artwork_label": None},
+    )
+    assert invalid_artwork_label.status_code == 422
+    assert invalid_artwork_label.json()["code"] == "validation_error"
 
     invalid_hierarchy = await api_fixture.client.patch(
         "/api/v1/library/items/1",

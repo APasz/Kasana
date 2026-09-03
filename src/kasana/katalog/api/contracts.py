@@ -323,6 +323,7 @@ class LibraryItemSummary(APIModel):
     episode_end_number: int | None = Field(default=None, ge=0)
     series_title: str | None = Field(default=None, min_length=1, max_length=1_000)
     context_label: str | None = Field(default=None, min_length=1, max_length=80)
+    show_artwork_label: bool = True
     availability: Availability
     tags: tuple[str, ...] = Field(default=(), max_length=50)
     artwork: tuple[ArtworkSelection, ...] = Field(default=(), max_length=MAX_ARTWORK_PER_ITEM)
@@ -382,6 +383,7 @@ class LibraryItemUpdate(APIModel):
     NON_NULLABLE_PATCH_FIELDS: ClassVar[tuple[str, ...]] = (
         "title",
         "sort_title",
+        "show_artwork_label",
         "force_default_audio_stream",
         "force_default_subtitle_track",
         "force_default_subtitle_font_scale",
@@ -398,6 +400,7 @@ class LibraryItemUpdate(APIModel):
     episode_number: int | None = Field(default=None, ge=0)
     locked_metadata_fields: tuple[MetadataField, ...] | None = Field(default=None)
     selected_artwork: tuple[SelectedArtwork, ...] | None = Field(default=None)
+    show_artwork_label: bool | None = None
     kind: LibraryItemKind | None = None
     parent_id: int | None = Field(default=None, gt=0)
     default_audio_stream_index: int | None = Field(default=None, ge=0)
