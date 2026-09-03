@@ -600,7 +600,7 @@ async def item_metadata_match_action(item_id: int, request: Request) -> JSONResp
             item_id, provider=match.provider, provider_id=match.provider_id
         )
     except KatalogClientError as error:
-        return _katalog_data_error(error, "Metadata reassignment could not be applied.")
+        return _item_edit_error(error)
     except (ValidationError, ValueError) as error:
         return _invalid_action(str(error))
     return JSONResponse({"itemId": item_id, "action": "reassigned"})

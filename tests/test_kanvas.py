@@ -3634,6 +3634,43 @@ async def test_item_edit_endpoints_report_data_and_validation(
     assert reassigned == [(7, "tmdb", "315")]
 
 
+async def test_metadata_match_action_preserves_katalog_conflict_guidance(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class ConflictingCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            assert _user_id == 1
+
+        async def reassign_metadata_item(
+            self, item_id: int, *, provider: str, provider_id: str
+        ) -> None:
+            assert (item_id, provider, provider_id) == (7, "tmdb", "338970")
+            raise KatalogClientError(
+                KatalogClientErrorKind.CONFLICT,
+                "Provider metadata conflicts with library item 7112. "
+                "Lock the sort title or resolve the duplicate before matching.",
+                status_code=409,
+                request_id="katalog-metadata-conflict",
+            )
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {"provider": "tmdb", "providerId": "338970", "confirmed": True}
+
+    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictingCatalogue)
+
+    response = await item_metadata_match_action(7, cast(Request, JsonRequest()))
+
+    assert response.status_code == 409
+    assert json.loads(bytes(response.body)) == {
+        "error": (
+            "Provider metadata conflicts with library item 7112. "
+            "Lock the sort title or resolve the duplicate before matching."
+        ),
+        "requestId": "katalog-metadata-conflict",
+    }
+
+
 def test_item_edit_error_preserves_safe_katalog_validation_detail() -> None:
     response = dashboard._item_edit_error(  # pyright: ignore[reportPrivateUsage]
         KatalogClientError(
