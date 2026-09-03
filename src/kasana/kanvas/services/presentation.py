@@ -79,12 +79,18 @@ def collection_tile(detail: CollectionDetail) -> CollectionTileView:
 def collection_member(
     item: LibraryItemSummary,
     relationship: CollectionRelationship | None,
-    progress: dict[int, PlaybackStateResponse],
+    playback: PlaybackStateResponse | None = None,
+    *,
+    partially_watched: bool = False,
 ) -> CollectionMemberView:
     """Create one direct-member presentation record without traversing children."""
 
     return CollectionMemberView(
-        poster=poster_from_summary(item, playback=progress.get(item.id)),
+        poster=poster_from_summary(
+            item,
+            playback=playback,
+            partially_watched=partially_watched,
+        ),
         kind=item.kind.value,
         relationship=relationship.value if relationship is not None else None,
     )
@@ -158,7 +164,12 @@ def item_picker_view(item: LibraryItemSummary, *, already_member: bool) -> ItemP
     )
 
 
-def watch_order_row(entry: WatchOrderEntryDetail) -> WatchOrderRowView:
+def watch_order_row(
+    entry: WatchOrderEntryDetail,
+    *,
+    playback: PlaybackStateResponse | None = None,
+    partially_watched: bool = False,
+) -> WatchOrderRowView:
     """Map a typed entry into the reusable watch-order poster contract."""
 
     item = entry.item
@@ -171,7 +182,11 @@ def watch_order_row(entry: WatchOrderEntryDetail) -> WatchOrderRowView:
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
         posterUrl=primary_artwork_url(item),
-        poster=poster_from_summary(item),
+        poster=poster_from_summary(
+            item,
+            playback=playback,
+            partially_watched=partially_watched,
+        ),
     )
 
 

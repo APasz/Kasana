@@ -88,6 +88,7 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionResponse,
     PlaybackSessionTrackSelection,
     PlaybackStateResponse,
+    PlaybackStateRevisionResponse,
     PlaybackStatesRequest,
     PlaybackStatesResponse,
     PlaybackSubtitleFontAttachment,
@@ -189,9 +190,10 @@ from kasana.katalog.services import (
     EPISODIC_ITEM_KINDS,
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
+    clear_playback_items,
+    mark_playback_items_watched,
     normalise_library_item_tags,
     record_playback_progress,
-    synchronise_parent_completion,
     validate_library_item_parent,
 )
 from kasana.katalog.user_configuration import (
@@ -2256,30 +2258,28 @@ class KatalogQueryService:
 
         return self._database.run_transaction(load)
 
+    def playback_state_revision(self, user_id: int) -> PlaybackStateRevisionResponse:
+        """Return the viewer-specific revision used to invalidate saved poster grids."""
+
+        def load(session: Session) -> PlaybackStateRevisionResponse:
+            user = self._configured_user(session, user_id)
+            return PlaybackStateRevisionResponse(revision=user.playback_state_revision)
+
+        return self._database.run_transaction(load)
+
     def mark_watched(self, user_id: int, item_id: int) -> PlaybackStateResponse:
         def update(session: Session) -> PlaybackStateResponse:
             self._configured_user(session, user_id)
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
-            duration: float = (
-                session.scalar(
-                    select(func.max(MediaFile.duration_seconds)).where(
-                        MediaFile.library_item_id == item.id
-                    )
-                )
-                or 0.0
-            )
+            watched_items = _watched_state_items(session, item)
+            _require_watched_state_items(session, item, watched_items)
             try:
-                state: PlaybackState = record_playback_progress(
-                    session,
-                    user_id=user_id,
-                    library_item_id=item.id,
-                    position_seconds=duration,
-                    duration_seconds=duration,
-                    completed=True,
-                    increment_play_count=True,
-                )
+                mark_playback_items_watched(session, user_id=user_id, items=watched_items)
             except ValueError as error:
                 raise CatalogueValidationError(str(error)) from error
+            state = _playback_state(session, user_id, item.id)
+            if state is None:
+                raise RuntimeError("A watched item must have a playback state.")
             return _playback(state)
 
         return self._database.run_transaction(update)
@@ -2288,15 +2288,13 @@ class KatalogQueryService:
         def clear(session: Session) -> None:
             self._configured_user(session, user_id)
             item: Zaisan = _require(session, Zaisan, item_id, "Library item")
-            state: PlaybackState | None = session.scalar(
-                select(PlaybackState).where(
-                    PlaybackState.user_id == user_id,
-                    PlaybackState.library_item_id == item_id,
-                )
+            watched_items = _watched_state_items(session, item)
+            clear_playback_items(
+                session,
+                user_id=user_id,
+                items=watched_items,
+                container=item,
             )
-            if state is not None:
-                session.delete(state)
-            synchronise_parent_completion(session, user_id=user_id, item=item)
 
         self._database.run_transaction(clear)
 
@@ -3298,6 +3296,71 @@ def _playback_state(session: Session, user_id: int, item_id: int) -> PlaybackSta
             PlaybackState.library_item_id == item_id,
         )
     )
+
+
+def _watched_state_items(session: Session, item: Zaisan) -> tuple[Zaisan, ...]:
+    """Return the playable records represented by one watched-state action."""
+
+    if item.item_kind in PLAYABLE_ITEM_KINDS:
+        return (item,)
+    if item.item_kind is ZaisanKind.SEASON:
+        return tuple(
+            session.scalars(
+                select(Zaisan)
+                .where(
+                    Zaisan.parent_id == item.id,
+                    Zaisan.item_kind.in_(EPISODIC_ITEM_KINDS),
+                )
+                .order_by(Zaisan.episode_number, Zaisan.sort_title, Zaisan.id)
+            )
+        )
+    if item.item_kind is ZaisanKind.SERIES:
+        return _episodic_items_by_series(session, (item.id,))[item.id]
+    raise RuntimeError(f"Unsupported watched-state item kind: {item.item_kind}")
+
+
+def _require_watched_state_items(
+    session: Session, item: Zaisan, watched_items: tuple[Zaisan, ...]
+) -> None:
+    """Reject container actions whose completion cannot be represented by a roll-up state."""
+
+    if item.item_kind in PLAYABLE_ITEM_KINDS:
+        return
+    if item.item_kind is ZaisanKind.SEASON:
+        if watched_items:
+            return
+        raise CatalogueValidationError(
+            "A season needs at least one episode or special to be marked watched."
+        )
+    if item.item_kind is ZaisanKind.SERIES:
+        season_ids = frozenset(
+            session.scalars(
+                select(Zaisan.id).where(
+                    Zaisan.parent_id == item.id,
+                    Zaisan.item_kind == ZaisanKind.SEASON,
+                )
+            )
+        )
+        watched_season_ids = frozenset(
+            watched_item.parent_id
+            for watched_item in watched_items
+            if watched_item.parent_id in season_ids
+        )
+        if season_ids:
+            if watched_season_ids == season_ids:
+                return
+            raise CatalogueValidationError(
+                "Every series season needs at least one episode or special to be marked watched."
+            )
+        if any(
+            watched_item.item_kind is ZaisanKind.SPECIAL and watched_item.parent_id == item.id
+            for watched_item in watched_items
+        ):
+            return
+        raise CatalogueValidationError(
+            "A series needs at least one episode or special to be marked watched."
+        )
+    raise RuntimeError(f"Unsupported watched-state item kind: {item.item_kind}")
 
 
 def _in_progress_series(
@@ -4645,10 +4708,12 @@ def _external_ids_for_item(
     for identifier in item.local_external_ids:
         add(identifier)
     bindings = session.scalars(
-        select(MetadataBinding).where(
+        select(MetadataBinding)
+        .where(
             MetadataBinding.library_item_id == item.id,
             MetadataBinding.status == MetadataMatchStatus.MATCHED,
-        ).order_by(MetadataBinding.provider, MetadataBinding.id)
+        )
+        .order_by(MetadataBinding.provider, MetadataBinding.id)
     )
     for binding in bindings:
         add({"namespace": binding.provider, "value": binding.provider_id})

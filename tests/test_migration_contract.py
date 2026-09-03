@@ -208,7 +208,7 @@ def test_remake_migration_allows_distinct_years_and_refuses_an_unsafe_downgrade(
         command.downgrade(config, "20260829_0025")
 
 
-def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_path: Path) -> None:
+def test_completion_rollup_migration_accounts_for_direct_series_specials(tmp_path: Path) -> None:
     database_path = tmp_path / "catalogue.sqlite3"
     repository_root = Path(__file__).parents[1]
     config = Config(str(repository_root / "alembic.ini"))
@@ -258,7 +258,27 @@ def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_pat
                 parent_id=season_id,
                 title="Interview",
             )
-            for episode_id in episodes:
+            direct_special_id = _insert_historical_item(
+                session,
+                library_root_id=root_id,
+                item_kind=ZaisanKind.SPECIAL,
+                parent_id=series_id,
+                title="Unwatched special",
+            )
+            special_only_series_id = _insert_historical_item(
+                session,
+                library_root_id=root_id,
+                item_kind=ZaisanKind.SERIES,
+                title="Specials only",
+            )
+            special_only_id = _insert_historical_item(
+                session,
+                library_root_id=root_id,
+                item_kind=ZaisanKind.SPECIAL,
+                parent_id=special_only_series_id,
+                title="Watched special",
+            )
+            for episode_id in (*episodes, special_only_id):
                 session.execute(
                     text(
                         """
@@ -279,7 +299,14 @@ def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_pat
                         "last_played_at": datetime.now(UTC).isoformat(),
                     },
                 )
-            identifiers = (user_id, season_id, series_id, extra_id)
+            identifiers = (
+                user_id,
+                season_id,
+                series_id,
+                direct_special_id,
+                special_only_series_id,
+                extra_id,
+            )
     finally:
         database.close()
 
@@ -288,7 +315,14 @@ def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_pat
     database = KatalogDatabase(database_path)
     try:
         with database.transaction() as session:
-            user_id, season_id, series_id, extra_id = identifiers
+            (
+                user_id,
+                season_id,
+                series_id,
+                direct_special_id,
+                special_only_series_id,
+                extra_id,
+            ) = identifiers
             completed_item_ids = {
                 state.library_item_id
                 for state in session.query(PlaybackState).filter_by(user_id=user_id, completed=True)
@@ -296,5 +330,7 @@ def test_completion_rollup_migration_backfills_existing_watched_episodes(tmp_pat
     finally:
         database.close()
 
-    assert {season_id, series_id}.issubset(completed_item_ids)
+    assert {season_id, special_only_series_id}.issubset(completed_item_ids)
+    assert series_id not in completed_item_ids
+    assert direct_special_id not in completed_item_ids
     assert extra_id not in completed_item_ids

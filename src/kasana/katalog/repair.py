@@ -49,6 +49,7 @@ from kasana.katalog.parsing import (
     parse_media_path,
 )
 from kasana.katalog.scanning.audit import structural_findings
+from kasana.katalog.services import bump_playback_state_revision
 from kasana.shared.metadata import ExternalIdentifier
 
 
@@ -1628,14 +1629,14 @@ def _merged_local_external_ids(source: Zaisan, target: Zaisan) -> list[JSONObjec
                 continue
             known.add(key)
             if len(identifiers) < MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS:
-                identifiers.append(
-                    {"namespace": identifier.namespace, "value": identifier.value}
-                )
+                identifiers.append({"namespace": identifier.namespace, "value": identifier.value})
     return identifiers
 
 
 def _move_playback_states(session: Session, source: Zaisan, target: Zaisan) -> None:
+    affected_user_ids: set[int] = set()
     for state in tuple(source.playback_states):
+        affected_user_ids.add(state.user_id)
         existing = session.scalar(
             select(PlaybackState).where(
                 PlaybackState.user_id == state.user_id,
@@ -1652,6 +1653,8 @@ def _move_playback_states(session: Session, source: Zaisan, target: Zaisan) -> N
             existing.duration_seconds = state.duration_seconds
             existing.last_played_at = state.last_played_at
         session.delete(state)
+    for user_id in affected_user_ids:
+        bump_playback_state_revision(session, user_id=user_id)
 
 
 def _move_collection_memberships(session: Session, source: Zaisan, target: Zaisan) -> None:

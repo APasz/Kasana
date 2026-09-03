@@ -59,11 +59,13 @@ from kasana.katalog.services import (
     add_collection_membership,
     append_watch_order_entry,
     attach_media_file,
+    clear_playback_items,
     create_collection,
     create_library_item,
     create_library_root,
     create_user,
     create_watch_order,
+    mark_playback_items_watched,
     record_playback_progress,
 )
 from kasana.katalog.settings import KatalogSettings
@@ -318,7 +320,7 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
     database.close()
 
 
-async def test_completed_episodes_mark_their_season_and_series_watched(
+async def test_completed_episodes_require_direct_specials_before_marking_the_series_watched(
     playback_fixture: PlaybackFixture,
 ) -> None:
     """Extras do not prevent episode and season completion from rolling up."""
@@ -377,7 +379,316 @@ async def test_completed_episodes_mark_their_season_and_series_watched(
         f"/api/v1/users/{ids['user']}/items/{ids['series']}/progress"
     )
     assert completed_series_state.status_code == 200
+    assert completed_series_state.json() is None
+    partial_states = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/playback-states",
+        json={"item_ids": [ids["series"]]},
+    )
+    assert partial_states.status_code == 200
+    assert partial_states.json()["partially_watched_item_ids"] == [ids["series"]]
+
+    marked_special = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['special']}/watched"
+    )
+    assert marked_special.status_code == 200
+    completed_series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/progress"
+    )
+    assert completed_series_state.status_code == 200
     assert completed_series_state.json()["completed"] is True
+
+
+async def test_marking_season_and_series_watched_updates_their_episodes(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    episode_ids = tuple(ids[key] for key in ("episode_one", "episode_two", "episode_three"))
+
+    marked_season = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['season']}/watched"
+    )
+
+    assert marked_season.status_code == 200
+    assert marked_season.json()["item_id"] == ids["season"]
+    assert marked_season.json()["completed"] is True
+    for episode_id in episode_ids:
+        state = await playback_fixture.client.get(
+            f"/api/v1/users/{ids['user']}/items/{episode_id}/progress"
+        )
+        assert state.status_code == 200
+        assert state.json()["completed"] is True
+
+    cleared_season = await playback_fixture.client.delete(
+        f"/api/v1/users/{ids['user']}/items/{ids['season']}/watched"
+    )
+
+    assert cleared_season.status_code == 204
+    for episode_id in episode_ids:
+        state = await playback_fixture.client.get(
+            f"/api/v1/users/{ids['user']}/items/{episode_id}/progress"
+        )
+        assert state.status_code == 200
+        assert state.json() is None
+    season_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['season']}/progress"
+    )
+    assert season_state.status_code == 200
+    assert season_state.json() is None
+
+    with playback_fixture.database.transaction() as session:
+        first_season = session.get(Zaisan, ids["season"])
+        assert first_season is not None
+        second_season = create_library_item(
+            session,
+            library_root_id=first_season.library_root_id,
+            item_kind=ZaisanKind.SEASON,
+            parent_id=ids["series"],
+            season_number=2,
+            title="Season Two",
+        )
+        second_season_episode = create_library_item(
+            session,
+            library_root_id=first_season.library_root_id,
+            item_kind=ZaisanKind.EPISODE,
+            parent_id=second_season.id,
+            season_number=2,
+            episode_number=1,
+            title="Season Two Premiere",
+        )
+
+    marked_series = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/watched"
+    )
+
+    assert marked_series.status_code == 200
+    assert marked_series.json()["item_id"] == ids["series"]
+    assert marked_series.json()["completed"] is True
+    series_item_ids = (*episode_ids, ids["special"], second_season_episode.id)
+    for episode_id in series_item_ids:
+        state = await playback_fixture.client.get(
+            f"/api/v1/users/{ids['user']}/items/{episode_id}/progress"
+        )
+        assert state.status_code == 200
+        assert state.json()["completed"] is True
+
+    cleared_series = await playback_fixture.client.delete(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/watched"
+    )
+
+    assert cleared_series.status_code == 204
+    for episode_id in series_item_ids:
+        state = await playback_fixture.client.get(
+            f"/api/v1/users/{ids['user']}/items/{episode_id}/progress"
+        )
+        assert state.status_code == 200
+        assert state.json() is None
+    series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{ids['series']}/progress"
+    )
+    assert series_state.status_code == 200
+    assert series_state.json() is None
+
+
+async def test_special_only_series_supports_direct_and_container_watched_actions(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+    with playback_fixture.database.transaction() as session:
+        root = session.get(Zaisan, ids["series"])
+        assert root is not None
+        special_only_series = create_library_item(
+            session,
+            library_root_id=root.library_root_id,
+            item_kind=ZaisanKind.SERIES,
+            title="Specials Only",
+        )
+        special = create_library_item(
+            session,
+            library_root_id=root.library_root_id,
+            item_kind=ZaisanKind.SPECIAL,
+            parent_id=special_only_series.id,
+            title="A Special",
+        )
+
+    marked_series = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{special_only_series.id}/watched"
+    )
+    assert marked_series.status_code == 200
+    assert marked_series.json()["item_id"] == special_only_series.id
+    assert marked_series.json()["completed"] is True
+
+    cleared_series = await playback_fixture.client.delete(
+        f"/api/v1/users/{ids['user']}/items/{special_only_series.id}/watched"
+    )
+    assert cleared_series.status_code == 204
+    cleared_special = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{special.id}/progress"
+    )
+    assert cleared_special.status_code == 200
+    assert cleared_special.json() is None
+
+    marked_special = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{special.id}/watched"
+    )
+    assert marked_special.status_code == 200
+    series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{special_only_series.id}/progress"
+    )
+    assert series_state.status_code == 200
+    assert series_state.json()["completed"] is True
+
+    cleared_special = await playback_fixture.client.delete(
+        f"/api/v1/users/{ids['user']}/items/{special.id}/watched"
+    )
+    assert cleared_special.status_code == 204
+    series_state = await playback_fixture.client.get(
+        f"/api/v1/users/{ids['user']}/items/{special_only_series.id}/progress"
+    )
+    assert series_state.status_code == 200
+    assert series_state.json() is None
+
+
+async def test_playback_state_revision_changes_after_viewer_state_mutations(
+    playback_fixture: PlaybackFixture,
+) -> None:
+    ids = playback_fixture.ids
+
+    async def revision() -> int:
+        response = await playback_fixture.client.get(
+            f"/api/v1/users/{ids['user']}/playback-state-revision"
+        )
+        assert response.status_code == 200
+        return response.json()["revision"]
+
+    initial_revision = await revision()
+    updated = await playback_fixture.client.put(
+        f"/api/v1/users/{ids['user']}/items/{ids['movie']}/progress",
+        json={"position_seconds": 12.0, "duration_seconds": 120.0, "completed": False},
+    )
+    assert updated.status_code == 200
+    progressed_revision = await revision()
+    assert progressed_revision > initial_revision
+
+    marked = await playback_fixture.client.post(
+        f"/api/v1/users/{ids['user']}/items/{ids['movie']}/watched"
+    )
+    assert marked.status_code == 200
+    watched_revision = await revision()
+    assert watched_revision > progressed_revision
+
+    cleared = await playback_fixture.client.delete(
+        f"/api/v1/users/{ids['user']}/items/{ids['movie']}/watched"
+    )
+    assert cleared.status_code == 204
+    assert await revision() > watched_revision
+
+
+def test_bulk_watched_updates_roll_up_each_container_once(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    with database.transaction() as session:
+        root = create_library_root(
+            session, path=library_path, expected_media_kind=ZaisanKind.SERIES
+        )
+        series = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="Large Series",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SEASON,
+            parent_id=series.id,
+            season_number=1,
+            title="Season 1",
+        )
+        for episode_number in range(1, 101):
+            create_library_item(
+                session,
+                library_root_id=root.id,
+                item_kind=ZaisanKind.EPISODE,
+                parent_id=season.id,
+                season_number=1,
+                episode_number=episode_number,
+                title=f"Episode {episode_number}",
+            )
+        user = create_user(session, username="bulk-watched")
+        season_id = season.id
+        series_id = series.id
+        user_id = user.id
+
+    statements: list[str] = []
+
+    def count_statement(*_arguments: object) -> None:
+        statements.append("statement")
+
+    event.listen(database.engine, "before_cursor_execute", count_statement)
+    try:
+        with database.transaction() as session:
+            episodes = tuple(
+                session.scalars(
+                    select(Zaisan)
+                    .where(Zaisan.parent_id == season_id)
+                    .order_by(Zaisan.episode_number)
+                )
+            )
+            mark_playback_items_watched(session, user_id=user_id, items=episodes)
+    finally:
+        event.remove(database.engine, "before_cursor_execute", count_statement)
+
+    with database.transaction() as session:
+        season_state = session.scalar(
+            select(PlaybackState).where(
+                PlaybackState.user_id == user_id,
+                PlaybackState.library_item_id == season_id,
+            )
+        )
+        series_state = session.scalar(
+            select(PlaybackState).where(
+                PlaybackState.user_id == user_id,
+                PlaybackState.library_item_id == series_id,
+            )
+        )
+    assert season_state is not None and season_state.completed is True
+    assert series_state is not None and series_state.completed is True
+    assert len(statements) <= 125
+
+    cleared_statements: list[str] = []
+
+    def count_clear_statement(*_arguments: object) -> None:
+        cleared_statements.append("statement")
+
+    event.listen(database.engine, "before_cursor_execute", count_clear_statement)
+    try:
+        with database.transaction() as session:
+            season = session.get(Zaisan, season_id)
+            assert season is not None
+            episodes = tuple(
+                session.scalars(
+                    select(Zaisan)
+                    .where(Zaisan.parent_id == season_id)
+                    .order_by(Zaisan.episode_number)
+                )
+            )
+            clear_playback_items(session, user_id=user_id, items=episodes, container=season)
+    finally:
+        event.remove(database.engine, "before_cursor_execute", count_clear_statement)
+
+    with database.transaction() as session:
+        remaining_state_ids = set(
+            session.scalars(
+                select(PlaybackState.library_item_id).where(
+                    PlaybackState.user_id == user_id,
+                    PlaybackState.library_item_id.in_((season_id, series_id)),
+                )
+            )
+        )
+    assert remaining_state_ids == set()
+    assert len(cleared_statements) <= 125
 
 
 async def test_on_deck_includes_series_with_watched_and_unwatched_episodes(

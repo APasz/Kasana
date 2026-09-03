@@ -76,6 +76,7 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
+    PlaybackStateRevisionResponse,
     PlaybackStatesRequest,
     PlaybackStatesResponse,
     ProgressUpdate,
@@ -1365,6 +1366,18 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PlaybackStateResponse | None:
         return await run_blocking(runtime.queries.playback_state, user_id, item_id)
+
+    @app.get(
+        "/api/v1/users/{user_id}/playback-state-revision",
+        response_model=PlaybackStateRevisionResponse,
+        operation_id="v1_get_playback_state_revision",
+        responses=_ERROR_RESPONSES,
+    )
+    async def playback_state_revision(
+        user_id: Annotated[int, Path(gt=0)],
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PlaybackStateRevisionResponse:
+        return await run_blocking(runtime.queries.playback_state_revision, user_id)
 
     @app.post(
         "/api/v1/users/{user_id}/playback-states",

@@ -157,9 +157,7 @@ def _raise_if_cancelled(cancellation_requested: Callable[[], bool] | None) -> No
 
 def _is_local_metadata_sidecar(path: Path) -> bool:
     name = path.name.casefold()
-    return name == _LOCAL_METADATA_SUFFIX.removeprefix(".") or name.endswith(
-        _LOCAL_METADATA_SUFFIX
-    )
+    return name == _LOCAL_METADATA_SUFFIX.removeprefix(".") or name.endswith(_LOCAL_METADATA_SUFFIX)
 
 
 class ScanCancelledError(RuntimeError):

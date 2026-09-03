@@ -272,16 +272,15 @@ def test_scan_applies_local_metadata_sidecars_and_refreshes_them_without_reprobi
     assert media_file.local_metadata_path == str(sidecar)
     assert len(fake_client.calls) == 1
 
-    sidecar.write_text(
-        json.dumps({"title": "Axanar: Revised", "year": 2015}), encoding="utf-8"
-    )
+    sidecar.write_text(json.dumps({"title": "Axanar: Revised", "year": 2015}), encoding="utf-8")
     refreshed = scanner.scan()
 
     assert refreshed.totals.unchanged == 1
     assert len(fake_client.calls) == 1
-    assert database.run_transaction(
-        lambda session: session.scalar(select(Zaisan.title))
-    ) == "Axanar: Revised"
+    assert (
+        database.run_transaction(lambda session: session.scalar(select(Zaisan.title)))
+        == "Axanar: Revised"
+    )
 
 
 def test_scan_reports_invalid_local_metadata_sidecars_without_skipping_the_video(
@@ -330,8 +329,7 @@ def test_scan_supports_each_local_metadata_sidecar_name(
 
     assert result.findings == ()
     assert (
-        database.run_transaction(lambda session: session.scalar(select(Zaisan.title)))
-        == "Axanar"
+        database.run_transaction(lambda session: session.scalar(select(Zaisan.title))) == "Axanar"
     )
 
 
@@ -382,9 +380,7 @@ def test_scan_audits_a_local_metadata_identity_conflict_without_aborting(
     sidecar = title_directory / "video.kasana.json"
     title_directory.mkdir(parents=True)
     film.write_bytes(b"feature")
-    sidecar.write_text(
-        json.dumps({"title": "Local Feature", "year": 2015}), encoding="utf-8"
-    )
+    sidecar.write_text(json.dumps({"title": "Local Feature", "year": 2015}), encoding="utf-8")
     _register_root(database, movies, ZaisanKind.MOVIE)
     scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
 
@@ -402,9 +398,7 @@ def test_scan_audits_a_local_metadata_identity_conflict_without_aborting(
         )
 
     database.run_transaction(add_existing_item)
-    sidecar.write_text(
-        json.dumps({"title": "Existing Feature", "year": 2015}), encoding="utf-8"
-    )
+    sidecar.write_text(json.dumps({"title": "Existing Feature", "year": 2015}), encoding="utf-8")
 
     result = scanner.scan()
 

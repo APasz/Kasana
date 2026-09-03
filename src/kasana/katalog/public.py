@@ -88,6 +88,7 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
+    PlaybackStateRevisionResponse,
     PlaybackStatesRequest,
     PlaybackStatesResponse,
     PlaybackSubtitleFontAttachment,
@@ -134,10 +135,14 @@ from kasana.katalog.client import (
     KatalogClientErrorKind,
     MediaTransfer,
 )
-from kasana.katalog.limits import MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS
+from kasana.katalog.limits import (
+    MAX_PLAYBACK_STATE_BATCH_SIZE,
+    MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+)
 from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
 __all__ = [
+    "MAX_PLAYBACK_STATE_BATCH_SIZE",
     "MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS",
     "NUMERAL_TOKEN_PATTERN",
     "APIError",
@@ -229,6 +234,7 @@ __all__ = [
     "PlaybackSessionTrackSelection",
     "PlaybackSessionTransitionRequest",
     "PlaybackStateResponse",
+    "PlaybackStateRevisionResponse",
     "PlaybackStatesRequest",
     "PlaybackStatesResponse",
     "PlaybackSubtitleFontAttachment",

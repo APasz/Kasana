@@ -806,6 +806,12 @@ class PlaybackStateResponse(APIModel):
     last_played_at: datetime | None
 
 
+class PlaybackStateRevisionResponse(APIModel):
+    """Monotonic viewer state revision for cache invalidation."""
+
+    revision: int = Field(ge=1)
+
+
 class PlaybackStatesRequest(APIModel):
     """One bounded set of known item IDs whose state is needed by a grid."""
 

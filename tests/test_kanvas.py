@@ -630,13 +630,16 @@ def test_poster_artwork_label_can_be_hidden_per_item() -> None:
     )
 
     assert poster.artwork_label is None
-    assert placeholder_art_for_summary(
-        _summary_with_title(
-            "Bad Boys",
-            context_label="Remastered",
-            show_artwork_label=False,
-        )
-    ).footer is None
+    assert (
+        placeholder_art_for_summary(
+            _summary_with_title(
+                "Bad Boys",
+                context_label="Remastered",
+                show_artwork_label=False,
+            )
+        ).footer
+        is None
+    )
 
 
 async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: MonkeyPatch) -> None:
@@ -1073,11 +1076,26 @@ def test_poster_statuses_use_an_accessible_completion_triangle_and_unavailable_b
     assert ".k-poster__status" in stylesheet
     assert ".k-poster__completion" in stylesheet
     assert ".k-poster__completion--partial::after" in stylesheet
+    assert ".k-poster__completion--partial {" in stylesheet
     assert "top: 6px;" in stylesheet
     assert "right: 6px;" in stylesheet
     assert "bottom: 0;" in stylesheet
     assert "left: 0;" in stylesheet
     assert "clip-path: polygon(0 0, 0 100%, 100% 100%);" in stylesheet
+    assert "width: 141.421%;" in stylesheet
+    assert "transform: rotate(-45deg);" in stylesheet
+    assert "clip-path: none;" in stylesheet
+    assert "--k-poster-label-height: 1.35rem;" in stylesheet
+    assert "min-height: var(--k-poster-label-height);" in stylesheet
+    assert "text-align: center;" in stylesheet
+    assert ".k-poster__artwork-label { pointer-events: none; }" in stylesheet
+    assert (
+        ".k-poster__artwork-label-banner {\n    position: absolute;\n    z-index: 1;" in stylesheet
+    )
+    assert ".k-poster__completion {\n    position: absolute;\n    z-index: 2;" in stylesheet
+    assert ".k-poster__artwork-label-text {\n    position: relative;\n    z-index: 3;" in stylesheet
+    assert "width: var(--k-poster-label-height);" in stylesheet
+    assert "height: var(--k-poster-label-height);" in stylesheet
 
 
 def test_poster_context_and_actions_keep_artwork_uncluttered() -> None:
@@ -1601,6 +1619,63 @@ async def test_item_detail_marks_partially_watched_season_children(
 
     assert [child.watched for child in detail.children] == [False, False]
     assert [child.partially_watched for child in detail.children] == [True, False]
+
+
+async def test_library_and_collection_posters_show_partially_watched_series(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    series = _library_summary(item_id=8, title="Show", kind=LibraryItemKind.SERIES)
+    membership = CollectionMembership(id=1, collection_id=12, item=series)
+    state_requests: list[tuple[int, ...]] = []
+
+    class PartialWatchClient:
+        async def __aenter__(self) -> PartialWatchClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def list_library_items(self, **_arguments: object) -> LibraryItemPage:
+            return LibraryItemPage(items=(series,), next_cursor=None, limit=48)
+
+        async def get_collection(self, collection_id: int, *, user_id: int) -> CollectionDetail:
+            assert (collection_id, user_id) == (12, 1)
+            return CollectionDetail(
+                id=12,
+                name="Favourites",
+                item_count=1,
+                watch_order_count=0,
+                revision=1,
+                members=(membership,),
+            )
+
+        async def list_collection_members(
+            self, collection_id: int, *, limit: int
+        ) -> PaginatedResponse[CollectionMembership]:
+            assert (collection_id, limit) == (12, 100)
+            return PaginatedResponse(items=(membership,), next_cursor=None, limit=limit)
+
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert user_id == 1
+            state_requests.append(request.item_ids)
+            return SimpleNamespace(states=(), partially_watched_item_ids=(series.id,))
+
+    def client_factory(*_arguments: object, **_keywords: object) -> PartialWatchClient:
+        return PartialWatchClient()
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", client_factory)
+    service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
+
+    library_page = await service.library_page(
+        LibraryFilters(), kinds=(LibraryItemKind.SERIES,), cursor=None
+    )
+    collection = await service.collection_detail(12)
+
+    assert library_page.items[0].partially_watched is True
+    assert collection.series[0].poster.partially_watched is True
+    assert state_requests == [(series.id,), (series.id,)]
 
 
 async def test_item_detail_reads_completed_watched_state_directly(
@@ -2382,10 +2457,20 @@ async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode
             children = children_by_parent.get(item_id, ())
             return PaginatedResponse[LibraryItemSummary](items=children, limit=limit)
 
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert (user_id, request.item_ids) == (1, (40, 41, 42, 43, 44, 45, 46))
+            return SimpleNamespace(
+                states=(),
+                partially_watched_item_ids=(series.id, season.id),
+            )
+
     service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
     sources = await service._watch_order_sources(  # pyright: ignore[reportPrivateUsage]
         SourceClient(),  # pyright: ignore[reportArgumentType]
         4,
+        include_playback=True,
     )
 
     source_details = [
@@ -2406,6 +2491,10 @@ async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode
         (movie.id, 1, True, (movie.id,)),
     ]
     assert sources[0][0].poster.detail == "Series · 3 episodes"
+    assert {source.id for source, _item_ids in sources if source.poster.partially_watched} == {
+        series.id,
+        season.id,
+    }
 
 
 async def test_watch_order_source_addition_uses_one_contiguous_batch(
@@ -2528,11 +2617,20 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
             assert limit == 100
             yield WatchOrderEntryDetail(id=3, position=0, item=episode)
 
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert (user_id, request.item_ids) == (1, (episode.id,))
+            return SimpleNamespace(states=(), partially_watched_item_ids=())
+
     @asynccontextmanager
     async def client_context() -> AsyncGenerator[WorkspaceClient]:
         yield WorkspaceClient()
 
-    async def sources(_client: object, _collection_id: int) -> tuple[object, ...]:
+    async def sources(
+        _client: object, _collection_id: int, *, include_playback: bool = False
+    ) -> tuple[object, ...]:
+        assert include_playback is True
         return ((season_source, (43, 44)), (series_source, (43, 44)))
 
     service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
@@ -2603,6 +2701,13 @@ async def test_watch_order_service_mutation_wrappers_preserve_request_state(
             calls.append("remove")
             return SimpleNamespace(revision=11)
 
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert (user_id, request.item_ids) == (1, (episode.id,))
+            calls.append("states")
+            return SimpleNamespace(states=(), partially_watched_item_ids=())
+
     @asynccontextmanager
     async def client_context() -> AsyncGenerator[WatchOrderClient]:
         yield WatchOrderClient()
@@ -2628,7 +2733,7 @@ async def test_watch_order_service_mutation_wrappers_preserve_request_state(
     assert await service.add_watch_order_entry(9, revision=8, item_id=43, before_entry_id=3) == 9
     assert await service.move_watch_order_entry(9, revision=9, entry_id=3, after_entry_id=4) == 10
     assert await service.remove_watch_order_entry(9, revision=10, entry_id=3) == 11
-    assert calls == ["page", "create", "update", "delete", "add", "move", "remove"]
+    assert calls == ["page", "states", "create", "update", "delete", "add", "move", "remove"]
 
 
 async def test_watch_order_editor_loads_collection_identity(monkeypatch: MonkeyPatch) -> None:
@@ -3055,6 +3160,44 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         "update-root",
         "delete-root",
     ]
+
+
+async def test_library_grid_revision_includes_the_viewer_playback_revision(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = LibraryRootSummary(
+        id=4,
+        path="media",
+        expected_kind=LibraryRootKind.MOVIE,
+        enabled=True,
+        available=True,
+        item_count=0,
+        media_file_count=0,
+        last_scan_completed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+    )
+
+    class RevisionClient:
+        async def __aenter__(self) -> RevisionClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
+            return (root,)
+
+        async def playback_state_revision(self, user_id: int) -> SimpleNamespace:
+            assert user_id == 1
+            return SimpleNamespace(revision=7)
+
+    def client_factory(*_arguments: object, **_keywords: object) -> RevisionClient:
+        return RevisionClient()
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", client_factory)
+
+    revision = await KanvasKatalogService(Kanvas_Settings(), user_id=1).library_grid_revision()
+
+    assert revision == "4:2026-09-03T12:00:00+00:00|playback=7"
 
 
 async def test_katalog_service_item_edit_contracts(
@@ -4838,6 +4981,12 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
                 members=(CollectionMembership(id=1, collection_id=12, item=item),),
             )
 
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert (user_id, request.item_ids) == (_selected_profile().user.id, (item.id,))
+            return SimpleNamespace(states=(_playback(),), partially_watched_item_ids=())
+
     def fake_client(*_args: object, **_kwargs: object) -> FakeClient:
         return FakeClient()
 
@@ -4865,12 +5014,13 @@ async def test_service_transforms_real_public_contracts_through_one_fake_client(
     assert rails[1].posters[0].href == "/play/watch-orders/11?resume=true&onDeck=true"
     assert rails[1].posters[0].poster_url is None
     assert rails[1].posters[0].mosaic_urls == ("/kanvas/artwork/7/8",)
-    assert rails[1].posters[0].partially_watched is False
+    assert rails[1].posters[0].partially_watched is True
     assert rails[1].posters[1].title == "A title"
     assert rails[1].posters[1].detail == "S05 E12"
     assert rails[1].posters[1].href == "/play/item/7?resume=true&onDeck=true"
     assert rails[1].posters[1].partially_watched is True
     assert library_page.items[0].poster_url == "/kanvas/artwork/7/8"
+    assert library_page.items[0].progress_percent == 25
     assert library_page.previous_cursor is None
     assert library_page.next_cursor == "next"
 

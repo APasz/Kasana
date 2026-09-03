@@ -62,11 +62,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    invalid_sidecar_finding = op.get_bind().execute(
-        sa.text(
-            "SELECT 1 FROM audit_issue WHERE category = 'invalid_metadata_sidecar' LIMIT 1"
+    invalid_sidecar_finding = (
+        op.get_bind()
+        .execute(
+            sa.text("SELECT 1 FROM audit_issue WHERE category = 'invalid_metadata_sidecar' LIMIT 1")
         )
-    ).first()
+        .first()
+    )
     if invalid_sidecar_finding is not None:
         raise RuntimeError(
             "Cannot downgrade while local metadata sidecar audit findings exist. "

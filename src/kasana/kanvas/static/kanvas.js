@@ -621,7 +621,7 @@
       .map((line) => `<span class="k-poster__fallback-line">${escapeHtml(line)}</span>`)
       .join('');
     const artworkLabel = poster.artworkLabel
-      ? `<span class="k-poster__artwork-label">${escapeHtml(poster.artworkLabel)}</span>`
+      ? `<span class="k-poster__artwork-label"><span class="k-poster__artwork-label-banner" aria-hidden="true"></span><span class="k-poster__artwork-label-text">${escapeHtml(poster.artworkLabel)}</span></span>`
       : '';
     const mosaic = poster.mosaicUrls.length
       ? `<span class="k-poster-mosaic" aria-hidden="true">${poster.mosaicUrls
@@ -794,7 +794,7 @@
     return removed.length;
   };
 
-  const LIBRARY_GRID_SCHEMA_VERSION = 9;
+  const LIBRARY_GRID_SCHEMA_VERSION = 10;
   const LIBRARY_RESPONSE_SCHEMA_VERSION = 2;
   const LibraryPageDirection = Object.freeze({
     INITIAL: 'initial',

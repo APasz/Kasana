@@ -301,9 +301,12 @@ function testPosterArtworkLabelMarkup() {
   });
   const markup = globalThis.__libraryTest.posterMarkup(poster);
 
-  assert.match(markup, /class="k-poster__artwork-label">Remastered/);
+  assert.match(
+    markup,
+    /class="k-poster__artwork-label-banner" aria-hidden="true"><\/span><span class="k-poster__artwork-label-text">Remastered/
+  );
   assert.match(markup, /aria-label="Bad Boys — Remastered"/);
-  assert.equal((markup.match(/k-poster__artwork-label/g) || []).length, 1);
+  assert.equal((markup.match(/class="k-poster__artwork-label"/g) || []).length, 1);
 }
 
 function testPosterPartialWatchNormalisation() {
@@ -636,7 +639,7 @@ async function testCancellationStateAndDevelopmentDiagnostics() {
 async function testStateInvalidationAndRenderingFailure() {
   const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
   const instance = grid();
-  assert.match(instance.stateKey, /v9:asset=test-asset:catalogue=1%3A2026-07-24T11%3A50%3A00%2B00%3A00:user=4:max-mounted=144:filters=/);
+  assert.match(instance.stateKey, /v10:asset=test-asset:catalogue=1%3A2026-07-24T11%3A50%3A00%2B00%3A00:user=4:max-mounted=144:filters=/);
   assert.match(decodeURIComponent(instance.stateKey), /kind=movie&search=alpha/);
   const previousKey = instance.stateKey;
   instance.setAttribute('catalogue-revision', '1:2026-07-24T12:00:00+00:00');

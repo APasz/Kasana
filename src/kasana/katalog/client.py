@@ -71,6 +71,7 @@ from kasana.katalog.api.contracts import (
     PlaybackSessionTrackSelection,
     PlaybackSessionTransitionRequest,
     PlaybackStateResponse,
+    PlaybackStateRevisionResponse,
     PlaybackStatesRequest,
     PlaybackStatesResponse,
     ProgressUpdate,
@@ -982,6 +983,12 @@ class KatalogClient:
             raise _response_error(
                 "Katalog returned an invalid playback state.", response.request_id
             ) from error
+
+    async def playback_state_revision(self, user_id: int) -> PlaybackStateRevisionResponse:
+        return await self._get_model(
+            f"/api/v1/users/{user_id}/playback-state-revision",
+            PlaybackStateRevisionResponse,
+        )
 
     async def playback_states(
         self, user_id: int, request: PlaybackStatesRequest

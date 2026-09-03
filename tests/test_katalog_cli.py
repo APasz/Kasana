@@ -70,7 +70,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260903_0028"}
+    assert json.loads(current.output) == {"revision": "20260903_0029"}
 
     added = runner.invoke(
         katalog_cli.app,

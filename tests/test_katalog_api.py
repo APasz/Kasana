@@ -1699,6 +1699,7 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             assert (await client.health()).status == "ok"
             assert (await client.browse_library_directories()).path
             assert (await client.list_users())[0].username == "tester"
+            assert (await client.playback_state_revision(1)).revision >= 1
             assert [item.title async for item in client.iter_library_items(limit=2)] == [
                 "Alpha",
                 "Beta",

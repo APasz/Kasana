@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from asyncio import gather
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
@@ -73,6 +73,7 @@ from kasana.kanvas.viewmodels.library import (
     PosterView,
 )
 from kasana.katalog.public import (
+    MAX_PLAYBACK_STATE_BATCH_SIZE,
     ArtworkFetchRequest,
     ArtworkKind,
     ArtworkSelection,
@@ -134,6 +135,25 @@ _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PosterPlaybackStates:
+    """Viewer-specific completion states indexed by poster item ID."""
+
+    states_by_item_id: Mapping[int, PlaybackStateResponse]
+    partially_watched_item_ids: frozenset[int]
+
+    @classmethod
+    def empty(cls) -> _PosterPlaybackStates:
+        return cls(states_by_item_id={}, partially_watched_item_ids=frozenset())
+
+    def state_for(self, item_id: int) -> PlaybackStateResponse | None:
+        return self.states_by_item_id.get(item_id)
+
+    def is_partially_watched(self, item_id: int) -> bool:
+        return item_id in self.partially_watched_item_ids
+
 
 __all__ = (
     "KanvasKatalogService",
@@ -231,13 +251,22 @@ class KanvasKatalogService:
     async def home_rails(self) -> tuple[MediaRailView, ...]:
         """Load Home rails and the collection artwork needed by On Deck."""
 
+        user_id = self._required_user_id()
         async with self._client() as client:
             continue_page, on_deck_page, added_page = await gather(
-                client.continue_watching(self._required_user_id(), limit=_RAIL_PAGE_SIZE),
-                client.on_deck(self._required_user_id(), limit=_RAIL_PAGE_SIZE),
+                client.continue_watching(user_id, limit=_RAIL_PAGE_SIZE),
+                client.on_deck(user_id, limit=_RAIL_PAGE_SIZE),
                 client.recently_added_catalogue_items(limit=_RAIL_PAGE_SIZE),
             )
-            on_deck_collections = await _on_deck_collection_details(client, on_deck_page.items)
+            home_item_ids = (
+                tuple(entry.item.id for entry in continue_page.items)
+                + tuple(entry.item.id for entry in on_deck_page.items)
+                + tuple(item.id for item in added_page.items)
+            )
+            on_deck_collections, playback_states = await gather(
+                _on_deck_collection_details(client, on_deck_page.items),
+                _poster_playback_states(client, user_id, home_item_ids),
+            )
 
         return (
             MediaRailView(
@@ -247,6 +276,7 @@ class KanvasKatalogService:
                     poster_from_summary(
                         entry.item,
                         playback=entry.playback,
+                        partially_watched=playback_states.is_partially_watched(entry.item.id),
                         href=f"/play/item/{entry.item.id}?resume=true&onDeck=true",
                     )
                     for entry in continue_page.items
@@ -263,6 +293,7 @@ class KanvasKatalogService:
                             if entry.source_collection_id is not None
                             else None
                         ),
+                        playback_states=playback_states,
                     )
                     for entry in on_deck_page.items
                 ),
@@ -270,7 +301,14 @@ class KanvasKatalogService:
             MediaRailView(
                 kind=HomeRailKind.RECENTLY_ADDED,
                 title="Recently Added",
-                posters=tuple(poster_from_summary(item) for item in added_page.items),
+                posters=tuple(
+                    poster_from_summary(
+                        item,
+                        playback=playback_states.state_for(item.id),
+                        partially_watched=playback_states.is_partially_watched(item.id),
+                    )
+                    for item in added_page.items
+                ),
             ),
         )
 
@@ -299,16 +337,20 @@ class KanvasKatalogService:
         return tuple(library_root_view(root) for root in roots)
 
     async def library_grid_revision(self) -> str:
-        """Return the scan revision used to invalidate saved library-grid pages."""
+        """Return catalogue and viewer-state revisions for saved library-grid pages."""
 
+        user_id = self._required_user_id()
         async with self._client() as client:
-            roots = await client.list_library_roots()
+            roots, playback_revision = await gather(
+                client.list_library_roots(),
+                client.playback_state_revision(user_id),
+            )
         revisions: list[str] = []
         for root in sorted(roots, key=lambda root: root.id):
             completed_at = root.last_scan_completed_at
             timestamp = completed_at.isoformat() if completed_at is not None else "never"
             revisions.append(f"{root.id}:{timestamp}")
-        return ";".join(revisions)
+        return f"{';'.join(revisions) or 'none'}|playback={playback_revision.revision}"
 
     async def administration_directories(self, path: str | None) -> DirectoryListing:
         async with self._client() as client:
@@ -486,10 +528,25 @@ class KanvasKatalogService:
                 availability=filters.availability,
                 search=filters.search,
             )
+            playback_states = (
+                await _poster_playback_states(
+                    client,
+                    self._user_id,
+                    (item.id for item in page.items),
+                )
+                if self._user_id is not None
+                else _PosterPlaybackStates.empty()
+            )
         posters: list[PosterView] = []
         for item in page.items:
             try:
-                posters.append(poster_from_summary(item))
+                posters.append(
+                    poster_from_summary(
+                        item,
+                        playback=playback_states.state_for(item.id),
+                        partially_watched=playback_states.is_partially_watched(item.id),
+                    )
+                )
             except Exception:
                 field_names = tuple(sorted(item.model_dump().keys()))
                 _LOGGER.error(
@@ -666,14 +723,24 @@ class KanvasKatalogService:
     async def collection_detail(self, collection_id: int) -> CollectionDetailView:
         """Build a bounded direct-member detail view without expanding series children."""
 
+        user_id = self._required_user_id()
         async with self._client() as client:
             detail, members_page = await gather(
-                client.get_collection(collection_id, user_id=self._required_user_id()),
+                client.get_collection(collection_id, user_id=user_id),
                 client.list_collection_members(collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE),
             )
-        progress: dict[int, PlaybackStateResponse] = {}
+            playback_states = await _poster_playback_states(
+                client,
+                user_id,
+                (member.item.id for member in members_page.items),
+            )
         members = tuple(
-            collection_member(member.item, member.relationship, progress)
+            collection_member(
+                member.item,
+                member.relationship,
+                playback_states.state_for(member.item.id),
+                partially_watched=playback_states.is_partially_watched(member.item.id),
+            )
             for member in members_page.items
         )
         movies, series, other = group_collection_members(members)
@@ -722,12 +789,25 @@ class KanvasKatalogService:
     ) -> tuple[tuple[WatchOrderRowView, ...], str | None, int]:
         """Load one bounded virtual-row page for an order editor."""
 
+        user_id = self._required_user_id()
         async with self._client() as client:
             detail = await client.get_watch_order(
                 watch_order_id, cursor=cursor, limit=_WATCH_ORDER_ENTRY_PAGE_SIZE
             )
+            playback_states = await _poster_playback_states(
+                client,
+                user_id,
+                (entry.item.id for entry in detail.entries.items),
+            )
         return (
-            tuple(watch_order_row(entry) for entry in detail.entries.items),
+            tuple(
+                watch_order_row(
+                    entry,
+                    playback=playback_states.state_for(entry.item.id),
+                    partially_watched=playback_states.is_partially_watched(entry.item.id),
+                )
+                for entry in detail.entries.items
+            ),
             detail.entries.next_cursor,
             detail.watch_order.revision,
         )
@@ -735,24 +815,41 @@ class KanvasKatalogService:
     async def watch_order_workspace(self, watch_order_id: int) -> WatchOrderWorkspaceView:
         """Load one order and all collection-backed sources eligible to extend it."""
 
+        user_id = self._required_user_id()
         async with self._client() as client:
-            detail = await client.get_watch_order(
-                watch_order_id, limit=1, user_id=self._required_user_id()
-            )
+            detail = await client.get_watch_order(watch_order_id, limit=1, user_id=user_id)
             entry_list: list[WatchOrderEntryDetail] = []
             async for entry in client.iter_watch_order_entries(
                 watch_order_id, limit=_WATCH_ORDER_ENTRY_PAGE_SIZE
             ):
                 entry_list.append(entry)
             existing_entries = tuple(entry_list)
-            sources = await self._watch_order_sources(client, detail.watch_order.collection_id)
+            entry_playback_states, sources = await gather(
+                _poster_playback_states(
+                    client,
+                    user_id,
+                    (entry.item.id for entry in existing_entries),
+                ),
+                self._watch_order_sources(
+                    client,
+                    detail.watch_order.collection_id,
+                    include_playback=True,
+                ),
+            )
         existing_item_ids = frozenset(entry.item.id for entry in existing_entries)
         available_sources = tuple(
             source for source, item_ids in sources if not existing_item_ids.intersection(item_ids)
         )
         return WatchOrderWorkspaceView(
             revision=detail.watch_order.revision,
-            entries=tuple(watch_order_row(entry) for entry in existing_entries),
+            entries=tuple(
+                watch_order_row(
+                    entry,
+                    playback=entry_playback_states.state_for(entry.item.id),
+                    partially_watched=entry_playback_states.is_partially_watched(entry.item.id),
+                )
+                for entry in existing_entries
+            ),
             sources=available_sources,
         )
 
@@ -1091,7 +1188,11 @@ class KanvasKatalogService:
         return result.revision
 
     async def _watch_order_sources(
-        self, client: KatalogClient, collection_id: int
+        self,
+        client: KatalogClient,
+        collection_id: int,
+        *,
+        include_playback: bool = False,
     ) -> tuple[tuple[WatchOrderSourceView, tuple[int, ...]], ...]:
         """Expose direct members and every recursive child as one source card each."""
 
@@ -1134,6 +1235,15 @@ class KanvasKatalogService:
         for membership in memberships:
             for item in await source_tree(membership.item):
                 candidates.setdefault(item.id, item)
+        playback_states = (
+            await _poster_playback_states(
+                client,
+                self._required_user_id(),
+                candidates,
+            )
+            if include_playback
+            else _PosterPlaybackStates.empty()
+        )
         sources: list[tuple[WatchOrderSourceView, tuple[int, ...]]] = []
         for item in candidates.values():
             target_items = await source_items(item)
@@ -1157,6 +1267,8 @@ class KanvasKatalogService:
                         available=available,
                         poster=poster_from_summary(
                             item,
+                            playback=playback_states.state_for(item.id),
+                            partially_watched=playback_states.is_partially_watched(item.id),
                             detail=_watch_order_source_subtitle(
                                 item, len(item_ids), bool(item_ids)
                             ),
@@ -1180,6 +1292,33 @@ class KanvasKatalogService:
             if page.next_cursor is None:
                 return tuple(children)
             cursor = page.next_cursor
+
+
+async def _poster_playback_states(
+    client: KatalogClient,
+    user_id: int,
+    item_ids: Iterable[int],
+) -> _PosterPlaybackStates:
+    """Load direct and aggregate completion state in bounded Katalog batches."""
+
+    requested_item_ids = tuple(sorted(set(item_ids)))
+    if not requested_item_ids:
+        return _PosterPlaybackStates.empty()
+    states_by_item_id: dict[int, PlaybackStateResponse] = {}
+    partially_watched_item_ids: set[int] = set()
+    for start in range(0, len(requested_item_ids), MAX_PLAYBACK_STATE_BATCH_SIZE):
+        response = await client.playback_states(
+            user_id,
+            PlaybackStatesRequest(
+                item_ids=requested_item_ids[start : start + MAX_PLAYBACK_STATE_BATCH_SIZE]
+            ),
+        )
+        states_by_item_id.update({state.item_id: state for state in response.states})
+        partially_watched_item_ids.update(response.partially_watched_item_ids)
+    return _PosterPlaybackStates(
+        states_by_item_id=states_by_item_id,
+        partially_watched_item_ids=frozenset(partially_watched_item_ids),
+    )
 
 
 def _external_links(item: LibraryItemDetail) -> tuple[ExternalLinkView, ...]:
@@ -1334,14 +1473,20 @@ async def _on_deck_collection_details(
 
 
 def _on_deck_poster(
-    entry: OnDeckEntry, *, source_collection: CollectionDetail | None
+    entry: OnDeckEntry,
+    *,
+    source_collection: CollectionDetail | None,
+    playback_states: _PosterPlaybackStates,
 ) -> PosterView:
     """Show each queue source as a series or collection with its next launch target."""
 
     if entry.source_watch_order_id is None:
         return poster_from_summary(
             entry.item,
-            partially_watched=entry.partially_watched,
+            playback=playback_states.state_for(entry.item.id),
+            partially_watched=(
+                entry.partially_watched or playback_states.is_partially_watched(entry.item.id)
+            ),
             href=f"/play/item/{entry.item.id}?resume=true&onDeck=true",
             detail=_on_deck_item_detail(entry.next_item),
         )
@@ -1365,6 +1510,7 @@ def _on_deck_poster(
         mosaicUrls=mosaic_urls,
         placeholder=PlaceholderArtView(lines=(collection_name,)),
         state=PosterState.NORMAL,
+        partiallyWatched=entry.partially_watched,
         available=True,
     )
 
