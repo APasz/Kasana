@@ -1197,9 +1197,14 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
     return {itemId: 20};
   };
   const confirm = window.confirm;
-  window.confirm = () => true;
+  let confirmationPrompts = 0;
+  window.confirm = () => {
+    confirmationPrompts += 1;
+    return false;
+  };
   await metadata.applyManualMatch();
   window.confirm = confirm;
+  assert.equal(confirmationPrompts, 0);
   assert.equal(metadata.reviewedItemCount, 2);
 
   metadata.subsection = 'artwork';

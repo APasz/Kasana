@@ -802,7 +802,6 @@
       const candidate = this.manualSelection === null ? null : this.manualSearchResults[this.manualSelection];
       const providerId = candidate?.providerId || candidate?.provider_id;
       if (!item || !candidate || typeof candidate.provider !== 'string' || typeof providerId !== 'string') return;
-      if (!window.confirm(`Use ${candidate.title || 'this record'} as the metadata match for ${item.title}? Unlocked local metadata may be updated.`)) return;
       this.activity = {state: 'active', message: 'Applying manual metadata match…'};
       this.render();
       try {
