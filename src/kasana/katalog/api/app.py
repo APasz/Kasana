@@ -61,6 +61,7 @@ from kasana.katalog.api.contracts import (
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    MetadataReviewItem,
     MetadataSearchResult,
     MutationResult,
     OnDeckEntry,
@@ -908,6 +909,23 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> PaginatedResponse[MetadataReviewCandidate]:
         return await run_blocking(runtime.queries.metadata_review, cursor=cursor, limit=limit)
+
+    @app.get(
+        "/api/v1/metadata/review-items",
+        response_model=PaginatedResponse[MetadataReviewItem],
+        operation_id="v1_list_metadata_review_items",
+        responses=_ERROR_RESPONSES,
+    )
+    async def metadata_review_items(
+        cursor: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PaginatedResponse[MetadataReviewItem]:
+        return await run_blocking(
+            runtime.queries.metadata_review_items,
+            cursor=cursor,
+            limit=limit,
+        )
 
     @app.get(
         "/api/v1/metadata/items/{item_id}/binding",

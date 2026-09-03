@@ -1485,8 +1485,25 @@ a.k-item-editor__match-title:hover, a.k-item-editor__match-title:focus-visible {
 .k-admin-nav__link:hover, .k-admin-nav__link:focus-visible, .k-admin-nav__link--active { border-color: var(--k-accent); color: var(--k-text); background: var(--k-surface-1); }
 kanvas-administration { display: block; width: 100%; max-width: 1440px; }
 .k-admin-panel, .k-admin-list, .k-metadata-review { display: grid; gap: 1px; border: 1px solid var(--k-border-subtle); background: var(--k-border-subtle); }
+.k-admin-workspace { display: grid; gap: 14px; }
+.k-admin-section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.k-admin-section-header > div:first-child { display: grid; gap: 3px; }
+.k-admin-section-header h2 { margin: 0; color: var(--k-text); font-size: 0.92rem; }
+.k-admin-section-header small { color: var(--k-text-faint); font-size: 0.72rem; }
 .k-admin-row { display: grid; grid-template-columns: minmax(110px, 0.7fr) minmax(0, 1.3fr) auto; align-items: center; min-height: 46px; gap: 10px; padding: 7px 10px; background: var(--k-surface-1); color: var(--k-text-muted); font-size: 0.78rem; }
 .k-admin-row__value { overflow: hidden; color: var(--k-text); text-overflow: ellipsis; white-space: nowrap; }
+.k-admin-row--next { border-top: 1px solid var(--k-border-strong); }
+.k-admin-row__eyebrow { display: block; margin-bottom: 4px; color: var(--k-text-faint); font-size: 0.64rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.k-admin-overview__group { display: grid; gap: 1px; padding: 10px; background: var(--k-bg); }
+.k-admin-overview__group .k-admin-section-header { padding: 0 1px 5px; }
+.k-admin-details,
+.k-admin-job-history,
+.k-admin-maintenance { border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
+.k-admin-details > summary,
+.k-admin-job-history > summary,
+.k-admin-maintenance > summary { padding: 9px 10px; color: var(--k-text-muted); font-size: 0.75rem; cursor: pointer; }
+.k-admin-details__content { display: grid; gap: 1px; border-top: 1px solid var(--k-border-subtle); background: var(--k-border-subtle); }
+.k-admin-maintenance > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 10px; color: var(--k-text-muted); font-size: 0.74rem; }
 .k-admin-provider-list { margin-top: 14px; border: 1px solid var(--k-border-subtle); }
 .k-admin-status { padding: 12px; border: 1px solid var(--k-border-subtle); color: var(--k-text-muted); font-size: 0.8rem; }
 .k-admin-status--error { border-color: var(--k-danger); color: var(--k-text); }
@@ -1501,11 +1518,43 @@ kanvas-administration { display: block; width: 100%; max-width: 1440px; }
 .k-hierarchy-action { padding: 8px 10px; background: var(--k-surface-1); color: var(--k-text-muted); font-size: 0.76rem; }
 .k-hierarchy-action small { display: block; margin-top: 3px; color: var(--k-text-faint); font-size: 0.69rem; }
 .k-job-row, .k-root-row { display: grid; grid-template-columns: minmax(130px, 0.8fr) minmax(150px, 1fr) minmax(160px, 1.3fr) auto; align-items: center; min-height: 64px; gap: 10px; padding: 8px 10px; background: var(--k-surface-1); }
+.k-root-row { grid-template-columns: minmax(160px, 0.85fr) minmax(220px, 1.15fr) auto; }
 .k-job-row strong, .k-root-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem; }
 .k-job-row small, .k-root-row small { display: block; margin-top: 3px; overflow: hidden; color: var(--k-text-faint); text-overflow: ellipsis; white-space: nowrap; font-size: 0.69rem; }
+.k-admin-state { display: inline-flex; width: fit-content; color: var(--k-text-muted); font-size: 0.7rem; font-weight: 700; }
+.k-admin-state--ready { color: var(--k-accent); }
+.k-admin-state--attention { color: var(--k-danger); }
+.k-admin-row__details { margin-top: 5px; color: var(--k-text-faint); font-size: 0.69rem; }
+.k-admin-row__details > summary { width: fit-content; cursor: pointer; }
+.k-admin-row__details > div { display: grid; gap: 3px; margin-top: 5px; overflow-wrap: anywhere; }
+.k-admin-row__details code { overflow-wrap: anywhere; color: var(--k-text-muted); font: inherit; }
+.k-admin-danger-menu { position: relative; }
+.k-admin-danger-menu > summary { color: var(--k-text-faint); font-size: 0.72rem; cursor: pointer; }
+.k-admin-danger-menu[open] { display: grid; gap: 5px; }
+.k-button--danger { border-color: var(--k-danger); color: var(--k-danger); }
+.k-button--danger:hover:not(:disabled), .k-button--danger:focus-visible { border-color: var(--k-danger); background: var(--k-danger); color: var(--k-bg); }
+.k-button--repair { border-color: var(--k-border-strong); color: var(--k-text); }
+.k-button--repair:hover:not(:disabled), .k-button--repair:focus-visible { border-color: var(--k-text-muted); background: var(--k-surface-active); color: var(--k-text); }
 .k-duplicate-file-row { grid-template-columns: minmax(220px, 1fr) minmax(320px, 2fr); align-items: start; }
 .k-duplicate-file-row small { overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+.k-admin-issue-panel { border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
+.k-admin-issue-panel > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px; color: var(--k-text); font-size: 0.8rem; font-weight: 650; cursor: pointer; }
+.k-admin-issue-panel > summary small { color: var(--k-text-faint); font-size: 0.69rem; font-weight: 500; }
+.k-admin-issue-panel__content { display: grid; gap: 12px; padding: 0 10px 10px; border-top: 1px solid var(--k-border-subtle); }
+.k-admin-issue-panel__content > details { border: 1px solid var(--k-border-subtle); background: var(--k-bg); }
+.k-admin-issue-panel__content > details > summary { padding: 9px; color: var(--k-text-muted); font-size: 0.75rem; cursor: pointer; }
+.k-admin-impact { padding: 0 9px 9px; color: var(--k-text-faint); font-size: 0.7rem; }
+.k-admin-file-issues { display: grid; gap: 8px; }
+.k-admin-action-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; background: var(--k-surface-1); }
+.k-admin-action-row > div { display: grid; gap: 3px; }
+.k-admin-action-row strong { color: var(--k-text); font-size: 0.8rem; }
+.k-admin-action-row small { color: var(--k-text-faint); font-size: 0.7rem; }
 .k-job-row__progress { display: grid; gap: 5px; }
+.k-job-row__details { color: var(--k-text-faint); font-size: 0.7rem; }
+.k-job-row__details > summary { width: fit-content; cursor: pointer; }
+.k-job-row__details > div { margin-top: 5px; overflow-wrap: anywhere; }
+.k-job-row__failure { color: var(--k-danger) !important; }
+.k-job-row--target { outline: 2px solid var(--k-accent); outline-offset: -2px; }
 .k-progress-edge { display: block; height: 2px; overflow: hidden; background: var(--k-border-strong); }
 .k-progress-edge > span { display: block; width: var(--k-progress); height: 100%; background: var(--k-accent); transition: width var(--k-motion-normal); }
 .k-progress-edge--unknown { background: linear-gradient(90deg, var(--k-border-strong), var(--k-text-faint), var(--k-border-strong)); background-size: 160% 100%; animation: k-progress-unknown 1.2s linear infinite; }
@@ -1537,10 +1586,16 @@ kanvas-administration { display: block; width: 100%; max-width: 1440px; }
 .k-metadata-selected summary { cursor: pointer; }
 .k-metadata-selected p { margin: 6px 0 0; line-height: 1.4; }
 .k-metadata-decision { display: grid; align-content: start; gap: 8px; }
-.k-metadata-decision .k-action-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+.k-metadata-decision .k-action-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
 .k-metadata-decision .k-button { width: 100%; padding: 0 6px; }
 .k-metadata-navigation { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; border-top: 1px solid var(--k-border-subtle); color: var(--k-text-faint); font-size: 0.7rem; }
 .k-metadata-navigation .k-action-row { gap: 5px; }
+.k-metadata-local .k-button { width: fit-content; margin-top: 10px; }
+.k-metadata-manual { display: grid; grid-column: 1 / -1; gap: 8px; padding-top: 10px; border-top: 1px solid var(--k-border-subtle); }
+.k-metadata-manual > .k-button { width: fit-content; }
+.k-admin-manual-search { display: flex; gap: 6px; }
+.k-admin-manual-search .k-input-shell { flex: 1; width: auto; }
+.k-admin-manual-confirmation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border: 1px solid var(--k-accent); background: var(--k-surface-active); color: var(--k-text-muted); font-size: 0.74rem; }
 
 .k-watch-order-list { display: grid; width: min(100%, 900px); border-top: 1px solid var(--k-border-subtle); }
 .k-watch-row { display: grid; min-height: 52px; grid-template-columns: 34px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
@@ -1709,6 +1764,10 @@ kanvas-profile-menu { position: relative; display: block; width: 100%; min-heigh
     .k-job-row, .k-root-row { grid-template-columns: minmax(0, 1fr) auto; }
     .k-job-row__progress { grid-column: 1 / -1; }
     .k-root-row .k-row-actions { grid-column: 1 / -1; justify-content: flex-start; }
+    .k-admin-section-header,
+    .k-admin-action-row { align-items: flex-start; flex-direction: column; }
+    .k-admin-issue-panel > summary { align-items: flex-start; flex-direction: column; }
+    .k-admin-manual-search { align-items: stretch; flex-direction: column; }
     .k-metadata-review { grid-template-areas: "local" "candidates" "actions"; grid-template-columns: 1fr; grid-template-rows: auto; min-height: 0; }
     .k-metadata-actions { grid-template-columns: 1fr; }
     .k-metadata-navigation { grid-column: auto; }

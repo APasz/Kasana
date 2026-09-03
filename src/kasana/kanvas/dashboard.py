@@ -53,7 +53,11 @@ from kasana.kanvas.playback_compatibility import (
 )
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile, is_profile_access_error
 from kasana.kanvas.routes.about import render_about
-from kasana.kanvas.routes.administration import AdministrationSection, render_administration
+from kasana.kanvas.routes.administration import (
+    AdministrationSection,
+    AdministrationSubsection,
+    render_administration,
+)
 from kasana.kanvas.routes.collections import (
     render_collection_detail,
     render_collection_edit,
@@ -2634,7 +2638,16 @@ def build_dashboard(settings: Kanvas_Settings | None = None) -> None:
     _kanvas_page("/administration/libraries", "Kanvas · Library roots")(
         administration_libraries_page
     )
+    _kanvas_page("/administration/libraries/hierarchy", "Kanvas · Library structure")(
+        administration_libraries_hierarchy_page
+    )
+    _kanvas_page("/administration/libraries/duplicates", "Kanvas · Duplicate resolution")(
+        administration_libraries_duplicates_page
+    )
     _kanvas_page("/administration/jobs", "Kanvas · Jobs")(administration_jobs_page)
+    _kanvas_page("/administration/metadata/artwork", "Kanvas · Artwork maintenance")(
+        administration_metadata_artwork_page
+    )
     _kanvas_page("/administration/artwork", "Kanvas · Artwork maintenance")(
         administration_artwork_page
     )
@@ -2666,13 +2679,17 @@ async def profiles_page(request: Request) -> Response | None:
     )
 
 
-async def _administration_page(request: Request, section: AdministrationSection) -> Response | None:
+async def _administration_page(
+    request: Request,
+    section: AdministrationSection,
+    subsection: AdministrationSubsection = None,
+) -> Response | None:
     profile = await _page_profile(request)
     if isinstance(profile, RedirectResponse):
         return profile
     if not profile.is_administrator:
         return Response(status_code=403)
-    render_administration(_settings, profile, section)
+    render_administration(_settings, profile, section, subsection)
 
 
 async def home_page(request: Request) -> Response | None:
@@ -2742,7 +2759,14 @@ async def item_page(item_id: int, request: Request) -> Response | None:
         playback_session,
         play_on_load,
         download_csrf_token=issue_download_csrf_token(request),
+        editor_tab=_item_editor_tab(request),
     )
+
+
+def _item_editor_tab(request: Request) -> Literal["artwork"] | None:
+    """Allow administration to deep-link directly to an item's artwork picker."""
+
+    return "artwork" if _query_text(request, "edit", maximum_length=20) == "artwork" else None
 
 
 async def play_item_page(item_id: int, request: Request) -> Response | None:
@@ -2941,20 +2965,32 @@ async def administration_libraries_page(request: Request) -> Response | None:
     return await _administration_page(request, "libraries")
 
 
+async def administration_libraries_hierarchy_page(request: Request) -> Response | None:
+    return await _administration_page(request, "libraries", "hierarchy")
+
+
+async def administration_libraries_duplicates_page(request: Request) -> Response | None:
+    return await _administration_page(request, "libraries", "duplicates")
+
+
 async def administration_jobs_page(request: Request) -> Response | None:
     return await _administration_page(request, "jobs")
 
 
+async def administration_metadata_artwork_page(request: Request) -> Response | None:
+    return await _administration_page(request, "metadata", "artwork")
+
+
 async def administration_artwork_page(request: Request) -> Response | None:
-    return await _administration_page(request, "artwork")
+    return await _administration_page(request, "metadata", "artwork")
 
 
 async def administration_hierarchy_page(request: Request) -> Response | None:
-    return await _administration_page(request, "hierarchy")
+    return await _administration_page(request, "libraries", "hierarchy")
 
 
 async def administration_duplicates_page(request: Request) -> Response | None:
-    return await _administration_page(request, "duplicates")
+    return await _administration_page(request, "libraries", "duplicates")
 
 
 async def design_page() -> None:

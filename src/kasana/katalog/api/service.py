@@ -69,6 +69,7 @@ from kasana.katalog.api.contracts import (
     MediaTechnicalSummary,
     MetadataBindingReference,
     MetadataReviewCandidate,
+    MetadataReviewItem,
     MovieItemDetail,
     OnDeckEntry,
     PaginatedResponse,
@@ -380,6 +381,16 @@ class KatalogQueryService:
         def load(session: Session) -> StatusResponse:
             revision = self._database_revision(session)
             roots = tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
+            resolved_metadata_binding = (
+                select(MetadataBinding.id)
+                .where(
+                    MetadataBinding.library_item_id == Zaisan.id,
+                    MetadataBinding.status.in_(
+                        (MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)
+                    ),
+                )
+                .exists()
+            )
             return StatusResponse(
                 database_revision=revision,
                 enabled_root_count=sum(root.enabled for root in roots),
@@ -398,6 +409,15 @@ class KatalogQueryService:
                     select(func.count())
                     .select_from(AuditIssue)
                     .where(AuditIssue.is_resolved.is_(False))
+                )
+                or 0,
+                unresolved_metadata_count=session.scalar(
+                    select(func.count())
+                    .select_from(Zaisan)
+                    .where(
+                        Zaisan.item_kind.in_((ZaisanKind.MOVIE, ZaisanKind.SERIES)),
+                        ~resolved_metadata_binding,
+                    )
                 )
                 or 0,
                 active_job_count=active_jobs,
@@ -2185,6 +2205,73 @@ class KatalogQueryService:
                         "metadata-review",
                         {"confidence": page[-1].confidence, "id": page[-1].id},
                     )
+                    if has_next
+                    else None
+                ),
+                limit=normalised_limit,
+            )
+
+        return self._database.run_transaction(load)
+
+    def metadata_review_items(
+        self, *, cursor: str | None, limit: int
+    ) -> PaginatedResponse[MetadataReviewItem]:
+        """Page unresolved matchable items, including those without suggestions."""
+
+        normalised_limit = _page_limit(limit)
+        cursor_value: dict[str, object] | None = _decode_cursor(cursor, "metadata-review-items")
+
+        def load(session: Session) -> PaginatedResponse[MetadataReviewItem]:
+            resolved_binding = (
+                select(MetadataBinding.id)
+                .where(
+                    MetadataBinding.library_item_id == Zaisan.id,
+                    MetadataBinding.status.in_(
+                        (MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)
+                    ),
+                )
+                .exists()
+            )
+            statement: Select[tuple[Zaisan]] = select(Zaisan).where(
+                Zaisan.item_kind.in_((ZaisanKind.MOVIE, ZaisanKind.SERIES)),
+                ~resolved_binding,
+            )
+            if cursor_value is not None:
+                statement = statement.where(Zaisan.id > _cursor_int(cursor_value, "id"))
+            rows = tuple(
+                session.scalars(statement.order_by(Zaisan.id).limit(normalised_limit + 1))
+            )
+            page, has_next = _split_page(rows, normalised_limit)
+            item_ids = tuple(item.id for item in page)
+            candidates_by_item: dict[int, list[MetadataReviewCandidate]] = {
+                item_id: [] for item_id in item_ids
+            }
+            if item_ids:
+                candidates = session.scalars(
+                    select(MetadataCandidate)
+                    .where(
+                        MetadataCandidate.library_item_id.in_(item_ids),
+                        MetadataCandidate.status == MetadataCandidateStatus.SUGGESTED,
+                    )
+                    .order_by(
+                        MetadataCandidate.library_item_id,
+                        MetadataCandidate.confidence.desc(),
+                        MetadataCandidate.id,
+                    )
+                )
+                for candidate in candidates:
+                    candidates_by_item[candidate.library_item_id].append(_candidate(candidate))
+            summaries = _summaries_for(session, page)
+            return PaginatedResponse[MetadataReviewItem](
+                items=tuple(
+                    MetadataReviewItem(
+                        item=summaries[item.id],
+                        candidates=tuple(candidates_by_item[item.id]),
+                    )
+                    for item in page
+                ),
+                next_cursor=(
+                    _encode_cursor("metadata-review-items", {"id": page[-1].id})
                     if has_next
                     else None
                 ),

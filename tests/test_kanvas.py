@@ -53,9 +53,14 @@ from kasana.kanvas.dashboard import (
     administration_artwork_page,
     administration_directories_data,
     administration_duplicates_data,
+    administration_duplicates_page,
+    administration_hierarchy_page,
     administration_jobs_data,
     administration_jobs_page,
+    administration_libraries_duplicates_page,
+    administration_libraries_hierarchy_page,
     administration_libraries_page,
+    administration_metadata_artwork_page,
     administration_metadata_data,
     administration_metadata_page,
     administration_overview_data,
@@ -95,7 +100,11 @@ from kasana.kanvas.routes import home as home_route
 from kasana.kanvas.routes import item as item_route
 from kasana.kanvas.routes import library as library_route
 from kasana.kanvas.routes.about import render_about
-from kasana.kanvas.routes.administration import render_administration
+from kasana.kanvas.routes.administration import (
+    AdministrationSection,
+    AdministrationSubsection,
+    render_administration,
+)
 from kasana.kanvas.routes.library import render_library
 from kasana.kanvas.services.katalog import (
     KanvasKatalogService,
@@ -191,6 +200,7 @@ from kasana.katalog.public import (
     MediaTechnicalSummary,
     MetadataBindingReference,
     MetadataReviewCandidate,
+    MetadataReviewItem,
     MetadataSearchResult,
     OnDeckEntry,
     PaginatedResponse,
@@ -3046,6 +3056,14 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         confidence=0.9,
         status="suggested",
     )
+    local = LibraryItemSummary(
+        id=7,
+        title="Local title",
+        year=2004,
+        kind=LibraryItemKind.MOVIE,
+        availability=Availability.AVAILABLE,
+    )
+    review_item = MetadataReviewItem(item=local, candidates=(candidate,))
     job = BackgroundJob(
         id="job-1",
         kind="scan",
@@ -3055,17 +3073,6 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         completed_at=None,
         progress=JobProgress(phase="scan", current=1, total=2, unit="files"),
     )
-    local = cast(
-        LibraryItemDetail,
-        SimpleNamespace(
-            id=7,
-            title="Local title",
-            year=2004,
-            kind=LibraryItemKind.MOVIE,
-            artwork=(),
-        ),
-    )
-
     class FakeClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -3085,6 +3092,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
                 media_file_count=4,
                 available_file_count=4,
                 unresolved_audit_issue_count=0,
+                unresolved_metadata_count=1,
                 active_job_count=1,
                 failed_job_count=0,
             )
@@ -3096,21 +3104,17 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
             assert path == "/media"
             return DirectoryListing(path="/media", entries=())
 
-        async def metadata_review(
+        async def metadata_review_items(
             self, *, cursor: str | None = None, limit: int = 50
-        ) -> PaginatedResponse[MetadataReviewCandidate]:
+        ) -> PaginatedResponse[MetadataReviewItem]:
             assert limit in {50, 100}
-            return PaginatedResponse(items=(candidate,), next_cursor=cursor, limit=limit)
+            return PaginatedResponse(items=(review_item,), next_cursor=cursor, limit=limit)
 
         async def list_jobs(
             self, *, cursor: str | None, limit: int
         ) -> PaginatedResponse[BackgroundJob]:
             assert limit == 50
             return PaginatedResponse(items=(job,), next_cursor=cursor, limit=limit)
-
-        async def get_library_item(self, item_id: int) -> object:
-            assert item_id == 7
-            return SimpleNamespace(item=local)
 
         async def match_metadata(self, *_args: object) -> None:
             calls.append("match")
@@ -3719,8 +3723,13 @@ async def test_administration_error_states_and_local_section_routes(
         await administration_page(request)
         await administration_metadata_page(request)
         await administration_libraries_page(request)
+        await administration_libraries_hierarchy_page(request)
+        await administration_libraries_duplicates_page(request)
         await administration_jobs_page(request)
+        await administration_metadata_artwork_page(request)
         await administration_artwork_page(request)
+        await administration_hierarchy_page(request)
+        await administration_duplicates_page(request)
 
 
 async def test_administration_match_failure_is_logged_with_katalog_request_id(
@@ -3992,11 +4001,21 @@ def test_shell_centres_page_content_with_a_wide_screen_limit() -> None:
 
 
 def test_administration_sections_mount_distinct_browser_states_and_active_tabs() -> None:
-    sections = ("overview", "metadata", "libraries", "jobs", "artwork", "hierarchy", "duplicates")
+    sections: tuple[tuple[AdministrationSection, AdministrationSubsection], ...] = (
+        ("overview", None),
+        ("libraries", None),
+        ("libraries", "hierarchy"),
+        ("libraries", "duplicates"),
+        ("metadata", None),
+        ("metadata", "artwork"),
+        ("jobs", None),
+    )
 
-    for section in sections:
+    for section, subsection in sections:
         with Client(page("")) as client:
-            render_administration(Kanvas_Settings(), _selected_profile(), section)
+            render_administration(
+                Kanvas_Settings(), _selected_profile(), section, subsection
+            )
             administration = next(
                 element
                 for element in client.elements.values()
@@ -4007,10 +4026,22 @@ def test_administration_sections_mount_distinct_browser_states_and_active_tabs()
                 for element in client.elements.values()
                 if "k-admin-nav__link--active" in _element_classes(element)
             ]
+            navigation_tabs = [
+                element
+                for element in client.elements.values()
+                if "k-admin-nav__link" in _element_classes(element)
+            ]
 
         assert _element_props(administration)["data-section"] == section
+        assert _element_props(administration).get("data-subsection") == subsection
         assert "section" not in _element_props(administration)
         assert len(active_tabs) == 1
+        assert [_element_props(tab)["href"] for tab in navigation_tabs] == [
+            "/administration",
+            "/administration/libraries",
+            "/administration/metadata",
+            "/administration/jobs",
+        ]
 
 
 def test_browser_component_mounting_uses_native_elements_and_validates_attributes() -> None:
@@ -4036,6 +4067,21 @@ def test_browser_component_mounting_uses_native_elements_and_validates_attribute
 
     with pytest.raises(ValueError, match="kebab-case"):
         mount_browser_component(BrowserComponent.POSTER_GRID, {"bad_attribute": "value"})
+
+
+def test_item_editor_artwork_links_open_the_artwork_tab() -> None:
+    with Client(page("")) as client:
+        item_route._item_editor_button(  # pyright: ignore[reportPrivateUsage]
+            7, _selected_profile(), "artwork"
+        )
+        editor = next(
+            element
+            for element in client.elements.values()
+            if element.tag == BrowserComponent.ITEM_EDITOR
+        )
+
+    assert _element_props(editor)["initial-tab"] == "artwork"
+    assert _element_props(editor)["open-on-load"] == "true"
 
 
 def test_collection_components_cover_empty_states_and_shared_textarea() -> None:
@@ -5129,7 +5175,10 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         "/watch-orders/{watch_order_id}/edit",
         "/administration",
         "/administration/metadata",
+        "/administration/metadata/artwork",
         "/administration/libraries",
+        "/administration/libraries/hierarchy",
+        "/administration/libraries/duplicates",
         "/administration/jobs",
         "/administration/artwork",
         "/administration/hierarchy",
@@ -5258,13 +5307,13 @@ def test_administration_overview_transformation_and_adaptive_polling() -> None:
             media_file_count=5,
             available_file_count=4,
             unresolved_audit_issue_count=2,
+            unresolved_metadata_count=2,
             active_job_count=1,
             failed_job_count=2,
             interrupted_job_count=3,
             artwork_cache_size_bytes=123,
             artwork_cache_file_count=2,
         ),
-        unresolved_metadata_count=2,
     )
 
     assert overview.connected is True

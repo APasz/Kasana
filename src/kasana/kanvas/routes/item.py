@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from nicegui import ui
 from nicegui.elements.label import Label
 
-from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
+from kasana.kanvas.components.browser import (
+    BrowserAttribute,
+    BrowserComponent,
+    mount_browser_component,
+)
 from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.inputs import SelectOption, hidden_input, select_input
@@ -35,6 +41,7 @@ async def render_item(
     play_on_load: bool = False,
     *,
     download_csrf_token: str,
+    editor_tab: Literal["artwork"] | None = None,
 ) -> None:
     """Render useful detail, playback, and compact child navigation for one item."""
 
@@ -99,6 +106,7 @@ async def render_item(
                     download_csrf_token,
                     status,
                     playback_session.id if playback_session is not None else None,
+                    editor_tab,
                 )
 
         _included_collections(detail)
@@ -132,6 +140,7 @@ def _item_actions(
     download_csrf_token: str,
     status: Label,
     playback_session_id: str | None,
+    editor_tab: Literal["artwork"] | None = None,
 ) -> None:
     """Render optimistic watched state and browser-native playback navigation."""
 
@@ -205,7 +214,7 @@ def _item_actions(
     with ui.element("div").classes("k-action-row"):
         if playback_session_id is not None:
             action_button("Stop", stop, primary=True)
-            _item_editor_button(item_id, profile)
+            _item_editor_button(item_id, profile, editor_tab)
             return
         action_button("Play", lambda: launch(False), primary=True, disabled=not available)
         if download_options:
@@ -213,7 +222,7 @@ def _item_actions(
         watched_button = action_button(
             "Mark unwatched" if watched_state.watched else "Mark watched", toggle_watched
         )
-        _item_editor_button(item_id, profile)
+        _item_editor_button(item_id, profile, editor_tab)
 
 
 def _item_download_form(
@@ -242,20 +251,26 @@ def _item_download_form(
         action_button("Download", button_type=ButtonType.SUBMIT)
 
 
-def _item_editor_button(item_id: int, profile: SessionProfile) -> None:
+def _item_editor_button(
+    item_id: int, profile: SessionProfile, initial_tab: Literal["artwork"] | None
+) -> None:
     if not profile.is_administrator:
         return
+    attributes: dict[str, BrowserAttribute] = {
+        "item-id": item_id,
+        "source": f"/kanvas/data/items/{item_id}/edit",
+        "parent-choices-source": f"/kanvas/data/items/{item_id}/parent-choices",
+        "metadata-search-source": f"/kanvas/data/items/{item_id}/metadata-search",
+        "metadata-match-source": f"/kanvas/actions/items/{item_id}/metadata-match",
+        "artwork-fetch-source": f"/kanvas/actions/items/{item_id}/artwork-fetch",
+        "action-source": f"/kanvas/actions/items/{item_id}",
+    }
+    if initial_tab is not None:
+        attributes["initial-tab"] = initial_tab
+        attributes["open-on-load"] = True
     mount_browser_component(
         BrowserComponent.ITEM_EDITOR,
-        {
-            "item-id": item_id,
-            "source": f"/kanvas/data/items/{item_id}/edit",
-            "parent-choices-source": f"/kanvas/data/items/{item_id}/parent-choices",
-            "metadata-search-source": f"/kanvas/data/items/{item_id}/metadata-search",
-            "metadata-match-source": f"/kanvas/actions/items/{item_id}/metadata-match",
-            "artwork-fetch-source": f"/kanvas/actions/items/{item_id}/artwork-fetch",
-            "action-source": f"/kanvas/actions/items/{item_id}",
-        },
+        attributes,
     )
 
 

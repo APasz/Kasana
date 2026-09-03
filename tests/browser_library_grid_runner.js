@@ -814,6 +814,25 @@ async function testAdministrationReportsTrackedJobProgressWithoutChangingTab() {
   assert.deepEqual(instance.activity, {state: 'complete', message: '42 files scanned.'});
 }
 
+async function testAdministrationReusesLoadedJobPageForTracking() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.section = 'jobs';
+  instance.submittedJobId = 'job-17';
+  instance.setAttribute('jobs-source', '/kanvas/data/administration/jobs');
+  let fetches = 0;
+  instance.fetchJson = async () => {
+    fetches += 1;
+    return {items: [{id: 'job-17', kind: 'scan', status: 'completed', message: '42 files scanned.'}], nextCursor: null};
+  };
+  instance.render = () => {};
+  instance.schedule = () => {};
+
+  await instance.load();
+
+  assert.equal(fetches, 1);
+  assert.equal(instance.submittedJobId, null);
+}
+
 function testAdministrationPollsTrackedJobsFrequently() {
   const instance = new globalThis.__administrationTest.KanvasAdministration();
   instance.submittedJobId = 'job-17';
@@ -830,6 +849,72 @@ function testAdministrationPollsTrackedJobsFrequently() {
   assert.equal(interval, 2000);
 }
 
+function testAdministrationPollsActiveJobsFrequently() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.jobs = [{status: 'running'}];
+  let interval = null;
+  const setTimeout = window.setTimeout;
+  window.setTimeout = (_callback, delay) => {
+    interval = delay;
+    return 1;
+  };
+
+  instance.schedule();
+
+  window.setTimeout = setTimeout;
+  assert.equal(interval, 5000);
+}
+
+async function testAdministrationContinuesMetadataReviewPages() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.setAttribute('metadata-source', '/kanvas/data/administration/metadata');
+  instance.cursor = 'after-1';
+  instance.reviewItems = [{itemId: 1}];
+  instance.fetchJson = async (source, suffix) => {
+    assert.equal(source, '/kanvas/data/administration/metadata');
+    assert.equal(suffix, '?cursor=after-1');
+    return {items: [{itemId: 2}], nextCursor: null};
+  };
+  let renders = 0;
+  instance.render = () => { renders += 1; };
+
+  await instance.moreReviewItems();
+
+  assert.deepEqual(instance.reviewItems, [{itemId: 1}, {itemId: 2}]);
+  assert.equal(instance.cursor, null);
+  assert.equal(renders, 1);
+}
+
+function testAdministrationKeepsEncodedJobAnchorsTargetable() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.querySelectorAll = () => [];
+  instance.jobs = [{
+    id: 'repair 1',
+    kind: 'hierarchy-repair',
+    status: 'failed',
+    phase: null,
+    progressCurrent: 0,
+    progressTotal: null,
+    progressUnit: null,
+    counters: [],
+    message: null,
+    failure: 'Repair could not run.',
+    submittedAt: '2026-09-03T10:00:00Z',
+    startedAt: null,
+    completedAt: null,
+    cancellable: false
+  }];
+  const hash = window.location.hash;
+  window.location.hash = '#job-repair%201';
+
+  instance.renderJobs();
+
+  window.location.hash = hash;
+  assert.match(instance.innerHTML, /id="job-repair%201"/);
+  assert.match(instance.innerHTML, /k-job-row--target/);
+  assert.match(instance.innerHTML, /k-job-row__details" open/);
+}
+
 async function testAdministrationReplacesPriorCompletionWithActionFailure() {
   const instance = new globalThis.__administrationTest.KanvasAdministration();
   instance.setAttribute('action-source', '/kanvas/actions/administration');
@@ -841,7 +926,7 @@ async function testAdministrationReplacesPriorCompletionWithActionFailure() {
   const succeeded = await instance.operation('duplicate-resolve-batch', {resolutions: []});
 
   assert.equal(succeeded, false);
-  assert.equal(renders, 1);
+  assert.equal(renders, 2);
   assert.deepEqual(instance.activity, {
     state: 'error',
     message: 'A batch may not contain duplicate sources.'
@@ -857,6 +942,158 @@ function fakeFormValues(values) {
       return Object.hasOwn(values, name);
     }
   };
+}
+
+async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
+  const operations = [];
+  const libraries = new globalThis.__administrationTest.KanvasAdministration();
+  libraries.querySelectorAll = () => [];
+  libraries.section = 'libraries';
+  libraries.roots = [{
+    id: 4,
+    displayName: 'Films',
+    path: '/media/films',
+    kind: 'movie',
+    tags: ['film'],
+    preferredAudioLanguage: 'en',
+    preferredSubtitleLanguage: null,
+    enabled: true,
+    available: true,
+    itemCount: 12,
+    mediaFileCount: 12,
+    lastScanCompletedAt: '2026-09-03T10:00:00Z'
+  }];
+  libraries.hierarchy = {
+    actions: [{kind: 'rename', item_id: 17, item_label: 'Broken title', target_item_id: null, target_label: null, explanation: 'Normalise the title.'}],
+    manual_reviews: [],
+    impact: {playback_states: 1, metadata_bindings: 1, collection_memberships: 0, watch_order_entries: 0}
+  };
+  libraries.duplicates = {
+    candidates: [{
+      source_item_id: 18,
+      source_title: 'Old title',
+      source_year: 2000,
+      target_item_id: 19,
+      target_title: 'New title',
+      target_year: 2000,
+      provider: 'tmdb',
+      provider_id: '19',
+      impact: {playback_states: 1, metadata_bindings: 0, collection_memberships: 0, watch_order_entries: 0}
+    }],
+    fileIssues: []
+  };
+  libraries.operation = async (operation, payload) => {
+    operations.push({operation, payload});
+    return true;
+  };
+
+  libraries.renderLibraries();
+
+  assert.match(libraries.innerHTML, /Add root/);
+  assert.match(libraries.innerHTML, /Scan all/);
+  assert.match(libraries.innerHTML, /Structural issues/);
+  assert.match(libraries.innerHTML, /Duplicate issues/);
+  await libraries.saveRoot(null, fakeFormValues({
+    displayName: 'Series',
+    path: '/media/series',
+    kind: 'series',
+    tags: 'tv, sci-fi',
+    preferredAudioLanguage: 'en',
+    preferredSubtitleLanguage: '',
+    enabled: 'on'
+  }));
+  await libraries.operation('scan', {rootId: 4});
+  await libraries.operation('hierarchy-repair', {apply: true, confirmed: true});
+  await libraries.operation('duplicate-resolve', {sourceItemId: 18, targetItemId: 19, confirmed: true});
+  assert.deepEqual(operations.slice(0, 4), [
+    {
+      operation: 'root-create',
+      payload: {
+        rootId: null,
+        displayName: 'Series',
+        path: '/media/series',
+        kind: 'series',
+        tags: ['tv', 'sci-fi'],
+        preferredAudioLanguage: 'en',
+        preferredSubtitleLanguage: '',
+        enabled: true
+      }
+    },
+    {operation: 'scan', payload: {rootId: 4}},
+    {operation: 'hierarchy-repair', payload: {apply: true, confirmed: true}},
+    {operation: 'duplicate-resolve', payload: {sourceItemId: 18, targetItemId: 19, confirmed: true}}
+  ]);
+
+  const metadata = new globalThis.__administrationTest.KanvasAdministration();
+  metadata.querySelectorAll = () => [];
+  metadata.section = 'metadata';
+  metadata.reviewItems = [{
+    itemId: 19,
+    title: 'New title',
+    year: 2000,
+    kind: 'movie',
+    posterUrl: null,
+    candidates: [{id: 3, provider: 'tmdb', providerId: '19', title: 'New title', year: 2000, kind: 'movie', confidence: 0.92, status: 'suggested'}]
+  }];
+  const metadataOperations = [];
+  metadata.operation = async (operation, payload) => {
+    metadataOperations.push({operation, payload});
+    return true;
+  };
+
+  metadata.renderMetadata();
+
+  assert.match(metadata.innerHTML, /Find another match/);
+  await metadata.metadataAction('match');
+  assert.deepEqual(metadataOperations, [{
+    operation: 'match',
+    payload: {itemId: 19, provider: 'tmdb', providerId: '19'}
+  }]);
+  assert.equal(metadata.reviewedItemCount, 1);
+  assert.match(metadata.innerHTML, /Metadata review is clear/);
+  assert.match(metadata.innerHTML, /Select artwork/);
+
+  metadata.reviewItems = [{
+    itemId: 20,
+    title: 'No suggestion',
+    year: null,
+    kind: 'movie',
+    posterUrl: null,
+    candidates: []
+  }];
+  metadata.reviewIndex = 0;
+  metadata.manualSearchOpen = true;
+  metadata.manualSearchResults = [{provider: 'tmdb', provider_id: '20', title: 'Manual title', year: 2001, kind: 'movie', confidence: 0.8}];
+  metadata.manualSelection = 0;
+  metadata.postJson = async (source, payload) => {
+    assert.equal(source, '/kanvas/actions/items/20/metadata-match');
+    assert.deepEqual(payload, {provider: 'tmdb', providerId: '20', confirmed: true});
+    return {itemId: 20};
+  };
+  const confirm = window.confirm;
+  window.confirm = () => true;
+  await metadata.applyManualMatch();
+  window.confirm = confirm;
+  assert.equal(metadata.reviewedItemCount, 2);
+
+  metadata.subsection = 'artwork';
+  metadata.overview = {artworkCacheSizeBytes: 1024, artworkCacheFileCount: 2};
+  metadata.renderArtworkMaintenance();
+  assert.match(metadata.innerHTML, /Fetch missing artwork/);
+
+  const jobs = new globalThis.__administrationTest.KanvasAdministration();
+  jobs.querySelectorAll = () => [];
+  jobs.section = 'jobs';
+  jobs.jobs = [
+    {id: 'scan-1', kind: 'scan', status: 'running', phase: 'classifying', progressCurrent: 4, progressTotal: 10, progressUnit: 'files', counters: [], submittedAt: '2026-09-03T10:00:00Z', startedAt: null, completedAt: null, cancellable: true},
+    {id: 'repair-1', kind: 'hierarchy-repair', status: 'failed', phase: null, progressCurrent: 0, progressTotal: null, progressUnit: null, counters: [], message: null, failure: 'Repair could not run.', submittedAt: '2026-09-03T10:00:00Z', startedAt: null, completedAt: null, cancellable: false},
+    {id: 'scan-0', kind: 'scan', status: 'completed', phase: null, progressCurrent: 10, progressTotal: 10, progressUnit: 'files', counters: [], submittedAt: '2026-09-03T09:00:00Z', startedAt: null, completedAt: '2026-09-03T09:10:00Z', cancellable: false}
+  ];
+  jobs.renderJobs();
+  assert.match(jobs.innerHTML, /Active and problem jobs first/);
+  assert.doesNotMatch(jobs.innerHTML, /No active or problem jobs/);
+  assert.match(jobs.innerHTML, /Completed history \(1\)/);
+  assert.ok(jobs.innerHTML.indexOf('scan-1') < jobs.innerHTML.indexOf('scan-0'));
 }
 
 function testItemEditorShowsOnlyRelevantKindFields() {
@@ -1149,8 +1386,13 @@ async function main() {
   testKeyboardNavigationLoadsAcrossVirtualPageEdges();
   await testAdministrationPollingWaitsForOpenDialog();
   await testAdministrationReportsTrackedJobProgressWithoutChangingTab();
+  await testAdministrationReusesLoadedJobPageForTracking();
   testAdministrationPollsTrackedJobsFrequently();
+  testAdministrationPollsActiveJobsFrequently();
+  await testAdministrationContinuesMetadataReviewPages();
+  testAdministrationKeepsEncodedJobAnchorsTargetable();
   await testAdministrationReplacesPriorCompletionWithActionFailure();
+  await testAdministrationPrimaryFlowKeepsWorkInFourAreas();
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorUsesTaskFocusedTabs();
   testMetadataProviderLinksSupportDirectReassignment();

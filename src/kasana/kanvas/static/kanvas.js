@@ -1625,7 +1625,7 @@
         this.replaceChildren();
         return;
       }
-      this.innerHTML = '<section class="k-onboarding" role="status"><div><strong>Artwork is not configured yet</strong><p>Your scanned library is ready to review. Configure TMDB, review scanner issues, then choose when to match and fetch artwork.</p><span class="k-action-row"><a class="k-button" href="/administration/hierarchy">Review scanner issues</a><a class="k-button" href="/administration/metadata">Configure TMDB</a><a class="k-button" href="/administration/artwork">Fetch artwork</a></span></div><button type="button" class="k-button" data-onboarding-dismiss>Dismiss</button></section>';
+      this.innerHTML = '<section class="k-onboarding" role="status"><div><strong>Artwork is not configured yet</strong><p>Review library issues, match items, then choose artwork.</p><span class="k-action-row"><a class="k-button" href="/administration/libraries/hierarchy">Review library issues</a><a class="k-button" href="/administration/metadata">Review metadata</a><a class="k-button" href="/administration/metadata/artwork">Artwork maintenance</a></span></div><button type="button" class="k-button" data-onboarding-dismiss>Dismiss</button></section>';
       this.querySelector('[data-onboarding-dismiss]')?.addEventListener('click', () => {
         sessionStorage.setItem(storageKey, 'dismissed');
         this.replaceChildren();
@@ -2708,6 +2708,7 @@
     }
 
     connectedCallback() {
+      this.activeTab = itemEditorTab(this.getAttribute('initial-tab'));
       this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit Details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
       this.dialog = this.querySelector('dialog');
       this.querySelector('[data-item-edit-open]')?.addEventListener('click', () => this.open());
@@ -2719,6 +2720,7 @@
         this.isDirty = false;
         this.isSaving = false;
       });
+      if (this.getAttribute('open-on-load') === 'true') void this.open();
     }
 
     disconnectedCallback() { this.controller?.abort(); }

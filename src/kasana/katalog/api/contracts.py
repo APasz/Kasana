@@ -289,6 +289,7 @@ class StatusResponse(APIModel):
     media_file_count: int = Field(ge=0)
     available_file_count: int = Field(ge=0)
     unresolved_audit_issue_count: int = Field(ge=0)
+    unresolved_metadata_count: int = Field(default=0, ge=0)
     active_job_count: int = Field(ge=0)
     failed_job_count: int = Field(ge=0)
     queued_job_count: int = Field(default=0, ge=0)
@@ -862,6 +863,13 @@ class MetadataReviewCandidate(APIModel):
     kind: LibraryItemKind
     confidence: float = Field(ge=0, le=1)
     status: str = Field(min_length=1, max_length=50)
+
+
+class MetadataReviewItem(APIModel):
+    """One unresolved library item and its remaining suggested candidates."""
+
+    item: LibraryItemSummary
+    candidates: tuple[MetadataReviewCandidate, ...] = Field(default=(), max_length=100)
 
 
 class ProviderStatus(APIModel):

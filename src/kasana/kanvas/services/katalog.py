@@ -108,7 +108,6 @@ from kasana.katalog.public import (
     MetadataBindingReference,
     MetadataMatchRequest,
     MetadataRejectRequest,
-    MetadataReviewCandidate,
     MetadataSearchResult,
     OnDeckEntry,
     PaginatedResponse,
@@ -316,11 +315,8 @@ class KanvasKatalogService:
         """Load only the small operational inputs needed by the overview."""
 
         async with self._client() as client:
-            status, review = await gather(client.status(), client.metadata_review(limit=100))
-        return overview_from_status(
-            status,
-            unresolved_metadata_count=len({candidate.item_id for candidate in review.items}),
-        )
+            status = await client.status()
+        return overview_from_status(status)
 
     async def administration_jobs(
         self, *, cursor: str | None, limit: int = 50
@@ -359,20 +355,13 @@ class KanvasKatalogService:
     async def metadata_review_items(
         self, *, cursor: str | None, limit: int = 50
     ) -> tuple[tuple[MetadataReviewItemView, ...], str | None]:
-        """Group the legacy candidate page by local item before rendering the workflow."""
+        """Load unresolved items, including those that need a manual match."""
 
         async with self._client() as client:
-            page = await client.metadata_review(cursor=cursor, limit=limit)
-            grouped: dict[int, list[MetadataReviewCandidate]] = {}
-            for candidate in page.items:
-                grouped.setdefault(candidate.item_id, []).append(candidate)
-            local_items = await gather(*(client.get_library_item(item_id) for item_id in grouped))
+            page = await client.metadata_review_items(cursor=cursor, limit=limit)
         views: list[MetadataReviewItemView] = []
-        for local in local_items:
-            if local.item is None:
-                continue
-            item = local.item
-            candidates = grouped[item.id]
+        for review_item in page.items:
+            item = review_item.item
             views.append(
                 MetadataReviewItemView(
                     itemId=item.id,
@@ -381,7 +370,7 @@ class KanvasKatalogService:
                     kind=item.kind.value,
                     posterUrl=primary_artwork_url(item),
                     candidates=tuple(
-                        metadata_candidate_view(candidate) for candidate in candidates
+                        metadata_candidate_view(candidate) for candidate in review_item.candidates
                     ),
                 )
             )

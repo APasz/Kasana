@@ -138,9 +138,7 @@ class AdaptivePollingState:
         return 5 if active_jobs else 30
 
 
-def overview_from_status(
-    status: StatusResponse, *, unresolved_metadata_count: int
-) -> AdministrationOverviewView:
+def overview_from_status(status: StatusResponse) -> AdministrationOverviewView:
     """Keep overview derivation in one tested location rather than in browser JavaScript."""
 
     return AdministrationOverviewView(
@@ -149,7 +147,7 @@ def overview_from_status(
         databaseHealthy=status.database_healthy,
         enabledRootCount=status.enabled_root_count,
         unavailableRootCount=status.unavailable_root_count,
-        unresolvedMetadataCount=unresolved_metadata_count,
+        unresolvedMetadataCount=status.unresolved_metadata_count,
         activeJobCount=status.active_job_count,
         failedJobCount=status.failed_job_count,
         interruptedJobCount=status.interrupted_job_count,

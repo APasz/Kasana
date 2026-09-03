@@ -56,6 +56,7 @@ from kasana.katalog.api.contracts import (
     MetadataMatchRequest,
     MetadataRejectRequest,
     MetadataReviewCandidate,
+    MetadataReviewItem,
     MetadataSearchResult,
     MutationResult,
     OnDeckEntry,
@@ -726,6 +727,17 @@ class KatalogClient:
         return await self._get_model(
             "/api/v1/metadata/review",
             PaginatedResponse[MetadataReviewCandidate],
+            params=_params(cursor=cursor, limit=limit),
+        )
+
+    async def metadata_review_items(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> PaginatedResponse[MetadataReviewItem]:
+        """Return unresolved items even when no suggested match remains."""
+
+        return await self._get_model(
+            "/api/v1/metadata/review-items",
+            PaginatedResponse[MetadataReviewItem],
             params=_params(cursor=cursor, limit=limit),
         )
 

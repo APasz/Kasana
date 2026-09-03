@@ -978,6 +978,7 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
         "/api/v1/users/1/continue-watching",
         "/api/v1/users/1/on-deck",
         "/api/v1/metadata/review",
+        "/api/v1/metadata/review-items",
         "/api/v1/jobs",
         "/api/v1/repairs/hierarchy/preview",
         "/api/v1/repairs/duplicates/preview",
@@ -1082,13 +1083,26 @@ async def test_metadata_review_only_returns_unresolved_suggestions(
     api_fixture: ApiFixture,
 ) -> None:
     initial = await api_fixture.client.get("/api/v1/metadata/review")
+    initial_items = await api_fixture.client.get("/api/v1/metadata/review-items")
+    status = await api_fixture.client.get("/api/v1/status")
     assert [candidate["status"] for candidate in initial.json()["items"]] == ["suggested"]
+    assert [
+        (item["item"]["id"], len(item["candidates"])) for item in initial_items.json()["items"]
+    ] == [(1, 1), (2, 0), (3, 0)]
+    assert status.json()["unresolved_metadata_count"] == 3
 
     ignored = await api_fixture.client.post("/api/v1/metadata/items/1/ignore")
     review = await api_fixture.client.get("/api/v1/metadata/review")
+    review_items = await api_fixture.client.get("/api/v1/metadata/review-items")
+    updated_status = await api_fixture.client.get("/api/v1/status")
 
     assert ignored.status_code == 200
     assert review.json()["items"] == []
+    assert [(item["item"]["id"], item["candidates"]) for item in review_items.json()["items"]] == [
+        (2, []),
+        (3, []),
+    ]
+    assert updated_status.json()["unresolved_metadata_count"] == 2
 
 
 async def test_metadata_binding_and_search_endpoints_support_reassignment(
