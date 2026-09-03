@@ -132,6 +132,7 @@ global.customElements = {
 global.document = {
   scripts: [{src: 'http://kanvas.test/_kanvas/kanvas.js?v=test-asset'}],
   activeElement: null,
+  visibilityState: 'visible',
   addEventListener(name, listener) {
     const listeners = documentListeners.get(name) || [];
     listeners.push(listener);
@@ -783,6 +784,327 @@ async function testAdministrationPollingWaitsForOpenDialog() {
   assert.equal(instance.inFlight, false);
 }
 
+async function testAdministrationDoesNotPollAfterDisconnect() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  let resolveRequest;
+  let renders = 0;
+  let schedules = 0;
+  instance.section = 'overview';
+  instance.setAttribute('overview-source', '/kanvas/data/administration/overview');
+  instance.fetchJson = () => new Promise((resolve) => { resolveRequest = resolve; });
+  instance.render = () => { renders += 1; };
+  instance.schedule = () => { schedules += 1; };
+
+  const pending = instance.load();
+  instance.isConnected = false;
+  resolveRequest({activeJobCount: 0});
+  await pending;
+
+  assert.equal(renders, 0);
+  assert.equal(schedules, 0);
+}
+
+async function testAdministrationReloadsAfterVisibilityReturnsDuringPoll() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  let resolveInitial;
+  let resolveReloaded;
+  let requests = 0;
+  const reloaded = new Promise((resolve) => { resolveReloaded = resolve; });
+  instance.section = 'overview';
+  instance.setAttribute('overview-source', '/kanvas/data/administration/overview');
+  instance.render = () => {};
+  instance.schedule = () => {};
+  instance.fetchJson = () => {
+    requests += 1;
+    if (requests === 1) return new Promise((resolve) => { resolveInitial = resolve; });
+    resolveReloaded();
+    return Promise.resolve({activeJobCount: 0});
+  };
+
+  const pending = instance.load();
+  try {
+    document.visibilityState = 'hidden';
+    instance.visibilityChanged();
+    document.visibilityState = 'visible';
+    instance.visibilityChanged();
+    resolveInitial({activeJobCount: 0});
+    await pending;
+    await reloaded;
+    await nextTick();
+
+    assert.equal(requests, 2);
+    assert.equal(instance.reloadPending, false);
+  } finally {
+    document.visibilityState = 'visible';
+  }
+}
+
+async function testAdministrationReloadsAfterOperationInterruptsPoll() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  let resolveInitial;
+  let resolveReloaded;
+  let requests = 0;
+  const refreshedOverview = {activeJobCount: 0, marker: 'refreshed'};
+  const reloaded = new Promise((resolve) => { resolveReloaded = resolve; });
+  instance.section = 'overview';
+  instance.setAttribute('overview-source', '/kanvas/data/administration/overview');
+  instance.setAttribute('action-source', '/kanvas/actions/administration');
+  instance.render = () => {};
+  instance.schedule = () => {};
+  instance.postJson = async () => ({});
+  instance.fetchJson = () => {
+    requests += 1;
+    if (requests === 1) return new Promise((resolve) => { resolveInitial = resolve; });
+    resolveReloaded();
+    return Promise.resolve(refreshedOverview);
+  };
+
+  const pending = instance.load();
+  await instance.operation('root-delete', {rootId: 4, confirm: true});
+  assert.equal(instance.reloadPending, true);
+  resolveInitial({activeJobCount: 1, marker: 'stale'});
+  await pending;
+  await reloaded;
+  await nextTick();
+
+  assert.equal(requests, 2);
+  assert.equal(instance.overview, refreshedOverview);
+  assert.equal(instance.reloadPending, false);
+}
+
+async function testAdministrationLazyLoadsAndRetainsLibraryIssues() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  const requests = [];
+  const hierarchy = {actions: [], manual_reviews: [], impact: {}};
+  const duplicates = {candidates: [], fileIssues: []};
+  instance.section = 'libraries';
+  instance.setAttribute('roots-source', '/kanvas/data/administration/roots');
+  instance.setAttribute('hierarchy-source', '/kanvas/data/administration/hierarchy');
+  instance.setAttribute('duplicates-source', '/kanvas/data/administration/duplicates');
+  instance.querySelectorAll = () => [];
+  instance.render = () => {};
+  instance.schedule = () => {};
+  instance.fetchJson = async (source) => {
+    requests.push(source);
+    if (source.endsWith('/roots')) return {items: []};
+    if (source.endsWith('/hierarchy')) return hierarchy;
+    if (source.endsWith('/duplicates')) return duplicates;
+    throw new Error(`Unexpected source: ${source}`);
+  };
+
+  await instance.load();
+  await instance.load();
+
+  assert.deepEqual(requests, [
+    '/kanvas/data/administration/roots',
+    '/kanvas/data/administration/roots',
+  ]);
+  assert.equal(instance.hierarchy, null);
+  assert.equal(instance.duplicates, null);
+
+  instance.toggleLibraryIssue('hierarchy', true);
+  await nextTick();
+  instance.toggleLibraryIssue('duplicates', true);
+  await nextTick();
+  instance.renderLibraries();
+
+  assert.equal(instance.hierarchy, hierarchy);
+  assert.equal(instance.duplicates, duplicates);
+  assert.match(instance.innerHTML, /data-admin-library-structure id="library-structure" open/);
+  assert.match(instance.innerHTML, /data-admin-library-duplicates id="library-duplicates" open/);
+
+  await instance.load();
+
+  assert.deepEqual(requests, [
+    '/kanvas/data/administration/roots',
+    '/kanvas/data/administration/roots',
+    '/kanvas/data/administration/hierarchy',
+    '/kanvas/data/administration/duplicates',
+    '/kanvas/data/administration/roots',
+  ]);
+  assert.equal(instance.hierarchy, hierarchy);
+  assert.equal(instance.duplicates, duplicates);
+}
+
+async function testAdministrationDeepLinkLoadsOnlyItsLibraryIssue() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  const requests = [];
+  instance.section = 'libraries';
+  instance.subsection = 'duplicates';
+  instance.setAttribute('roots-source', '/kanvas/data/administration/roots');
+  instance.setAttribute('hierarchy-source', '/kanvas/data/administration/hierarchy');
+  instance.setAttribute('duplicates-source', '/kanvas/data/administration/duplicates');
+  instance.querySelectorAll = () => [];
+  instance.schedule = () => {};
+  instance.fetchJson = async (source) => {
+    requests.push(source);
+    if (source.endsWith('/roots')) return {items: []};
+    if (source.endsWith('/duplicates')) return {candidates: [], fileIssues: []};
+    throw new Error(`Unexpected source: ${source}`);
+  };
+
+  await instance.load();
+
+  assert.deepEqual(requests, [
+    '/kanvas/data/administration/roots',
+    '/kanvas/data/administration/duplicates',
+  ]);
+  assert.equal(instance.hierarchy, null);
+  assert.match(instance.innerHTML, /data-admin-library-duplicates id="library-duplicates" open/);
+}
+
+async function testAdministrationInvalidatesRelevantLibraryIssuesAfterCompletion() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  const previousHierarchy = {actions: [], manual_reviews: [], impact: {}};
+  const previousDuplicates = {candidates: [], fileIssues: []};
+  const refreshedHierarchy = {actions: [{kind: 'rename'}], manual_reviews: [], impact: {}};
+  const refreshedDuplicates = {candidates: [{source_item_id: 1, target_item_id: 2}], fileIssues: []};
+  const requests = [];
+  instance.section = 'libraries';
+  instance.hierarchy = previousHierarchy;
+  instance.duplicates = previousDuplicates;
+  instance.setAttribute('action-source', '/kanvas/actions/administration');
+  instance.setAttribute('jobs-source', '/kanvas/data/administration/jobs');
+  instance.setAttribute('hierarchy-source', '/kanvas/data/administration/hierarchy');
+  instance.setAttribute('duplicates-source', '/kanvas/data/administration/duplicates');
+  instance.querySelectorAll = () => [];
+  instance.render = () => {};
+  instance.load = () => {};
+  instance.postJson = async () => ({job: {id: 'repair-1'}});
+
+  assert.deepEqual(instance.libraryIssueInvalidationsFor('scan', {dryRun: true}), []);
+  assert.deepEqual(instance.libraryIssueInvalidationsFor('hierarchy-repair', {apply: false}), []);
+  assert.deepEqual(instance.libraryIssueInvalidationsFor('root-update'), ['hierarchy']);
+  assert.deepEqual(instance.libraryIssueInvalidationsFor('root-delete'), ['hierarchy', 'duplicates']);
+
+  await instance.operation('hierarchy-repair', {apply: true, confirmed: true});
+
+  assert.equal(instance.hierarchy, previousHierarchy);
+  assert.equal(instance.duplicates, previousDuplicates);
+  assert.deepEqual(instance.submittedLibraryIssueInvalidations, ['hierarchy', 'duplicates']);
+
+  instance.fetchJson = async (source) => {
+    requests.push(source);
+    if (source.endsWith('/jobs')) return {items: [{id: 'repair-1', kind: 'hierarchy-repair', status: 'completed'}]};
+    if (source.endsWith('/hierarchy')) return refreshedHierarchy;
+    if (source.endsWith('/duplicates')) return refreshedDuplicates;
+    throw new Error(`Unexpected source: ${source}`);
+  };
+
+  await instance.checkSubmittedJob();
+  await nextTick();
+
+  assert.deepEqual(requests, [
+    '/kanvas/data/administration/jobs',
+    '/kanvas/data/administration/hierarchy',
+    '/kanvas/data/administration/duplicates',
+  ]);
+  assert.equal(instance.hierarchy, refreshedHierarchy);
+  assert.equal(instance.duplicates, refreshedDuplicates);
+}
+
+async function testAdministrationConfirmationFlowUsesReusableDialog() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  const remove = new FakeElement('button');
+  const confirmations = [];
+  const operations = [];
+  remove.dataset.adminRootDelete = '4';
+  instance.roots = [{id: 4, displayName: 'Films', itemCount: 12}];
+  instance.querySelectorAll = (selector) => selector === '[data-admin-root-delete]' ? [remove] : [];
+  instance.requestConfirmation = async (confirmation) => {
+    confirmations.push(confirmation);
+    return true;
+  };
+  instance.operation = async (...arguments_) => {
+    operations.push(arguments_);
+    return true;
+  };
+
+  instance.bindActions();
+  remove.click();
+  await nextTick();
+
+  assert.deepEqual(confirmations, [{
+    title: 'Remove Films?',
+    message: 'This deletes the root configuration and 12 catalogued items. Media files are unchanged.',
+    confirmLabel: 'Remove root',
+    destructive: true,
+  }]);
+  assert.deepEqual(operations, [['root-delete', {rootId: 4, confirm: true}]]);
+
+  instance.requestConfirmation = async () => false;
+  remove.click();
+  await nextTick();
+
+  assert.equal(operations.length, 1);
+  assert.doesNotMatch(
+    `${fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8')}\n${fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8')}`,
+    /window\.confirm/
+  );
+}
+
+async function testConfirmationDialogDoesNotReuseAnAcceptedReturnValue() {
+  const ConfirmationDialog = customElements.get('kanvas-confirmation-dialog');
+  const confirmation = new ConfirmationDialog();
+  const dialog = new HTMLDialogElement('dialog');
+  const title = new FakeElement('strong');
+  const message = new FakeElement('p');
+  const accept = new FakeElement('button');
+  const classes = new Set();
+  accept.classList = {
+    toggle(name, enabled) {
+      if (enabled) classes.add(name);
+      else classes.delete(name);
+    },
+  };
+  dialog.querySelector = (selector) => ({
+    '[data-kanvas-confirmation-title]': title,
+    '[data-kanvas-confirmation-message]': message,
+    '[data-kanvas-confirmation-accept]': accept,
+  })[selector] || null;
+  dialog.showModal = () => { dialog.open = true; };
+  confirmation.querySelector = (selector) => (
+    selector === '[data-kanvas-confirmation-dialog]' ? dialog : null
+  );
+  confirmation.connectedCallback();
+  dialog.returnValue = 'confirm';
+
+  const result = confirmation.request({title: 'Remove root?', message: 'Remove it.', destructive: true});
+
+  assert.equal(dialog.returnValue, '');
+  assert.equal(title.textContent, 'Remove root?');
+  assert.equal(message.textContent, 'Remove it.');
+  assert.equal(classes.has('k-button--danger'), true);
+  dialog.open = false;
+  for (const entry of dialog.listeners.get('close') || []) entry.listener();
+  assert.equal(await result, false);
+
+  const accepted = confirmation.request({title: 'Remove root?', message: 'Remove it.'});
+  dialog.returnValue = 'confirm';
+  dialog.open = false;
+  for (const entry of dialog.listeners.get('close') || []) entry.listener();
+  assert.equal(await accepted, true);
+}
+
+function testAdministrationRefreshesAfterRootDialogCloses() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  const dialog = new HTMLDialogElement('dialog');
+  let renders = 0;
+  dialog.querySelector = () => null;
+  dialog.showModal = () => { dialog.open = true; };
+  instance.section = 'libraries';
+  instance.render = () => { renders += 1; };
+  instance.querySelector = (selector) => (
+    selector === '[data-admin-root-dialog]' ? dialog : null
+  );
+
+  instance.rootDialog(null);
+  dialog.open = false;
+  for (const entry of dialog.listeners.get('close') || []) entry.listener();
+
+  assert.equal(renders, 1);
+}
+
 async function testAdministrationReportsTrackedJobProgressWithoutChangingTab() {
   const instance = new globalThis.__administrationTest.KanvasAdministration();
   instance.submittedJobId = 'job-17';
@@ -1196,15 +1518,7 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
     assert.deepEqual(payload, {provider: 'tmdb', providerId: '20', confirmed: true});
     return {itemId: 20};
   };
-  const confirm = window.confirm;
-  let confirmationPrompts = 0;
-  window.confirm = () => {
-    confirmationPrompts += 1;
-    return false;
-  };
   await metadata.applyManualMatch();
-  window.confirm = confirm;
-  assert.equal(confirmationPrompts, 0);
   assert.equal(metadata.reviewedItemCount, 2);
 
   metadata.subsection = 'artwork';
@@ -1357,17 +1671,23 @@ function testMetadataProviderLinksSupportDirectReassignment() {
   assert.match(matchTab, /Save local edits does not change the metadata association/);
 }
 
-function testItemEditorConfirmsDiscardingUnsavedChanges() {
+async function testItemEditorConfirmsDiscardingUnsavedChanges() {
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
-  const confirm = window.confirm;
-  let prompts = 0;
-  window.confirm = () => { prompts += 1; return false; };
+  const confirmations = [];
+  editor.requestConfirmation = async (confirmation) => {
+    confirmations.push(confirmation);
+    return false;
+  };
   editor.isDirty = true;
-  assert.equal(editor.confirmDiscard(), false);
+  assert.equal(await editor.confirmDiscard(), false);
   editor.isSaving = true;
-  assert.equal(editor.confirmDiscard(), false);
-  assert.equal(prompts, 1);
-  window.confirm = confirm;
+  assert.equal(await editor.confirmDiscard(), false);
+  assert.deepEqual(confirmations, [{
+    title: 'Discard unsaved changes?',
+    message: 'Your local edits to this item will be lost.',
+    confirmLabel: 'Discard changes',
+    destructive: true,
+  }]);
 }
 
 function testItemEditorHidesForceControlsForAutomaticDefaults() {
@@ -1525,6 +1845,15 @@ async function main() {
   testResponsiveVirtualSpacersTrackMountedGridGeometry();
   testKeyboardNavigationLoadsAcrossVirtualPageEdges();
   await testAdministrationPollingWaitsForOpenDialog();
+  await testAdministrationDoesNotPollAfterDisconnect();
+  await testAdministrationReloadsAfterVisibilityReturnsDuringPoll();
+  await testAdministrationReloadsAfterOperationInterruptsPoll();
+  await testAdministrationLazyLoadsAndRetainsLibraryIssues();
+  await testAdministrationDeepLinkLoadsOnlyItsLibraryIssue();
+  await testAdministrationInvalidatesRelevantLibraryIssuesAfterCompletion();
+  await testAdministrationConfirmationFlowUsesReusableDialog();
+  await testConfirmationDialogDoesNotReuseAnAcceptedReturnValue();
+  testAdministrationRefreshesAfterRootDialogCloses();
   await testAdministrationReportsTrackedJobProgressWithoutChangingTab();
   await testAdministrationStopsTrackingProblemJobs();
   await testAdministrationReusesLoadedJobPageForTracking();
@@ -1540,7 +1869,7 @@ async function main() {
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorUsesTaskFocusedTabs();
   testMetadataProviderLinksSupportDirectReassignment();
-  testItemEditorConfirmsDiscardingUnsavedChanges();
+  await testItemEditorConfirmsDiscardingUnsavedChanges();
   testItemEditorHidesForceControlsForAutomaticDefaults();
   testItemEditorPayloadPreservesHiddenState();
   testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults();

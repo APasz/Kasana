@@ -1,7 +1,13 @@
 (() => {
   'use strict';
 
-  const {escapeHtml, jobDetail, providerEntryUrl, tmdbEntryReferenceFromValue} = window.kanvasInternals;
+  const {
+    escapeHtml,
+    jobDetail,
+    providerEntryUrl,
+    requestKanvasConfirmation,
+    tmdbEntryReferenceFromValue,
+  } = window.kanvasInternals;
   const adminDate = (value) => {
     if (typeof value !== 'string') return '—';
     const parsed = new Date(value);
@@ -53,6 +59,20 @@
   const isActiveJob = (job) => job?.status === 'queued' || job?.status === 'running';
   const isProblemJob = (job) => job?.status === 'failed' || job?.status === 'interrupted';
   const currentHashTarget = () => String(window.location.hash || '').slice(1);
+  const LIBRARY_ISSUE_PANELS = Object.freeze({
+    hierarchy: Object.freeze({source: 'hierarchy-source', selector: '[data-admin-library-structure]'}),
+    duplicates: Object.freeze({source: 'duplicates-source', selector: '[data-admin-library-duplicates]'}),
+  });
+  const LIBRARY_ISSUE_NAMES = Object.freeze(Object.keys(LIBRARY_ISSUE_PANELS));
+  const LIBRARY_ISSUE_INVALIDATIONS = Object.freeze({
+    scan: Object.freeze(['hierarchy', 'duplicates']),
+    'library-consistency': Object.freeze(['hierarchy', 'duplicates']),
+    'hierarchy-repair': Object.freeze(['hierarchy', 'duplicates']),
+    'duplicate-resolve': Object.freeze(['hierarchy', 'duplicates']),
+    'duplicate-resolve-batch': Object.freeze(['hierarchy', 'duplicates']),
+    'root-update': Object.freeze(['hierarchy']),
+    'root-delete': Object.freeze(['hierarchy', 'duplicates']),
+  });
 
   class KanvasAdministration extends HTMLElement {
     constructor() {
@@ -62,6 +82,15 @@
       this.overview = null;
       this.hierarchy = null;
       this.duplicates = null;
+      this.libraryIssueStates = Object.fromEntries(LIBRARY_ISSUE_NAMES.map((name) => [name, {
+        open: false,
+        status: 'idle',
+        error: null,
+        invalidated: false,
+        controller: null,
+        request: null,
+      }]));
+      this.submittedLibraryIssueInvalidations = [];
       this.selectedDuplicatePairs = new Set();
       this.jobs = [];
       this.roots = [];
@@ -81,6 +110,7 @@
       this.manualSelection = null;
       this.manualReferenceValue = '';
       this.inFlight = false;
+      this.reloadPending = false;
       this.timer = null;
       this.abort = null;
       this.manualAbort = null;
@@ -91,6 +121,9 @@
     connectedCallback() {
       this.section = this.getAttribute('data-section') || 'overview';
       this.subsection = this.getAttribute('data-subsection') || null;
+      if (this.section === 'libraries' && Object.hasOwn(LIBRARY_ISSUE_PANELS, this.subsection)) {
+        this.libraryIssueState(this.subsection).open = true;
+      }
       document.addEventListener('visibilitychange', this.onVisibility);
       document.addEventListener('keydown', this.onKeyDown);
       this.load();
@@ -101,6 +134,8 @@
       document.removeEventListener('keydown', this.onKeyDown);
       window.clearTimeout(this.timer);
       this.abort?.abort();
+      this.abortLibraryIssueLoads();
+      this.reloadPending = false;
       this.manualAbort?.abort();
       this.manualAbort = null;
     }
@@ -111,12 +146,12 @@
       return this.querySelector('dialog[open]') instanceof HTMLDialogElement;
     }
 
-    async fetchJson(source, suffix = '') {
+    async fetchJson(source, suffix = '', signal = this.abort?.signal) {
       if (!source) throw new Error('Missing administration source');
       const response = await fetch(`${source}${suffix}`, {
         headers: {'Accept': 'application/json'},
         credentials: 'same-origin',
-        signal: this.abort?.signal,
+        signal,
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error || `Administration request failed (${response.status})`);
@@ -139,57 +174,210 @@
       return responsePayload;
     }
 
+    libraryIssueState(name) {
+      const state = this.libraryIssueStates[name];
+      if (!state) throw new Error(`Unknown library issue panel: ${name}`);
+      return state;
+    }
+
+    libraryIssueData(name) {
+      if (name === 'hierarchy') return this.hierarchy;
+      if (name === 'duplicates') return this.duplicates;
+      throw new Error(`Unknown library issue panel: ${name}`);
+    }
+
+    setLibraryIssueData(name, data) {
+      if (name === 'hierarchy') this.hierarchy = data;
+      else if (name === 'duplicates') this.duplicates = data;
+      else throw new Error(`Unknown library issue panel: ${name}`);
+    }
+
+    libraryIssueIsOpen(name) {
+      return this.libraryIssueState(name).open || this.subsection === name;
+    }
+
+    libraryIssueNeedsLoad(name) {
+      const state = this.libraryIssueState(name);
+      return this.libraryIssueData(name) === null
+        && state.status === 'idle'
+        && !state.request
+        && (this.libraryIssueIsOpen(name) || state.invalidated);
+    }
+
+    libraryIssueNamesToLoad() {
+      return LIBRARY_ISSUE_NAMES.filter((name) => this.libraryIssueNeedsLoad(name));
+    }
+
+    async ensureLibraryIssue(name) {
+      if (!this.isConnected || !this.libraryIssueNeedsLoad(name)) return;
+      const state = this.libraryIssueState(name);
+      const panel = LIBRARY_ISSUE_PANELS[name];
+      const controller = new AbortController();
+      const request = this.fetchJson(this.source(panel.source), '', controller.signal);
+      state.status = 'loading';
+      state.error = null;
+      state.controller = controller;
+      state.request = request;
+      if (this.isConnected && this.section === 'libraries' && !this.hasOpenDialog()) {
+        this.renderLibraries();
+      }
+      try {
+        const data = await request;
+        if (state.request !== request) return;
+        this.setLibraryIssueData(name, data);
+        state.status = 'idle';
+        state.error = null;
+        state.invalidated = false;
+      } catch (error) {
+        if (state.request !== request) return;
+        if (error?.name === 'AbortError') {
+          state.status = 'idle';
+        } else {
+          state.status = 'error';
+          state.error = error?.message || 'This section could not be loaded.';
+        }
+      } finally {
+        if (state.request === request) {
+          state.controller = null;
+          state.request = null;
+        }
+        if (this.isConnected && this.section === 'libraries' && !this.hasOpenDialog()) {
+          this.renderLibraries();
+        }
+      }
+    }
+
+    abortLibraryIssueLoads() {
+      LIBRARY_ISSUE_NAMES.forEach((name) => {
+        const state = this.libraryIssueState(name);
+        state.controller?.abort();
+        state.controller = null;
+        state.request = null;
+        if (state.status === 'loading') state.status = 'idle';
+      });
+    }
+
+    invalidateLibraryIssues(names) {
+      names.forEach((name) => {
+        const state = this.libraryIssueState(name);
+        state.controller?.abort();
+        state.controller = null;
+        state.request = null;
+        state.status = 'idle';
+        state.error = null;
+        state.invalidated = true;
+        this.setLibraryIssueData(name, null);
+      });
+    }
+
+    libraryIssueInvalidationsFor(operation, extra = {}) {
+      if (this.section !== 'libraries') return [];
+      if (
+        (operation === 'scan' && extra.dryRun === true)
+        || (operation === 'library-consistency' && extra.dryRun === true)
+        || (operation === 'hierarchy-repair' && extra.apply !== true)
+      ) {
+        return [];
+      }
+      return [...(LIBRARY_ISSUE_INVALIDATIONS[operation] || [])];
+    }
+
+    refreshInvalidatedLibraryIssues() {
+      if (!this.isConnected || this.section !== 'libraries' || document.visibilityState === 'hidden') {
+        return;
+      }
+      this.libraryIssueNamesToLoad().forEach((name) => {
+        void this.ensureLibraryIssue(name);
+      });
+    }
+
+    toggleLibraryIssue(name, open) {
+      const state = this.libraryIssueState(name);
+      state.open = open;
+      if (!open && this.subsection === name) this.subsection = null;
+      if (open && state.status === 'error') {
+        state.status = 'idle';
+        state.error = null;
+      }
+      if (open) void this.ensureLibraryIssue(name);
+    }
+
+    retryLibraryIssue(name) {
+      const state = this.libraryIssueState(name);
+      state.status = 'idle';
+      state.error = null;
+      void this.ensureLibraryIssue(name);
+    }
+
     async load() {
-      if (this.inFlight || document.visibilityState === 'hidden') return;
+      if (!this.isConnected || document.visibilityState === 'hidden') return;
+      if (this.inFlight) {
+        this.reloadPending = true;
+        this.abort?.abort();
+        return;
+      }
       if (this.hasOpenDialog()) {
         this.schedule();
         return;
       }
       this.inFlight = true;
       this.abort?.abort();
-      this.abort = new AbortController();
+      const controller = new AbortController();
+      this.abort = controller;
       this.renderLoading();
       try {
         let jobPage = null;
         if (this.section === 'overview') {
-          this.overview = await this.fetchJson(this.source('overview-source'));
+          const overview = await this.fetchJson(this.source('overview-source'), '', controller.signal);
+          if (!this.isConnected || controller.signal.aborted) return;
+          this.overview = overview;
         } else if (this.section === 'libraries') {
-          const [roots, hierarchy, duplicates] = await Promise.all([
-            this.fetchJson(this.source('roots-source')),
-            this.fetchJson(this.source('hierarchy-source')),
-            this.fetchJson(this.source('duplicates-source')),
-          ]);
+          const roots = await this.fetchJson(this.source('roots-source'), '', controller.signal);
+          if (!this.isConnected || controller.signal.aborted) return;
           this.roots = Array.isArray(roots.items) ? roots.items : [];
-          this.hierarchy = hierarchy;
-          this.duplicates = duplicates;
+          await Promise.all(this.libraryIssueNamesToLoad().map((name) => this.ensureLibraryIssue(name)));
         } else if (this.section === 'metadata') {
           if (this.subsection === 'artwork') {
-            this.overview = await this.fetchJson(this.source('overview-source'));
+            const overview = await this.fetchJson(this.source('overview-source'), '', controller.signal);
+            if (!this.isConnected || controller.signal.aborted) return;
+            this.overview = overview;
           } else {
-            const page = await this.fetchJson(this.source('metadata-source'));
+            const page = await this.fetchJson(this.source('metadata-source'), '', controller.signal);
+            if (!this.isConnected || controller.signal.aborted) return;
             this.reviewItems = Array.isArray(page.items) ? page.items : [];
             this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
             this.reviewIndex = Math.min(this.reviewIndex, Math.max(0, this.reviewItems.length - 1));
           }
         } else if (this.section === 'jobs') {
-          const page = await this.fetchJson(this.source('jobs-source'));
+          const page = await this.fetchJson(this.source('jobs-source'), '', controller.signal);
+          if (!this.isConnected || controller.signal.aborted) return;
           this.jobs = Array.isArray(page.items) ? page.items : [];
           this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
           jobPage = page;
         }
-        await this.checkSubmittedJob(jobPage);
-        if (!this.hasOpenDialog()) this.render();
+        if (!this.isConnected || controller.signal.aborted) return;
+        await this.checkSubmittedJob(jobPage, controller.signal);
+        if (this.isConnected && !controller.signal.aborted && !this.hasOpenDialog()) this.render();
       } catch (error) {
-        if (error?.name !== 'AbortError') this.renderError(error);
+        if (this.isConnected && !controller.signal.aborted && error?.name !== 'AbortError') {
+          this.renderError(error);
+        }
       } finally {
+        if (this.abort === controller) this.abort = null;
         this.inFlight = false;
+        if (!this.isConnected || document.visibilityState === 'hidden') return;
+        if (this.reloadPending) {
+          this.reloadPending = false;
+          void this.load();
+          return;
+        }
         this.schedule();
       }
     }
 
     schedule() {
       window.clearTimeout(this.timer);
-      if (document.visibilityState === 'hidden') return;
+      if (!this.isConnected || document.visibilityState === 'hidden') return;
       const hasActiveJobs = Number(this.overview?.activeJobCount || 0) > 0
         || this.jobs.some(isActiveJob);
       const interval = this.submittedJobId ? 2000 : hasActiveJobs ? 5000 : 30000;
@@ -197,9 +385,14 @@
     }
 
     visibilityChanged() {
+      if (!this.isConnected) return;
       if (document.visibilityState === 'hidden') {
         window.clearTimeout(this.timer);
+        this.reloadPending = false;
         this.abort?.abort();
+        this.abortLibraryIssueLoads();
+      } else if (this.inFlight) {
+        this.reloadPending = true;
       } else {
         this.load();
       }
@@ -327,8 +520,8 @@
     }
 
     renderLibraries() {
-      const structureOpen = this.subsection === 'hierarchy' || Boolean(this.querySelector('[data-admin-library-structure]')?.open);
-      const duplicatesOpen = this.subsection === 'duplicates' || Boolean(this.querySelector('[data-admin-library-duplicates]')?.open);
+      const structureOpen = this.libraryIssueIsOpen('hierarchy');
+      const duplicatesOpen = this.libraryIssueIsOpen('duplicates');
       const roots = this.roots.map((root) => this.rootRow(root)).join('');
       const actions = '<button type="button" class="k-button k-button--primary" data-admin-root-add>Add root</button><button type="button" class="k-button" data-admin-operation="scan">Scan all</button>';
       this.innerHTML = `<section class="k-admin-workspace k-admin-libraries" aria-live="polite">
@@ -337,14 +530,28 @@
         ${this.renderHierarchySection(structureOpen)}
         ${this.renderDuplicatesSection(duplicatesOpen)}
         <details class="k-admin-maintenance"><summary>More maintenance</summary><div><span>Queue a non-destructive consistency check.</span><button type="button" class="k-button" data-admin-operation="library-consistency" data-admin-dry-run="true">Check consistency</button></div></details>
-      </section><dialog class="k-kanvas-dialog" data-admin-root-dialog></dialog>`;
+      </section><dialog class="k-kanvas-dialog" data-admin-root-dialog></dialog><kanvas-confirmation-dialog data-admin-confirmation></kanvas-confirmation-dialog>`;
       this.bindActions();
+    }
+
+    renderLibraryIssuePlaceholder(name, title) {
+      const state = this.libraryIssueState(name);
+      if (state.status === 'loading') {
+        return '<div class="k-admin-status" aria-live="polite">Loading issues…</div>';
+      }
+      if (state.status === 'error') {
+        return `<div class="k-admin-status k-admin-status--error" aria-live="assertive">${escapeHtml(state.error || `${title} could not be loaded.`)} <button type="button" class="k-button" data-admin-library-issue-retry="${escapeHtml(name)}">Retry</button></div>`;
+      }
+      return `<div class="k-admin-status">Open this section to load ${escapeHtml(title.toLowerCase())}.</div>`;
     }
 
     renderHierarchySection(open) {
       const data = this.hierarchy;
       if (!data || !Array.isArray(data.actions) || !Array.isArray(data.manual_reviews)) {
-        return '<section class="k-admin-issue-panel"><div class="k-admin-status">Structural issues could not be loaded.</div></section>';
+        return `<details class="k-admin-issue-panel" data-admin-library-structure id="library-structure"${open ? ' open' : ''}>
+          <summary><span>Structural issues</span><small>Load on open</small></summary>
+          <div class="k-admin-issue-panel__content">${this.renderLibraryIssuePlaceholder('hierarchy', 'Structural issues')}</div>
+        </details>`;
       }
       const impact = data.impact || {};
       const actionGroups = new Map();
@@ -385,6 +592,12 @@
     }
 
     renderDuplicatesSection(open) {
+      if (!this.duplicates || typeof this.duplicates !== 'object') {
+        return `<details class="k-admin-issue-panel" data-admin-library-duplicates id="library-duplicates"${open ? ' open' : ''}>
+          <summary><span>Duplicate issues</span><small>Load on open</small></summary>
+          <div class="k-admin-issue-panel__content">${this.renderLibraryIssuePlaceholder('duplicates', 'Duplicate issues')}</div>
+        </details>`;
+      }
       const candidates = Array.isArray(this.duplicates?.candidates) ? this.duplicates.candidates : [];
       const fileIssues = Array.isArray(this.duplicates?.fileIssues) ? this.duplicates.fileIssues : [];
       const candidateKeys = new Set(candidates.map((candidate) => `${Number(candidate.source_item_id)}:${Number(candidate.target_item_id)}`));
@@ -528,7 +741,7 @@
         <details class="k-admin-job-history" id="completed-jobs"${completedOpen ? ' open' : ''}><summary>Completed history (${completed.length})</summary><section class="k-admin-list">${completed.map((job) => this.renderJob(job)).join('') || '<div class="k-admin-status">No completed jobs yet.</div>'}</section></details>
         ${cancelled.length ? `<details class="k-admin-job-history"${cancelledOpen ? ' open' : ''}><summary>Cancelled jobs (${cancelled.length})</summary><section class="k-admin-list">${cancelled.map((job) => this.renderJob(job)).join('')}</section></details>` : ''}
         ${this.cursor ? '<button type="button" class="k-button" data-admin-more>Load earlier jobs</button>' : ''}
-      </section>`;
+      </section><kanvas-confirmation-dialog data-admin-confirmation></kanvas-confirmation-dialog>`;
       this.bindActions();
     }
 
@@ -539,24 +752,52 @@
       this.renderJobs();
     }
 
+    requestConfirmation(confirmation) {
+      return requestKanvasConfirmation(
+        this.querySelector('[data-admin-confirmation]'), confirmation
+      );
+    }
+
+    async confirmOperation(operation, extra, confirmation) {
+      const confirmed = await this.requestConfirmation(confirmation);
+      if (!confirmed) {
+        if (!this.hasOpenDialog()) this.render();
+        return false;
+      }
+      return this.operation(operation, extra);
+    }
+
     bindActions() {
+      LIBRARY_ISSUE_NAMES.forEach((name) => {
+        const panel = this.querySelector(LIBRARY_ISSUE_PANELS[name].selector);
+        panel?.addEventListener('toggle', () => this.toggleLibraryIssue(name, panel.open));
+      });
+      this.querySelectorAll('[data-admin-library-issue-retry]').forEach((button) => button.addEventListener('click', () => {
+        this.retryLibraryIssue(button.dataset.adminLibraryIssueRetry);
+      }));
       this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => {
         const extra = {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null};
         if (button.dataset.adminDryRun === 'true') extra.dryRun = true;
         this.operation(button.dataset.adminOperation, extra);
       }));
       this.querySelector('[data-admin-hierarchy-apply]')?.addEventListener('click', () => {
-        if (window.confirm('Apply this structural repair? A database backup is created first. Media files are unchanged.')) {
-          this.operation('hierarchy-repair', {apply: true, confirmed: true});
-        }
+        void this.confirmOperation('hierarchy-repair', {apply: true, confirmed: true}, {
+          title: 'Apply structural repair?',
+          message: 'A database backup is created first. Media files are unchanged.',
+          confirmLabel: 'Apply repair',
+          destructive: true,
+        });
       });
       this.querySelectorAll('[data-admin-duplicate-resolve]').forEach((button) => button.addEventListener('click', () => {
         const sourceItemId = Number(button.dataset.adminDuplicateSource);
         const targetItemId = Number(button.dataset.adminDuplicateTarget);
         if (!Number.isInteger(sourceItemId) || !Number.isInteger(targetItemId)) return;
-        if (window.confirm('Merge this duplicate record? Its library state moves to the kept record, then the duplicate record is deleted. A database backup is created first. Media files are unchanged.')) {
-          this.operation('duplicate-resolve', {sourceItemId, targetItemId, confirmed: true});
-        }
+        void this.confirmOperation('duplicate-resolve', {sourceItemId, targetItemId, confirmed: true}, {
+          title: 'Merge duplicate record?',
+          message: 'Its library state moves to the kept record, then the duplicate record is deleted. A database backup is created first. Media files are unchanged.',
+          confirmLabel: 'Merge record',
+          destructive: true,
+        });
       }));
       this.querySelectorAll('[data-admin-duplicate-select]').forEach((input) => input.addEventListener('change', () => {
         const key = input.dataset.adminDuplicateSelect;
@@ -571,17 +812,27 @@
           return {source_item_id, target_item_id};
         });
         if (!resolutions.length) return;
-        if (window.confirm(`Merge ${resolutions.length} selected duplicate records? Their library state moves to the kept records, then the duplicates are deleted. One database backup is created first. Media files are unchanged.`)) {
-          this.operation('duplicate-resolve-batch', {resolutions, confirmed: true});
-        }
+        void this.confirmOperation('duplicate-resolve-batch', {resolutions, confirmed: true}, {
+          title: `Merge ${resolutions.length} selected duplicate records?`,
+          message: 'Their library state moves to the kept records, then the duplicates are deleted. One database backup is created first. Media files are unchanged.',
+          confirmLabel: 'Merge records',
+          destructive: true,
+        });
       });
       this.querySelectorAll('[data-admin-cancel]').forEach((button) => button.addEventListener('click', () => {
-        if (window.confirm('Cancel this job? Work already completed will be kept.')) this.operation('cancel-job', {jobId: button.dataset.adminCancel});
+        void this.confirmOperation('cancel-job', {jobId: button.dataset.adminCancel}, {
+          title: 'Cancel job?',
+          message: 'Work already completed will be kept.',
+          confirmLabel: 'Cancel job',
+        });
       }));
       this.querySelectorAll('[data-admin-clear]').forEach((button) => button.addEventListener('click', () => {
-        if (window.confirm('Clear this problem job? Its job history and details will be removed.')) {
-          this.operation('clear-job', {jobId: button.dataset.adminClear, confirmed: true});
-        }
+        void this.confirmOperation('clear-job', {jobId: button.dataset.adminClear, confirmed: true}, {
+          title: 'Clear problem job?',
+          message: 'Its job history and details will be removed.',
+          confirmLabel: 'Clear job',
+          destructive: true,
+        });
       }));
       this.querySelectorAll('[data-admin-job-details]').forEach((button) => button.addEventListener('click', () => {
         this.toggleJobDetails(button.dataset.adminJobDetails);
@@ -627,9 +878,12 @@
         const name = root.displayName || `Root ${root.id}`;
         const itemCount = Number(root.itemCount || 0);
         const itemScope = itemCount ? ` and ${plural(itemCount, 'catalogued item')}` : '';
-        if (window.confirm(`Remove ${name}? This deletes the root configuration${itemScope}. Media files are unchanged.`)) {
-          this.operation('root-delete', {rootId: root.id, confirm: true});
-        }
+        void this.confirmOperation('root-delete', {rootId: root.id, confirm: true}, {
+          title: `Remove ${name}?`,
+          message: `This deletes the root configuration${itemScope}. Media files are unchanged.`,
+          confirmLabel: 'Remove root',
+          destructive: true,
+        });
       }));
     }
 
@@ -640,14 +894,20 @@
       this.render();
       try {
         const payload = await this.postJson(source, {operation, ...extra});
+        const invalidatedIssues = this.libraryIssueInvalidationsFor(operation, extra);
         if (operation === 'clear-job' && typeof extra.jobId === 'string') {
           this.expandedJobIds.delete(extra.jobId);
-          if (this.submittedJobId === extra.jobId) this.submittedJobId = null;
+          if (this.submittedJobId === extra.jobId) {
+            this.submittedJobId = null;
+            this.submittedLibraryIssueInvalidations = [];
+          }
         }
         if (typeof payload.job?.id === 'string' && payload.job.id) {
           this.submittedJobId = payload.job.id;
+          this.submittedLibraryIssueInvalidations = invalidatedIssues;
           this.activity = {state: 'active', message: `${adminOperationLabel(operation)} queued.`};
         } else {
+          this.invalidateLibraryIssues(invalidatedIssues);
           this.activity = {state: 'complete', message: `${adminOperationLabel(operation)} completed.`};
         }
         if (refresh) this.load();
@@ -660,11 +920,13 @@
       }
     }
 
-    async checkSubmittedJob(jobPage = null) {
-      if (!this.submittedJobId) return;
-      const page = jobPage || await this.fetchJson(this.source('jobs-source'));
+    async checkSubmittedJob(jobPage = null, signal = this.abort?.signal) {
+      const submittedJobId = this.submittedJobId;
+      if (!this.isConnected || !submittedJobId) return;
+      const page = jobPage || await this.fetchJson(this.source('jobs-source'), '', signal);
+      if (!this.isConnected || signal?.aborted || this.submittedJobId !== submittedJobId) return;
       const jobs = Array.isArray(page.items) ? page.items : [];
-      const job = jobs.find((entry) => entry?.id === this.submittedJobId);
+      const job = jobs.find((entry) => entry?.id === submittedJobId);
       if (!job) {
         this.activity = {state: 'active', message: 'Action submitted. Waiting for Katalog to report progress.'};
         return;
@@ -673,20 +935,25 @@
       const phase = typeof job.phase === 'string' && job.phase ? ` · ${job.phase}` : '';
       const progress = jobProgress(job);
       if (isProblemJob(job)) {
-        const jobId = this.submittedJobId;
         this.activity = {state: 'error', message: job.failure || job.message || `${label} ${job.status}. Opening job details.`};
         this.submittedJobId = null;
-        window.location.assign(`/administration/jobs#${jobAnchorId(jobId)}`);
+        this.submittedLibraryIssueInvalidations = [];
+        window.location.assign(`/administration/jobs#${jobAnchorId(submittedJobId)}`);
         return;
       }
       if (job.status === 'completed') {
         this.activity = {state: 'complete', message: job.message || `${label} completed.`};
         this.submittedJobId = null;
+        const invalidatedIssues = this.submittedLibraryIssueInvalidations;
+        this.submittedLibraryIssueInvalidations = [];
+        this.invalidateLibraryIssues(invalidatedIssues);
+        this.refreshInvalidatedLibraryIssues();
         return;
       }
       if (job.status === 'cancelled') {
         this.activity = {state: 'cancelled', message: job.message || `${label} was cancelled.`};
         this.submittedJobId = null;
+        this.submittedLibraryIssueInvalidations = [];
         return;
       }
       this.activity = {state: 'active', message: `${label} ${job.status || 'in progress'}${phase}${progress ? ` · ${progress}` : ''}`};
@@ -840,16 +1107,21 @@
       this.inFlight = true;
       try {
         const page = await this.fetchJson(source, `?cursor=${encodeURIComponent(this.cursor)}`);
+        if (!this.isConnected) return;
         appendItems(Array.isArray(page.items) ? page.items : []);
         this.cursor = typeof page.nextCursor === 'string' ? page.nextCursor : null;
         this.render();
       } catch (error) {
-        if (error?.name !== 'AbortError') {
+        if (this.isConnected && error?.name !== 'AbortError') {
           this.activity = {state: 'error', message: error?.message || errorMessage};
           this.render();
         }
       } finally {
         this.inFlight = false;
+        if (this.reloadPending && this.isConnected && document.visibilityState !== 'hidden') {
+          this.reloadPending = false;
+          void this.load();
+        }
       }
     }
 
@@ -879,9 +1151,12 @@
       dialog.querySelector('[data-admin-root-form]')?.addEventListener('submit', (event) => {
         event.preventDefault();
         const form = new FormData(event.currentTarget);
-        this.saveRoot(root, form);
         dialog.close();
+        void this.saveRoot(root, form);
       });
+      dialog.addEventListener('close', () => {
+        if (this.isConnected && this.section === 'libraries' && !this.hasOpenDialog()) this.render();
+      }, {once: true});
       dialog.showModal();
     }
 

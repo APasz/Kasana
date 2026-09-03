@@ -118,6 +118,73 @@
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[character]);
 
+  class KanvasConfirmationDialog extends HTMLElement {
+    constructor() {
+      super();
+      this.dialog = null;
+      this.resolve = null;
+    }
+
+    connectedCallback() {
+      if (this.dialog) return;
+      this.innerHTML = `<dialog class="k-kanvas-dialog k-confirmation-dialog" data-kanvas-confirmation-dialog>
+        <form method="dialog" class="k-picker k-confirmation-dialog__content">
+          <div class="k-picker__header"><strong data-kanvas-confirmation-title></strong></div>
+          <p class="k-confirmation-dialog__message" data-kanvas-confirmation-message></p>
+          <div class="k-action-row k-confirmation-dialog__actions">
+            <button type="submit" class="k-button" value="cancel">Cancel</button>
+            <button type="submit" class="k-button k-button--primary" value="confirm" data-kanvas-confirmation-accept>Confirm</button>
+          </div>
+        </form>
+      </dialog>`;
+      this.dialog = this.querySelector('[data-kanvas-confirmation-dialog]');
+      this.dialog?.addEventListener('close', () => {
+        this.finish(this.dialog?.returnValue === 'confirm');
+      });
+    }
+
+    disconnectedCallback() {
+      this.finish(false);
+    }
+
+    request({title, message, confirmLabel = 'Confirm', destructive = false}) {
+      if (!(this.dialog instanceof HTMLDialogElement) || this.dialog.open || this.resolve) {
+        return Promise.resolve(false);
+      }
+      const titleElement = this.dialog.querySelector('[data-kanvas-confirmation-title]');
+      const messageElement = this.dialog.querySelector('[data-kanvas-confirmation-message]');
+      const confirmButton = this.dialog.querySelector('[data-kanvas-confirmation-accept]');
+      if (!titleElement || !messageElement || !confirmButton) return Promise.resolve(false);
+      titleElement.textContent = String(title || 'Confirm action');
+      messageElement.textContent = String(message || 'This action cannot be undone.');
+      confirmButton.textContent = String(confirmLabel || 'Confirm');
+      confirmButton.classList.toggle('k-button--danger', Boolean(destructive));
+      return new Promise((resolve) => {
+        this.resolve = resolve;
+        try {
+          this.dialog.returnValue = '';
+          this.dialog.showModal();
+        } catch (_) {
+          this.finish(false);
+        }
+      });
+    }
+
+    finish(confirmed) {
+      const resolve = this.resolve;
+      this.resolve = null;
+      resolve?.(confirmed);
+    }
+  }
+
+  const requestKanvasConfirmation = (element, options) => (
+    element instanceof KanvasConfirmationDialog ? element.request(options) : Promise.resolve(false)
+  );
+
+  if (!customElements.get('kanvas-confirmation-dialog')) {
+    customElements.define('kanvas-confirmation-dialog', KanvasConfirmationDialog);
+  }
+
   const POSTER_STATES = new Set([
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
@@ -2717,11 +2784,12 @@
 
     connectedCallback() {
       this.activeTab = itemEditorTab(this.getAttribute('initial-tab'));
-      this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit Details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog>';
+      this.innerHTML = '<button type="button" class="k-button" data-item-edit-open>Edit Details</button><dialog class="k-kanvas-dialog k-item-editor"><div class="k-picker" data-item-editor-content></div></dialog><kanvas-confirmation-dialog data-item-editor-confirmation></kanvas-confirmation-dialog>';
       this.dialog = this.querySelector('dialog');
       this.querySelector('[data-item-edit-open]')?.addEventListener('click', () => this.open());
       this.dialog?.addEventListener('cancel', (event) => {
-        if (!this.confirmDiscard()) event.preventDefault();
+        event.preventDefault();
+        void this.requestClose();
       });
       this.dialog?.addEventListener('close', () => {
         this.controller?.abort();
@@ -2739,13 +2807,24 @@
       await this.load();
     }
 
-    confirmDiscard() {
-      if (this.isSaving || !this.isDirty) return !this.isSaving;
-      return window.confirm('Discard unsaved changes to this item?');
+    requestConfirmation(confirmation) {
+      return requestKanvasConfirmation(
+        this.querySelector('[data-item-editor-confirmation]'), confirmation
+      );
     }
 
-    requestClose() {
-      if (!this.confirmDiscard()) return;
+    confirmDiscard() {
+      if (this.isSaving || !this.isDirty) return !this.isSaving;
+      return this.requestConfirmation({
+        title: 'Discard unsaved changes?',
+        message: 'Your local edits to this item will be lost.',
+        confirmLabel: 'Discard changes',
+        destructive: true,
+      });
+    }
+
+    async requestClose() {
+      if (!(await this.confirmDiscard())) return;
       this.dialog?.close();
     }
 
@@ -5169,6 +5248,7 @@
   window.kanvasInternals = {
     escapeHtml,
     jobDetail,
+    requestKanvasConfirmation,
     tmdbEntryReferenceFromUrl,
     tmdbEntryReferenceFromValue,
     providerEntryUrl,

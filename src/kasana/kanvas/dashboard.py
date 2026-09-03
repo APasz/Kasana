@@ -1,4 +1,4 @@
-"""NiceGUI application registration for the first Kanvas vertical slice."""
+"""NiceGUI application for Kanvas"""
 
 from __future__ import annotations
 

@@ -1384,6 +1384,10 @@ kanvas-poster-grid { overflow-anchor: none; }
 
 .k-kanvas-dialog { width: min(760px, calc(100vw - 28px)); max-width: none; border: 1px solid var(--k-border-strong); border-radius: var(--k-radius); background: var(--k-surface-1); color: var(--k-text); padding: 0; }
 .k-kanvas-dialog::backdrop { background: var(--k-scrim-strong); }
+.k-confirmation-dialog { width: min(440px, calc(100vw - 28px)); }
+.k-confirmation-dialog__content { gap: 14px; }
+.k-confirmation-dialog__message { margin: 0; color: var(--k-text-muted); line-height: 1.5; }
+.k-confirmation-dialog__actions { justify-content: flex-end; }
 .k-picker { display: grid; max-height: min(76vh, 700px); gap: 10px; padding: 14px; overflow: auto; }
 .k-picker__header { display: flex; align-items: center; gap: 8px; }
 .k-picker__header .k-input-shell { flex: 1; }
