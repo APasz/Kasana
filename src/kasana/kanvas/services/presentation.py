@@ -271,6 +271,9 @@ def poster_from_summary(
         selected=selected,
         loading=loading,
     )
+    progress = progress_percent(playback)
+    watched = playback is not None and playback.completed
+    is_partially_watched = not watched and (partially_watched or progress is not None)
     default_detail = (
         None
         if item.series_title
@@ -287,10 +290,10 @@ def poster_from_summary(
         artworkShape=artwork_shape_for_summary(item),
         artworkLabel=item.context_label if item.show_artwork_label else None,
         placeholder=placeholder,
-        progressPercent=progress_percent(playback),
+        progressPercent=progress,
         state=state,
-        watched=playback.completed if playback is not None else False,
-        partiallyWatched=partially_watched and (playback is None or not playback.completed),
+        watched=watched,
+        partiallyWatched=is_partially_watched,
         available=item.availability is Availability.AVAILABLE,
     )
 

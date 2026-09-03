@@ -568,6 +568,7 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
     assert poster.poster_url == "/kanvas/artwork/7/8"
     assert poster.progress_percent == 25
     assert poster.state is PosterState.IN_PROGRESS
+    assert poster.partially_watched is True
     episode_still = ArtworkSelection(
         id=9,
         kind=ArtworkKind.STILL,
@@ -581,12 +582,14 @@ def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
             kind=LibraryItemKind.EPISODE,
             series_title="Aldnoah Zero",
             artwork=(episode_still,),
-        )
+        ),
+        playback=_playback().model_copy(update={"item_id": 9}),
     )
     assert episode_poster.context == "Aldnoah Zero"
     assert episode_poster.detail is None
     assert episode_poster.poster_url == "/kanvas/artwork/9/9"
     assert episode_poster.artwork_shape is ArtworkShape.LANDSCAPE
+    assert episode_poster.partially_watched is True
     repeated_context_poster = poster_from_summary(
         _summary_with_title(
             "The Rookie",
@@ -1077,13 +1080,20 @@ def test_poster_statuses_use_an_accessible_completion_triangle_and_unavailable_b
     assert ".k-poster__completion" in stylesheet
     assert ".k-poster__completion--partial::after" in stylesheet
     assert ".k-poster__completion--partial {" in stylesheet
+    partial_completion_rule = stylesheet.split(
+        ".k-poster__completion--partial::after {", maxsplit=1
+    )[1].split("}", maxsplit=1)[0]
     assert "top: 6px;" in stylesheet
     assert "right: 6px;" in stylesheet
     assert "bottom: 0;" in stylesheet
     assert "left: 0;" in stylesheet
     assert "clip-path: polygon(0 0, 0 100%, 100% 100%);" in stylesheet
-    assert "width: 141.421%;" in stylesheet
-    assert "transform: rotate(-45deg);" in stylesheet
+    assert "top: 0;" in partial_completion_rule
+    assert "bottom: 0;" not in partial_completion_rule
+    assert "left: 0;" in partial_completion_rule
+    assert "width: 141.421%;" in partial_completion_rule
+    assert "transform: rotate(45deg);" in partial_completion_rule
+    assert "transform-origin: left top;" in partial_completion_rule
     assert "clip-path: none;" in stylesheet
     assert "--k-poster-label-height: 1.35rem;" in stylesheet
     assert "min-height: var(--k-poster-label-height);" in stylesheet
@@ -1618,6 +1628,36 @@ async def test_item_detail_marks_partially_watched_season_children(
     detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
 
     assert [child.watched for child in detail.children] == [False, False]
+    assert [child.partially_watched for child in detail.children] == [True, False]
+
+
+async def test_item_detail_marks_in_progress_episode_children_partially_watched(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    season = _library_detail(
+        item_id=7,
+        title="Season 1",
+        kind=LibraryItemKind.SEASON,
+        season_number=1,
+    )
+    episodes = (
+        _library_summary(item_id=8, title="Episode 1", kind=LibraryItemKind.EPISODE, parent_id=7),
+        _library_summary(item_id=9, title="Episode 2", kind=LibraryItemKind.EPISODE, parent_id=7),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(
+            season,
+            {7: episodes},
+            child_requests,
+            child_playback={8: _playback()},
+        ),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.child_section_title == "Episodes"
     assert [child.partially_watched for child in detail.children] == [True, False]
 
 

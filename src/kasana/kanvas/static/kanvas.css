@@ -439,14 +439,14 @@ kanvas-poster:has(.k-poster--landscape) { width: clamp(190px, 22vw, 320px); }
 }
 .k-poster__completion--partial::after {
     position: absolute;
-    bottom: 0;
+    top: 0;
     left: 0;
     width: 141.421%;
     height: 2px;
     content: "";
     background: var(--k-watched-marker);
-    transform: rotate(-45deg);
-    transform-origin: left bottom;
+    transform: rotate(45deg);
+    transform-origin: left top;
 }
 .k-poster__completion--partial {
     background:
