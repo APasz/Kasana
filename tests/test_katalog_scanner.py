@@ -223,6 +223,325 @@ def test_scan_uses_the_configured_kind_for_nonstandard_root_names(
     }
 
 
+def test_scan_applies_local_metadata_sidecars_and_refreshes_them_without_reprobing(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    film = movies / "Axanar.mkv"
+    sidecar = movies / "Axanar.kasana.json"
+    movies.mkdir()
+    film.write_bytes(b"fan film")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "title": "Axanar",
+                "sort_title": "Axanar, Star Trek",
+                "year": 2015,
+                "overview": "A local fan-film entry.",
+                "tags": ["Star Trek", "fan film"],
+                "external_ids": [{"namespace": "imdb", "value": "tt3302086"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+    scanner = _run_scan(database, fake_client)
+
+    first = scanner.scan()
+
+    assert first.totals.added == 1
+    assert first.findings == ()
+
+    def local_metadata(session: Session) -> tuple[Zaisan, MediaFile]:
+        item = session.scalar(select(Zaisan))
+        media_file = session.scalar(select(MediaFile))
+        assert item is not None
+        assert media_file is not None
+        return item, media_file
+
+    item, media_file = database.run_transaction(local_metadata)
+    assert (item.title, item.sort_title, item.release_year, item.overview) == (
+        "Axanar",
+        "Axanar, Star Trek",
+        2015,
+        "A local fan-film entry.",
+    )
+    assert item.tags == ["fan film", "star trek"]
+    assert item.local_external_ids == [{"namespace": "imdb", "value": "tt3302086"}]
+    assert media_file.local_metadata_path == str(sidecar)
+    assert len(fake_client.calls) == 1
+
+    sidecar.write_text(
+        json.dumps({"title": "Axanar: Revised", "year": 2015}), encoding="utf-8"
+    )
+    refreshed = scanner.scan()
+
+    assert refreshed.totals.unchanged == 1
+    assert len(fake_client.calls) == 1
+    assert database.run_transaction(
+        lambda session: session.scalar(select(Zaisan.title))
+    ) == "Axanar: Revised"
+
+
+def test_scan_reports_invalid_local_metadata_sidecars_without_skipping_the_video(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    film = movies / "Unknown Feature.mkv"
+    sidecar = movies / "Unknown Feature.kasana.json"
+    movies.mkdir()
+    film.write_bytes(b"video")
+    sidecar.write_text('{"title": "Unknown Feature", "unsupported": true}', encoding="utf-8")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 1
+    assert any(
+        finding.category is AuditCategory.INVALID_METADATA_SIDECAR and finding.path == sidecar
+        for finding in result.findings
+    )
+    assert database.run_transaction(lambda session: session.scalar(select(Zaisan.title))) == (
+        "Unknown Feature"
+    )
+
+
+@pytest.mark.parametrize(
+    "sidecar_name",
+    ("feature.kasana.json", "feature.mkv.kasana.json", "kasana.json"),
+)
+def test_scan_supports_each_local_metadata_sidecar_name(
+    sidecar_name: str,
+    database: KatalogDatabase,
+    fake_ffprobe: Path,
+    tmp_path: Path,
+) -> None:
+    movies = tmp_path / "Movies"
+    title_directory = movies / "Filename Does Not Matter"
+    film = title_directory / "feature.mkv"
+    sidecar = title_directory / sidecar_name
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"feature")
+    sidecar.write_text(json.dumps({"title": "Axanar", "year": 2015}), encoding="utf-8")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.findings == ()
+    assert (
+        database.run_transaction(lambda session: session.scalar(select(Zaisan.title)))
+        == "Axanar"
+    )
+
+
+def test_local_metadata_reuses_an_existing_movie_identity(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    title_directory = movies / "Unhelpful Filename (2015)"
+    film = title_directory / "video.mkv"
+    sidecar = title_directory / "video.kasana.json"
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"feature")
+    sidecar.write_text(json.dumps({"title": "Axanar", "year": 2015}), encoding="utf-8")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+
+    def add_existing_item(session: Session) -> int:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        return create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Axanar",
+            release_year=2015,
+        ).id
+
+    expected_item_id = database.run_transaction(add_existing_item)
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.added == 1
+    assert result.findings == ()
+
+    def item_ids(session: Session) -> tuple[tuple[int, ...], int]:
+        items = session.scalars(select(Zaisan).order_by(Zaisan.id)).all()
+        media_file = session.scalar(select(MediaFile))
+        assert media_file is not None
+        return tuple(item.id for item in items), media_file.library_item_id
+
+    assert database.run_transaction(item_ids) == ((expected_item_id,), expected_item_id)
+
+
+def test_scan_audits_a_local_metadata_identity_conflict_without_aborting(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    title_directory = movies / "Unhelpful Filename (2015)"
+    film = title_directory / "video.mkv"
+    sidecar = title_directory / "video.kasana.json"
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"feature")
+    sidecar.write_text(
+        json.dumps({"title": "Local Feature", "year": 2015}), encoding="utf-8"
+    )
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
+
+    assert scanner.scan().findings == ()
+
+    def add_existing_item(session: Session) -> None:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Existing Feature",
+            release_year=2015,
+        )
+
+    database.run_transaction(add_existing_item)
+    sidecar.write_text(
+        json.dumps({"title": "Existing Feature", "year": 2015}), encoding="utf-8"
+    )
+
+    result = scanner.scan()
+
+    assert any(
+        finding.category is AuditCategory.INVALID_METADATA_SIDECAR
+        and finding.path == sidecar
+        and "duplicate the movie identity" in finding.message
+        for finding in result.findings
+    )
+
+    def state(session: Session) -> tuple[str, int]:
+        local_item = session.scalar(select(Zaisan).where(Zaisan.title == "Local Feature"))
+        issue_count = session.scalar(
+            select(func.count()).select_from(AuditIssue).where(AuditIssue.path == str(sidecar))
+        )
+        assert local_item is not None
+        return local_item.title, issue_count or 0
+
+    assert database.run_transaction(state) == ("Local Feature", 1)
+
+
+def test_local_metadata_movie_title_keeps_the_filename_parent_identity_for_later_extras(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    title_directory = movies / "Unhelpful Filename"
+    film = title_directory / "video.mkv"
+    sidecar = title_directory / "video.kasana.json"
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"feature")
+    sidecar.write_text(json.dumps({"title": "Axanar", "year": 2015}), encoding="utf-8")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+    scanner = _run_scan(database, fake_client)
+
+    assert scanner.scan().totals.added == 1
+
+    extra = title_directory / "Extras" / "Trailer.mkv"
+    extra.parent.mkdir()
+    extra.write_bytes(b"trailer")
+    second = scanner.scan()
+
+    assert second.totals.added == 1
+
+    def hierarchy(session: Session) -> tuple[tuple[str, str | None], ...]:
+        items = session.scalars(select(Zaisan).order_by(Zaisan.id)).all()
+        by_id = {item.id: item for item in items}
+        return tuple(
+            (item.title, by_id[item.parent_id].title if item.parent_id is not None else None)
+            for item in items
+        )
+
+    assert database.run_transaction(hierarchy) == (("Axanar", None), ("Trailer", "Axanar"))
+
+
+def test_local_metadata_movie_directory_mapping_does_not_alias_another_filename_match(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+    title_directory = movies / "Filename (2015)"
+    film = title_directory / "video.mkv"
+    sidecar = title_directory / "video.kasana.json"
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"local feature")
+    sidecar.write_text(json.dumps({"title": "Axanar", "year": 2015}), encoding="utf-8")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
+
+    assert scanner.scan().findings == ()
+
+    same_filename_feature = movies / "1990s" / "Filename (2015).mkv"
+    same_filename_feature.parent.mkdir()
+    same_filename_feature.write_bytes(b"real feature")
+    assert scanner.scan().findings == ()
+
+    extra = title_directory / "Extras" / "Trailer.mkv"
+    extra.parent.mkdir()
+    extra.write_bytes(b"trailer")
+    assert scanner.scan().findings == ()
+
+    def hierarchy(session: Session) -> set[tuple[str, str | None]]:
+        items = session.scalars(select(Zaisan)).all()
+        by_id = {item.id: item for item in items}
+        return {
+            (item.title, by_id[item.parent_id].title if item.parent_id is not None else None)
+            for item in items
+        }
+
+    assert database.run_transaction(hierarchy) == {
+        ("Axanar", None),
+        ("Filename", None),
+        ("Trailer", "Axanar"),
+    }
+
+
+def test_scan_handles_a_relocated_root_with_local_metadata(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    old_movies = tmp_path / "Movies"
+    title_directory = old_movies / "Filename (2015)"
+    film = title_directory / "video.mkv"
+    sidecar = title_directory / "video.kasana.json"
+    title_directory.mkdir(parents=True)
+    film.write_bytes(b"feature")
+    sidecar.write_text(json.dumps({"title": "Axanar", "year": 2015}), encoding="utf-8")
+    _register_root(database, old_movies, ZaisanKind.MOVIE)
+    scanner = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result()))
+
+    assert scanner.scan().findings == ()
+
+    relocated_movies = tmp_path / "Relocated Movies"
+    old_movies.rename(relocated_movies)
+
+    def relocate_root(session: Session) -> None:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        root.path = str(relocated_movies)
+
+    database.run_transaction(relocate_root)
+    result = scanner.scan()
+
+    assert result.totals.moved == 1
+    assert result.findings == ()
+
+    def state(session: Session) -> tuple[str, str]:
+        item = session.scalar(select(Zaisan))
+        media_file = session.scalar(select(MediaFile))
+        assert item is not None
+        assert media_file is not None
+        return item.title, media_file.absolute_path
+
+    assert database.run_transaction(state) == (
+        "Axanar",
+        str(relocated_movies / "Filename (2015)" / "video.mkv"),
+    )
+
+
 def test_scan_handles_missing_library_root_and_recovers(
     database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
 ) -> None:

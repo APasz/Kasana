@@ -7,8 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.limits import MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS
 from kasana.katalog.models import (
     HierarchyRepairRun,
+    JSONObject,
     KeiroKind,
     MediaFile,
     MetadataBinding,
@@ -23,6 +25,7 @@ from kasana.katalog.repair import (
     DuplicateResolutionService,
     HierarchyRepairService,
     RepairActionKind,
+    _merged_local_external_ids,  # pyright: ignore[reportPrivateUsage]
     duplicate_resolution_backup_path,
     repair_backup_path,
 )
@@ -90,6 +93,41 @@ def test_hierarchy_repair_renames_decade_pseudo_movie_without_changing_its_id(
     assert run_count == 2
 
 
+def test_merged_local_external_ids_respect_the_public_limit(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    movies = tmp_path / "Movies"
+
+    def merge(session: Session) -> list[JSONObject]:
+        root = create_library_root(session, path=movies, expected_media_kind=ZaisanKind.MOVIE)
+        source = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Source",
+        )
+        target = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Target",
+        )
+        source.local_external_ids = [
+            {"namespace": "source", "value": str(index)}
+            for index in range(MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS)
+        ]
+        target.local_external_ids = [
+            {"namespace": "target", "value": str(index)}
+            for index in range(MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS)
+        ]
+        return _merged_local_external_ids(source, target)
+
+    assert database.run_transaction(merge) == [
+        {"namespace": "source", "value": str(index)}
+        for index in range(MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS)
+    ]
+
+
 def test_hierarchy_repair_merge_preserves_playback_collections_and_watch_order_entries(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -100,9 +138,11 @@ def test_hierarchy_repair_merge_preserves_playback_collections_and_watch_order_e
         malformed = create_library_item(
             session, library_root_id=root.id, item_kind=ZaisanKind.MOVIE, title="00's"
         )
+        malformed.local_external_ids = [{"namespace": "imdb", "value": "tt1234567"}]
         cars = create_library_item(
             session, library_root_id=root.id, item_kind=ZaisanKind.MOVIE, title="Cars"
         )
+        cars.local_external_ids = [{"namespace": "tmdb", "value": "920"}]
         attach_media_file(
             session,
             library_item_id=malformed.id,
@@ -171,6 +211,16 @@ def test_hierarchy_repair_merge_preserves_playback_collections_and_watch_order_e
     removed, counts = database.run_transaction(references)
     assert removed is None
     assert counts == (1, 1, 1, 1)
+
+    def local_external_ids(session: Session) -> list[JSONObject]:
+        target = session.get(Zaisan, cars_id)
+        assert target is not None
+        return target.local_external_ids
+
+    assert database.run_transaction(local_external_ids) == [
+        {"namespace": "imdb", "value": "tt1234567"},
+        {"namespace": "tmdb", "value": "920"},
+    ]
 
 
 def test_duplicate_resolution_merges_unambiguous_media_less_movie_into_file_backed_item(

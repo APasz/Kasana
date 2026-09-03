@@ -858,6 +858,7 @@ kanvas-poster-grid { overflow-anchor: none; }
 .k-item__title { margin-bottom: 6px; }
 .k-item__facts { display: block; font-size: 0.8rem; }
 .k-item__overview { display: block; max-width: 70ch; margin: 18px 0; font-size: 0.88rem; line-height: 1.55; white-space: pre-line; }
+.k-item__external-links { display: flex; gap: 12px; margin: 12px 0; font-size: 0.86rem; }
 .k-action-status { display: block; min-height: 20px; margin: 0 0 8px; font-size: 0.75rem; }
 .k-item-children { margin-top: 36px; }
 .k-child-grid { display: grid; min-width: 0; gap: 14px 10px; }

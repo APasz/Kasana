@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -16,7 +16,12 @@ from kasana.katalog.parsing import (
     ParseFailure,
     parse_media_path,
 )
-from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot, parse_failure_finding
+from kasana.katalog.scanning.discovery import (
+    AuditFinding,
+    FileSnapshot,
+    MediaSidecars,
+    parse_failure_finding,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class ExistingFile:
     item_title: str
     item_release_year: int | None
     item_has_matched_metadata: bool
+    item_has_local_metadata: bool
     item_season_number: int | None
     item_episode_number: int | None
     item_episode_end_season_number: int | None
@@ -67,6 +73,7 @@ def plan_files(
     layout: LibraryLayout,
     files: Sequence[FileSnapshot],
     existing_files: Sequence[ExistingFile],
+    sidecars: Mapping[Path, MediaSidecars] | None = None,
 ) -> ScanPlan:
     """Determine additions, content changes, moves, and unavailable records."""
 
@@ -115,7 +122,16 @@ def plan_files(
             unseen_ids.discard(known.id)
             reclassified_parsed: ParsedMedia | None = (
                 parsed
-                if isinstance(parsed, ParsedMedia) and _requires_reclassification(known, parsed)
+                if isinstance(parsed, ParsedMedia)
+                and _requires_reclassification(
+                    known,
+                    parsed,
+                    has_local_metadata=(
+                        sidecars[snapshot.path].metadata is not None
+                        if sidecars is not None
+                        else False
+                    ),
+                )
                 else None
             )
             if known.size_bytes == snapshot.size_bytes and known.mtime_ns == snapshot.mtime_ns:
@@ -205,8 +221,10 @@ def _reject_ambiguous_movie_candidates(
     return [plan for plan in plans if plan not in ambiguous_plans], tuple(findings)
 
 
-def _requires_reclassification(existing: ExistingFile, parsed: ParsedMedia) -> bool:
-    if existing.item_has_matched_metadata:
+def _requires_reclassification(
+    existing: ExistingFile, parsed: ParsedMedia, *, has_local_metadata: bool
+) -> bool:
+    if existing.item_has_matched_metadata or existing.item_has_local_metadata or has_local_metadata:
         return False
     match parsed.kind:
         case ParsedMediaKind.MOVIE:

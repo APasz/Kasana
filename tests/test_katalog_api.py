@@ -31,6 +31,7 @@ from kasana.katalog.api.runtime import (
 )
 from kasana.katalog.client import KatalogClient, KatalogClientError, KatalogClientErrorKind
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.limits import MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS
 from kasana.katalog.metadata import MetadataProvider, MetadataWorkflow, SearchOutcome
 from kasana.katalog.metadata.review import MetadataIdentityConflictError
 from kasana.katalog.models import (
@@ -822,6 +823,20 @@ async def test_item_etags_routes_and_no_filesystem_paths_leak(
     )
     assert unchanged.status_code == 304
 
+    def update_sidecar_backed_fields(session: Session) -> None:
+        item = session.get(Zaisan, 1)
+        assert item is not None
+        item.overview = "Changed locally."
+        item.local_external_ids = [{"namespace": "imdb", "value": "tt3302086"}]
+
+    api_fixture.database.run_transaction(update_sidecar_backed_fields)
+    changed = await api_fixture.client.get(
+        "/api/v1/library/items/1", headers={"If-None-Match": response.headers["etag"]}
+    )
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != response.headers["etag"]
+    assert changed.json()["external_ids"] == [{"namespace": "imdb", "value": "tt3302086"}]
+
     media = (await api_fixture.client.get("/api/v1/library/items/1/media")).json()
     assert media["items"][0]["container"] == "matroska"
     assert str(tmp_path) not in json.dumps(media)
@@ -878,6 +893,72 @@ async def test_shared_poster_selection_precedes_automatic_artwork(
     assert detail["artwork"][0]["language"] == "ja"
     assert [choice["display_order"] for choice in choices] == [0, 1]
     assert choices[1]["language"] == "ja"
+
+
+async def test_item_detail_exposes_local_and_provider_external_ids(
+    api_fixture: ApiFixture,
+) -> None:
+    def add_identifiers(session: Session) -> None:
+        item = session.get(Zaisan, 1)
+        assert item is not None
+        item.local_external_ids = [{"namespace": "imdb", "value": "tt3302086"}]
+        session.add(
+            MetadataBinding(
+                library_item_id=item.id,
+                provider="tmdb",
+                provider_id="123",
+                provider_media_kind=ZaisanKind.MOVIE,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[
+                    {"namespace": "imdb", "value": "tt3302086"},
+                    {"namespace": "tvdb", "value": "456"},
+                ],
+            )
+        )
+
+    api_fixture.database.run_transaction(add_identifiers)
+
+    payload = (await api_fixture.client.get("/api/v1/library/items/1")).json()
+
+    assert payload["external_ids"] == [
+        {"namespace": "imdb", "value": "tt3302086"},
+        {"namespace": "tmdb", "value": "123"},
+        {"namespace": "tvdb", "value": "456"},
+    ]
+
+
+async def test_item_detail_caps_merged_external_identifiers(
+    api_fixture: ApiFixture,
+) -> None:
+    def add_identifiers(session: Session) -> None:
+        item = session.get(Zaisan, 1)
+        assert item is not None
+        item.local_external_ids = [
+            {"namespace": "local", "value": str(index)}
+            for index in range(MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS)
+        ]
+        session.add(
+            MetadataBinding(
+                library_item_id=item.id,
+                provider="tmdb",
+                provider_id="123",
+                provider_media_kind=ZaisanKind.MOVIE,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[{"namespace": "tvdb", "value": "456"}],
+            )
+        )
+
+    api_fixture.database.run_transaction(add_identifiers)
+
+    response = await api_fixture.client.get("/api/v1/library/items/1")
+
+    assert response.status_code == 200
+    assert response.json()["external_ids"] == [
+        {"namespace": "local", "value": str(index)}
+        for index in range(MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS)
+    ]
 
 
 async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:

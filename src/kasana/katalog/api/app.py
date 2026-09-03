@@ -414,10 +414,9 @@ def create_app(
         if_none_match: Annotated[str | None, Header()] = None,
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> Response:
-        etag = await run_blocking(runtime.queries.item_etag, item_id)
+        item, etag = await run_blocking(runtime.queries.get_item_with_etag, item_id)
         if if_none_match == etag:
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
-        item = await run_blocking(runtime.queries.get_item, item_id)
         return JSONResponse(content=item.model_dump(mode="json"), headers={"ETag": etag})
 
     @app.get(

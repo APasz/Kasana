@@ -92,6 +92,7 @@ class IncrementalScanner:
 
     def _scan_root(self, root: Kura, *, audit_only: bool) -> ScanResult:
         root_path = Path(root.path)
+        layout = _layout_for_root(root)
         self._raise_if_cancelled()
         existing_files = self._existing_files(root.id)
         if not root_path.is_dir():
@@ -109,7 +110,7 @@ class IncrementalScanner:
             totals.unavailable = len(unavailable_ids)
             totals.failed = 1
             if not audit_only:
-                self.database.run_transaction(
+                persisted_findings = self.database.run_transaction(
                     lambda session: apply_scan(
                         session,
                         root,
@@ -123,6 +124,7 @@ class IncrementalScanner:
                         datetime.now(UTC),
                     )
                 )
+                return ScanResult(totals=totals, findings=persisted_findings)
             return ScanResult(totals=totals, findings=(finding,))
 
         filesystem = discover(
@@ -133,15 +135,17 @@ class IncrementalScanner:
         self._raise_if_cancelled()
         totals = ScanTotals(discovered=len(filesystem.files))
         findings = list(filesystem.findings)
+        sidecars, metadata_findings = sidecars_by_media(filesystem)
         plan = plan_files(
             root_path,
-            _layout_for_root(root),
+            layout,
             filesystem.files,
             existing_files,
+            sidecars,
         )
         findings.extend(plan.findings)
         findings.extend(sidecar_findings(filesystem))
-        sidecars = sidecars_by_media(filesystem)
+        findings.extend(metadata_findings)
         totals.ambiguous += sum(
             finding.category
             in {
@@ -174,7 +178,7 @@ class IncrementalScanner:
         ]
         if not audit_only:
             self._raise_if_cancelled()
-            self.database.run_transaction(
+            persisted_findings = self.database.run_transaction(
                 lambda session: apply_scan(
                     session,
                     root,
@@ -188,6 +192,7 @@ class IncrementalScanner:
                     datetime.now(UTC),
                 )
             )
+            return ScanResult(totals=totals, findings=persisted_findings)
         return ScanResult(totals=totals, findings=tuple(findings))
 
     def _probe(
@@ -263,6 +268,7 @@ class IncrementalScanner:
                     item_title=file.library_item.title,
                     item_release_year=file.library_item.release_year,
                     item_has_matched_metadata=has_matched_identity(file.library_item_id),
+                    item_has_local_metadata=file.local_metadata_path is not None,
                     item_season_number=file.library_item.season_number,
                     item_episode_number=file.library_item.episode_number,
                     item_episode_end_season_number=file.library_item.episode_end_season_number,

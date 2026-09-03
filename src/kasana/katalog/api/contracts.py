@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
+    MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
     MAX_PLAYBACK_QUEUE_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
@@ -149,6 +150,13 @@ class JobStatus(StrEnum):
 
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class LibraryItemExternalIdentifier(APIModel):
+    """A stable identifier supplied by a local or matched metadata source."""
+
+    namespace: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=500)
 
 
 class PlaybackSubtitleTrack(APIModel):
@@ -357,6 +365,10 @@ class LibraryItemPlaybackDefaults(APIModel):
 class LibraryItemDetailBase(LibraryItemSummary):
     sort_title: str = Field(min_length=1, max_length=1_000)
     overview: str | None = Field(default=None, max_length=20_000)
+    external_ids: tuple[LibraryItemExternalIdentifier, ...] = Field(
+        default=(),
+        max_length=MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
+    )
     release_date: str | None = None
     air_date: str | None = None
     season_number: int | None = Field(default=None, ge=0)

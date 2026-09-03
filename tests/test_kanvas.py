@@ -139,6 +139,7 @@ from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
     DownloadOptionView,
+    ExternalLinkView,
     IncludedCollectionView,
     ItemDetailView,
 )
@@ -176,6 +177,7 @@ from kasana.katalog.public import (
     LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
+    LibraryItemExternalIdentifier,
     LibraryItemKind,
     LibraryItemMutationResult,
     LibraryItemPage,
@@ -350,6 +352,7 @@ def _library_detail(
     season_number: int | None = None,
     episode_number: int | None = None,
     artwork: tuple[ArtworkSelection, ...] = (),
+    external_ids: tuple[LibraryItemExternalIdentifier, ...] = (),
 ) -> LibraryItemDetail:
     """Build a public item detail for route and service contracts."""
 
@@ -364,6 +367,7 @@ def _library_detail(
             "availability": Availability.AVAILABLE,
             "tags": (),
             "artwork": artwork,
+            "external_ids": external_ids,
             "season_number": season_number,
             "episode_number": episode_number,
             "playback_url": f"/api/v1/playback/items/{item_id}",
@@ -661,6 +665,30 @@ async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: Mo
 
     assert detail.poster_url == "/kanvas/artwork/7/8"
     assert detail.artwork_shape is ArtworkShape.LANDSCAPE
+
+
+async def test_item_detail_exposes_valid_imdb_external_links(monkeypatch: MonkeyPatch) -> None:
+    movie = _library_detail(
+        item_id=7,
+        title="Axanar",
+        kind=LibraryItemKind.MOVIE,
+        external_ids=(
+            LibraryItemExternalIdentifier(namespace="imdb", value="tt3302086"),
+            LibraryItemExternalIdentifier(namespace="imdb", value="not-a-title-id"),
+            LibraryItemExternalIdentifier(namespace="tmdb", value="123"),
+        ),
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(movie, {7: ()}, child_requests),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(7)
+
+    assert detail.external_links == (
+        ExternalLinkView(label="IMDb", url="https://www.imdb.com/title/tt3302086/"),
+    )
 
 
 def test_home_artwork_onboarding_uses_the_recently_added_rail_kind() -> None:

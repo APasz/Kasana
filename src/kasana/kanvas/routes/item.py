@@ -82,6 +82,12 @@ async def render_item(
                 ui.label(facts).classes("k-item__facts")
                 if detail.overview:
                     ui.label(detail.overview).classes("k-item__overview")
+                if detail.external_links:
+                    with ui.element("div").classes("k-item__external-links"):
+                        for link in detail.external_links:
+                            ui.link(link.label, link.url).props(
+                                'target="_blank" rel="noopener noreferrer"'
+                            )
                 status = ui.label("").classes("k-action-status").props('aria-live="polite"')
                 _item_actions(
                     settings,

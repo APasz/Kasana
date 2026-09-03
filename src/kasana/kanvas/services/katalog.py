@@ -61,6 +61,7 @@ from kasana.kanvas.viewmodels.collections import (
 from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
+    ExternalLinkView,
     IncludedCollectionView,
     ItemDetailView,
 )
@@ -557,6 +558,7 @@ class KanvasKatalogService:
             progressPercent=progress_percent(playback),
             watched=playback.completed if playback is not None else False,
             available=item.availability is Availability.AVAILABLE,
+            externalLinks=_external_links(item),
             downloadOptions=tuple(download_option_view(option) for option in download_options),
             childSectionTitle=child_view.title,
             children=child_view.children,
@@ -1178,6 +1180,24 @@ class KanvasKatalogService:
             if page.next_cursor is None:
                 return tuple(children)
             cursor = page.next_cursor
+
+
+def _external_links(item: LibraryItemDetail) -> tuple[ExternalLinkView, ...]:
+    """Expose only identifiers with a well-defined, safe public destination."""
+
+    links: list[ExternalLinkView] = []
+    for identifier in item.external_ids:
+        if identifier.namespace.casefold() != "imdb":
+            continue
+        title_id = identifier.value.casefold()
+        if not _is_imdb_title_id(title_id):
+            continue
+        links.append(ExternalLinkView(label="IMDb", url=f"https://www.imdb.com/title/{title_id}/"))
+    return tuple(links)
+
+
+def _is_imdb_title_id(value: str) -> bool:
+    return value.startswith("tt") and value[2:].isdigit() and 7 <= len(value[2:]) <= 10
 
 
 def _available_collection_choices(

@@ -363,6 +363,11 @@ def context_for_item(session: Session, item: Zaisan) -> tuple[ItemMatchContext, 
         for binding in bindings
     )
     identifiers = {(binding.provider, binding.provider_id) for binding in bindings}
+    identifiers.update(
+        (str(identifier.get("namespace")), str(identifier.get("value")))
+        for identifier in item.local_external_ids
+        if identifier.get("namespace") is not None and identifier.get("value") is not None
+    )
     for binding in bindings:
         identifiers.update(
             (str(identifier.get("namespace")), str(identifier.get("value")))

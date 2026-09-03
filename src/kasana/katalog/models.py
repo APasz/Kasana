@@ -53,6 +53,7 @@ class AuditCategory(StrEnum):
     ORPHANED_POSTER = "orphaned_poster"
     UNSUPPORTED_CONTAINER = "unsupported_container"
     UNSUPPORTED_CODEC = "unsupported_codec"
+    INVALID_METADATA_SIDECAR = "invalid_metadata_sidecar"
 
 
 class Kinship(StrEnum):
@@ -340,6 +341,12 @@ class Zaisan(Base):
         default=AvailabilityState.AVAILABLE,
     )
     locked_metadata_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    local_external_ids: Mapped[list[JSONObject]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     # At most one cached artwork record is selected for each artwork kind.  The
     # cache remains the source of bytes; this only stores the viewer's choice.
     selected_artwork_ids: Mapped[dict[str, int]] = mapped_column(
@@ -528,6 +535,7 @@ class MediaFile(Base):
         server_default="[]",
     )
     local_poster_path: Mapped[str | None] = mapped_column(String)
+    local_metadata_path: Mapped[str | None] = mapped_column(String)
     subtitle_sidecar_paths: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,

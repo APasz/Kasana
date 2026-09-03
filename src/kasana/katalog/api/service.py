@@ -53,6 +53,7 @@ from kasana.katalog.api.contracts import (
     ItemCollectionReference,
     LibraryItemDetail,
     LibraryItemEditAudit,
+    LibraryItemExternalIdentifier,
     LibraryItemKind,
     LibraryItemMutationResult,
     LibraryItemPage,
@@ -129,6 +130,7 @@ from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
+    MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
     PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_DURATION_FRACTION,
     PLAYBACK_SESSION_PROGRESS_MAX_GRACE_PERIOD_SECONDS,
 )
@@ -1013,6 +1015,16 @@ class KatalogQueryService:
 
         return self._database.run_transaction(load)
 
+    def get_item_with_etag(self, item_id: int) -> tuple[LibraryItemDetail, str]:
+        """Return one detail representation and the ETag derived from that representation."""
+
+        def load(session: Session) -> tuple[LibraryItemDetail, str]:
+            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
+            detail = _detail(session, item)
+            return detail, _detail_etag(detail)
+
+        return self._database.run_transaction(load)
+
     def metadata_binding(self, item_id: int) -> MetadataBindingReference | None:
         """Return the provider record currently used to refresh an item."""
 
@@ -1069,28 +1081,8 @@ class KatalogQueryService:
         return self._database.run_transaction(load)
 
     def item_etag(self, item_id: int) -> str:
-        def load(session: Session) -> str:
-            item: Zaisan = _require(session, Zaisan, item_id, "Library item")
-            artworks: tuple[CachedArtwork, ...] = tuple[CachedArtwork, ...](
-                session.scalars(
-                    select(CachedArtwork)
-                    .where(CachedArtwork.library_item_id == item.id)
-                    .order_by(CachedArtwork.id)
-                )
-            )
-            source: str = "|".join(
-                (
-                    str(item.id),
-                    item.title,
-                    item.sort_title,
-                    str(item.release_year),
-                    item.availability.value,
-                    *(f"{artwork.id}:{artwork.provider_revision}" for artwork in artworks),
-                )
-            )
-            return _etag(source)
-
-        return self._database.run_transaction(load)
+        _, etag = self.get_item_with_etag(item_id)
+        return etag
 
     def list_children(
         self, item_id: int, *, cursor: str | None, limit: int
@@ -4560,6 +4552,7 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
     values = summary.model_dump() | {
         "sort_title": item.sort_title,
         "overview": item.overview,
+        "external_ids": _external_ids_for_item(session, item),
         "release_date": item.release_date.isoformat() if item.release_date is not None else None,
         "air_date": item.air_date.isoformat() if item.air_date is not None else None,
         "season_number": item.season_number,
@@ -4614,6 +4607,54 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
             return SpecialItemDetail.model_validate(values)
         case ZaisanKind.EXTRA:
             return ExtraItemDetail.model_validate(values)
+
+
+def _external_ids_for_item(
+    session: Session, item: Zaisan
+) -> tuple[LibraryItemExternalIdentifier, ...]:
+    """Combine local and active-provider identifiers within the public contract limit."""
+
+    identifiers: list[LibraryItemExternalIdentifier] = []
+    known: set[tuple[str, str]] = set()
+
+    def add(raw_identifier: object) -> None:
+        if not isinstance(raw_identifier, Mapping):
+            return
+        fields = cast(Mapping[object, object], raw_identifier)
+        namespace = fields.get("namespace")
+        value = fields.get("value")
+        if not isinstance(namespace, str) or not isinstance(value, str):
+            return
+        normalised_namespace = namespace.strip()
+        normalised_value = value.strip()
+        if not normalised_namespace or not normalised_value:
+            return
+        key = normalised_namespace.casefold(), normalised_value
+        if key in known:
+            return
+        if len(identifiers) == MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS:
+            return
+        known.add(key)
+        identifiers.append(
+            LibraryItemExternalIdentifier(
+                namespace=normalised_namespace,
+                value=normalised_value,
+            )
+        )
+
+    for identifier in item.local_external_ids:
+        add(identifier)
+    bindings = session.scalars(
+        select(MetadataBinding).where(
+            MetadataBinding.library_item_id == item.id,
+            MetadataBinding.status == MetadataMatchStatus.MATCHED,
+        ).order_by(MetadataBinding.provider, MetadataBinding.id)
+    )
+    for binding in bindings:
+        add({"namespace": binding.provider, "value": binding.provider_id})
+        for identifier in binding.provider_external_ids:
+            add(identifier)
+    return tuple(identifiers)
 
 
 def _media_summary(file: MediaFile) -> MediaTechnicalSummary:
@@ -5504,3 +5545,16 @@ def _cursor_datetime(cursor: dict[str, object], field: str) -> datetime:
 
 def _etag(value: str) -> str:
     return f'"{hashlib.sha256(value.encode()).hexdigest()}"'
+
+
+def _detail_etag(detail: LibraryItemDetail) -> str:
+    """Hash the exact JSON-compatible item representation returned by the API."""
+
+    return _etag(
+        json.dumps(
+            detail.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )

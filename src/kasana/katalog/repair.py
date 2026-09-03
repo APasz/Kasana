@@ -14,16 +14,18 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.limits import MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS
 from kasana.katalog.metadata.scoring import normalise_title
 from kasana.katalog.models import (
     AuditIssue,
     CollectionKin,
     HierarchyRepairRun,
+    JSONObject,
     KeiroEntry,
     Kura,
     MediaFile,
@@ -47,6 +49,7 @@ from kasana.katalog.parsing import (
     parse_media_path,
 )
 from kasana.katalog.scanning.audit import structural_findings
+from kasana.shared.metadata import ExternalIdentifier
 
 
 class RepairActionKind(StrEnum):
@@ -1602,9 +1605,33 @@ def _merge_items(session: Session, source_id: int, target_id: int) -> None:
     target.locked_metadata_fields = sorted(
         set(target.locked_metadata_fields) | set(source.locked_metadata_fields)
     )
+    target.local_external_ids = _merged_local_external_ids(source, target)
     session.flush()
     session.delete(source)
     session.flush()
+
+
+def _merged_local_external_ids(source: Zaisan, target: Zaisan) -> list[JSONObject]:
+    """Retain each valid local identifier while consolidating duplicate records."""
+
+    identifiers: list[JSONObject] = []
+    known: set[tuple[str, str]] = set()
+    for item in (source, target):
+        for raw_identifier in item.local_external_ids:
+            try:
+                identifier = ExternalIdentifier.model_validate(raw_identifier)
+            except ValidationError as error:
+                msg = f"Library item {item.id} has an invalid local external identifier."
+                raise ValueError(msg) from error
+            key = identifier.namespace.casefold(), identifier.value
+            if key in known:
+                continue
+            known.add(key)
+            if len(identifiers) < MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS:
+                identifiers.append(
+                    {"namespace": identifier.namespace, "value": identifier.value}
+                )
+    return identifiers
 
 
 def _move_playback_states(session: Session, source: Zaisan, target: Zaisan) -> None:

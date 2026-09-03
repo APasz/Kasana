@@ -39,6 +39,15 @@ class DownloadOptionView(BaseModel):
     label: str = Field(min_length=1, max_length=200)
 
 
+class ExternalLinkView(BaseModel):
+    """A safe outbound link derived from a trusted external identifier."""
+
+    model_config = ConfigDict(frozen=True)
+
+    label: str = Field(min_length=1, max_length=100)
+    url: str = Field(pattern=r"^https://")
+
+
 class ItemDetailView(BaseModel):
     """Safe detail data for the first Kanvas item page."""
 
@@ -57,6 +66,7 @@ class ItemDetailView(BaseModel):
     progress_percent: int | None = Field(default=None, ge=0, le=100, alias="progressPercent")
     watched: bool = False
     available: bool
+    external_links: tuple[ExternalLinkView, ...] = Field(default=(), alias="externalLinks")
     download_options: tuple[DownloadOptionView, ...] = Field(default=(), alias="downloadOptions")
     child_section_title: Literal["Episodes", "Seasons"] = Field(
         default="Episodes", alias="childSectionTitle"

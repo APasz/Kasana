@@ -82,6 +82,29 @@ export KASANA_KOURIER_FANART_API_KEY='your-fanart-project-key'
 Downloaded artwork is cached outside media directories.
 Matching is conservative; review or manually select uncertain matches with `kasana-katalog metadata --help`.
 
+### Local metadata sidecars
+
+Titles that are absent from online providers can carry their own metadata. Place a UTF-8 JSON
+file beside the video as either `<video-name>.kasana.json` (for example,
+`Axanar.mkv.kasana.json`) or `<video-stem>.kasana.json` (`Axanar.kasana.json`). A
+directory-level `kasana.json` is also accepted when that directory contains exactly one video.
+
+```json
+{
+  "title": "Axanar",
+  "sort_title": "Axanar, Star Trek",
+  "year": 2015,
+  "overview": "A locally catalogued fan-film entry.",
+  "tags": ["star trek", "fan film"],
+  "external_ids": [{"namespace": "imdb", "value": "tt3302086"}]
+}
+```
+
+Supported fields are `title`, `sort_title`, `year`, `release_date`, `overview`, `tags`,
+and `external_ids`. Invalid or ambiguous sidecars are reported by the scan audit instead of being
+applied. A present sidecar is reapplied on every scan; its imported values remain if it is later
+removed. IMDb title IDs appear as outbound links in Kanvas, without any IMDb API credentials.
+
 ## Playback
 
 Kanvas is the primary player.

@@ -13,9 +13,15 @@ from kasana.katalog.container import canonical_container
 from kasana.katalog.models import AuditCategory
 from kasana.katalog.parsing import ParseFailure
 from kasana.katalog.probe import ProbeResult
+from kasana.katalog.scanning.local_metadata import (
+    LocalMetadata,
+    LocalMetadataError,
+    load_local_metadata,
+)
 
 _POSTER_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".webp"})
 _SUBTITLE_EXTENSIONS = frozenset({".ass", ".srt", ".ssa", ".sub", ".vtt"})
+_LOCAL_METADATA_SUFFIX = ".kasana.json"
 _LANGUAGE_SIDECAR_STEM_PATTERN = re.compile(r"^[a-z]{2,3}(?:-[a-z]{2})?$", re.IGNORECASE)
 _POSTER_STEMS = frozenset({"cover", "folder", "poster"})
 _RECOGNISED_CONTAINERS = frozenset({"avi", "isobmff", "matroska"})
@@ -69,6 +75,7 @@ class Discovery:
     files: tuple[FileSnapshot, ...]
     subtitle_sidecars: tuple[Path, ...]
     posters: tuple[Path, ...]
+    metadata_sidecars: tuple[Path, ...]
     findings: tuple[AuditFinding, ...]
 
 
@@ -78,6 +85,14 @@ class MediaSidecars:
 
     poster: Path | None
     subtitles: tuple[Path, ...]
+    metadata: LocalMetadata | None = None
+    metadata_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class _MetadataAttachment:
+    path: Path
+    metadata: LocalMetadata
 
 
 def discover(
@@ -91,6 +106,7 @@ def discover(
     files: list[FileSnapshot] = []
     subtitles: list[Path] = []
     posters: list[Path] = []
+    metadata: list[Path] = []
     findings: list[AuditFinding] = []
 
     def on_walk_error(error: OSError) -> None:
@@ -104,7 +120,9 @@ def discover(
             _raise_if_cancelled(cancellation_requested)
             path = directory_path / filename
             suffix = path.suffix.casefold()
-            if suffix in video_extensions:
+            if _is_local_metadata_sidecar(path):
+                metadata.append(path)
+            elif suffix in video_extensions:
                 try:
                     stat_result = path.stat()
                 except OSError as error:
@@ -123,12 +141,25 @@ def discover(
                 subtitles.append(path)
             elif suffix in _POSTER_EXTENSIONS and path.stem.casefold() in _POSTER_STEMS:
                 posters.append(path)
-    return Discovery(tuple(files), tuple(subtitles), tuple(posters), tuple(findings))
+    return Discovery(
+        tuple(files),
+        tuple(subtitles),
+        tuple(posters),
+        tuple(metadata),
+        tuple(findings),
+    )
 
 
 def _raise_if_cancelled(cancellation_requested: Callable[[], bool] | None) -> None:
     if cancellation_requested is not None and cancellation_requested():
         raise ScanCancelledError("Scan cancellation was requested.")
+
+
+def _is_local_metadata_sidecar(path: Path) -> bool:
+    name = path.name.casefold()
+    return name == _LOCAL_METADATA_SUFFIX.removeprefix(".") or name.endswith(
+        _LOCAL_METADATA_SUFFIX
+    )
 
 
 class ScanCancelledError(RuntimeError):
@@ -161,7 +192,9 @@ def sidecar_findings(discovery: Discovery) -> tuple[AuditFinding, ...]:
     return tuple(findings)
 
 
-def sidecars_by_media(discovery: Discovery) -> dict[Path, MediaSidecars]:
+def sidecars_by_media(
+    discovery: Discovery,
+) -> tuple[dict[Path, MediaSidecars], tuple[AuditFinding, ...]]:
     """Associate only unambiguous local sidecars; sidecars never become library items."""
 
     files_by_directory: dict[Path, list[FileSnapshot]] = defaultdict(list)
@@ -169,6 +202,10 @@ def sidecars_by_media(discovery: Discovery) -> dict[Path, MediaSidecars]:
         files_by_directory[file.path.parent].append(file)
     posters_by_media: dict[Path, Path] = {}
     subtitles_by_media: dict[Path, list[Path]] = defaultdict(list)
+    metadata_by_media, metadata_findings = _metadata_by_media(
+        discovery.metadata_sidecars,
+        files_by_directory,
+    )
     for poster in discovery.posters:
         candidate = _poster_candidate(poster, files_by_directory[poster.parent])
         if candidate is not None:
@@ -177,13 +214,24 @@ def sidecars_by_media(discovery: Discovery) -> dict[Path, MediaSidecars]:
         candidates = _subtitle_candidates(subtitle, files_by_directory[subtitle.parent])
         if len(candidates) == 1:
             subtitles_by_media[candidates[0].path].append(subtitle)
-    return {
-        file.path: MediaSidecars(
-            poster=posters_by_media.get(file.path),
-            subtitles=tuple(sorted(subtitles_by_media[file.path])),
-        )
-        for file in discovery.files
-    }
+    return (
+        {
+            file.path: MediaSidecars(
+                poster=posters_by_media.get(file.path),
+                subtitles=tuple(sorted(subtitles_by_media[file.path])),
+                metadata=(
+                    metadata_by_media[file.path].metadata
+                    if file.path in metadata_by_media
+                    else None
+                ),
+                metadata_path=(
+                    metadata_by_media[file.path].path if file.path in metadata_by_media else None
+                ),
+            )
+            for file in discovery.files
+        },
+        tuple(metadata_findings),
+    )
 
 
 def probe_audit_findings(probe_results: Mapping[Path, ProbeResult]) -> tuple[AuditFinding, ...]:
@@ -264,6 +312,66 @@ def _poster_candidate(poster: Path, files: Sequence[FileSnapshot]) -> FileSnapsh
     directory_title = poster.parent.name.casefold()
     title_matches = tuple(file for file in files if file.path.stem.casefold() == directory_title)
     return title_matches[0] if len(title_matches) == 1 else None
+
+
+def _metadata_by_media(
+    sidecars: Sequence[Path],
+    files_by_directory: Mapping[Path, Sequence[FileSnapshot]],
+) -> tuple[dict[Path, _MetadataAttachment], list[AuditFinding]]:
+    """Parse each metadata sidecar and reject ambiguous ownership explicitly."""
+
+    candidates_by_media: dict[Path, list[Path]] = defaultdict(list)
+    findings: list[AuditFinding] = []
+    for sidecar in sorted(sidecars):
+        candidates = _metadata_candidates(sidecar, files_by_directory[sidecar.parent])
+        if len(candidates) != 1:
+            findings.append(
+                AuditFinding(
+                    AuditCategory.INVALID_METADATA_SIDECAR,
+                    sidecar,
+                    "A local metadata sidecar must identify exactly one video file "
+                    "in its directory.",
+                )
+            )
+            continue
+        candidates_by_media[candidates[0].path].append(sidecar)
+
+    attachments: dict[Path, _MetadataAttachment] = {}
+    for media_path, attached_sidecars in candidates_by_media.items():
+        if len(attached_sidecars) != 1:
+            for sidecar in attached_sidecars:
+                findings.append(
+                    AuditFinding(
+                        AuditCategory.INVALID_METADATA_SIDECAR,
+                        sidecar,
+                        "More than one local metadata sidecar targets the same video file.",
+                    )
+                )
+            continue
+        sidecar = attached_sidecars[0]
+        try:
+            metadata = load_local_metadata(sidecar)
+        except LocalMetadataError as error:
+            findings.append(
+                AuditFinding(AuditCategory.INVALID_METADATA_SIDECAR, sidecar, str(error))
+            )
+            continue
+        attachments[media_path] = _MetadataAttachment(sidecar, metadata)
+    return attachments, findings
+
+
+def _metadata_candidates(sidecar: Path, files: Sequence[FileSnapshot]) -> tuple[FileSnapshot, ...]:
+    """Return the one video named by a local metadata sidecar convention."""
+
+    name = sidecar.name
+    if name.casefold() == _LOCAL_METADATA_SUFFIX.removeprefix("."):
+        return tuple(files) if len(files) == 1 else ()
+    stem = name[: -len(_LOCAL_METADATA_SUFFIX)].casefold()
+    exact_filename = tuple(file for file in files if file.path.name.casefold() == stem)
+    if exact_filename:
+        return exact_filename
+    stem_matches = tuple(file for file in files if file.path.stem.casefold() == stem)
+    return stem_matches if len(stem_matches) == 1 else ()
 
 
 def codec_findings(
