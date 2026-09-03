@@ -554,6 +554,7 @@ def test_job_view_exposes_failure_reason_for_failed_rows() -> None:
         failure_code="runtimeerror",
         failure_message="TMDB request failed.",
         cancellable=False,
+        clearable=True,
     )
 
     view = job_view(job)
@@ -562,6 +563,7 @@ def test_job_view_exposes_failure_reason_for_failed_rows() -> None:
     assert payload["status"] == "failed"
     assert payload["message"] == "Maintenance job failed."
     assert payload["failure"] == "TMDB request failed."
+    assert payload["clearable"] is True
 
 
 def test_poster_view_transformation_is_safe_and_expresses_progress() -> None:
@@ -2932,6 +2934,9 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
             calls.append("cancel")
             return _admin_job()
 
+        async def clear_job(self, _job_id: str) -> None:
+            calls.append("clear")
+
         async def match_metadata_candidate(self, _item_id: int, **_kwargs: str) -> None:
             calls.append("match")
 
@@ -2996,6 +3001,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         {"operation": "library-consistency", "rootId": 1, "includeUnavailable": True},
         {"operation": "artwork-fetch"},
         {"operation": "cancel-job", "jobId": "job-1"},
+        {"operation": "clear-job", "jobId": "job-1", "confirmed": True},
         {"operation": "match", "itemId": 7, "provider": "tmdb", "providerId": "42"},
         {"operation": "reject", "itemId": 7, "provider": "tmdb", "providerId": "42"},
         {"operation": "ignore", "itemId": 7},
@@ -3021,6 +3027,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         "consistency",
         "artwork",
         "cancel",
+        "clear",
         "match",
         "reject",
         "ignore",
@@ -3144,6 +3151,9 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
             calls.append("cancel")
             return job
 
+        async def clear_job(self, *_args: object) -> None:
+            calls.append("clear")
+
         async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
             calls.append("create-root")
             assert request.path == "media"
@@ -3175,6 +3185,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
     await service.submit_library_consistency(LibraryConsistencyRequest(library_root_id=1))
     await service.submit_artwork_fetch(ArtworkFetchRequest(library_root_id=1))
     await service.cancel_job("job-1")
+    await service.clear_job("job-1")
     await service.create_library_root(
         LibraryRootCreate(path="media", expected_kind=LibraryRootKind.MOVIE)
     )
@@ -3200,6 +3211,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         "consistency",
         "artwork",
         "cancel",
+        "clear",
         "create-root",
         "update-root",
         "delete-root",
@@ -5292,6 +5304,10 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "k-metadata-selected__title" in css
     assert 'class="k-metadata-navigation"' in javascript
     assert ".k-metadata-decision .k-action-row" in css
+    assert ".k-job-row__actions { grid-area: actions;" in css
+    assert ".k-job-row__details { grid-area: details;" in css
+    assert "data-admin-clear" in javascript
+    assert "toggleJobDetails" in javascript
     assert 'grid-template-areas: "local candidates" "local actions"' in css
     assert ".k-metadata-selected__title { display: block; overflow-wrap: anywhere;" in css
     assert "kanvas-administration { display: block; width: 100%; max-width: 1440px; }" in css

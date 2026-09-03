@@ -29,6 +29,12 @@ _TERMINAL_STATUSES = frozenset(
         MaintenanceJobStatus.INTERRUPTED,
     }
 )
+_CLEARABLE_STATUSES = frozenset(
+    {
+        MaintenanceJobStatus.FAILED,
+        MaintenanceJobStatus.INTERRUPTED,
+    }
+)
 
 
 class JobNotFoundError(LookupError):
@@ -260,6 +266,19 @@ class JobRegistry:
         job = await run_blocking(self._database.run_transaction, cancel)
         self._request_cancellation(job_id)
         return job
+
+    async def clear(self, job_id: str) -> None:
+        """Delete one failed or interrupted job after it is no longer active."""
+
+        def clear(session: Session) -> None:
+            job = _require_job(session, job_id)
+            if job.status not in _CLEARABLE_STATUSES:
+                raise JobConflictError(
+                    f"Job {job_id} is {job.status.value} and cannot be cleared."
+                )
+            session.delete(job)
+
+        await run_blocking(self._database.run_transaction, clear)
 
     async def cancellation_requested(self, job_id: str) -> bool:
         return await run_blocking(
@@ -508,6 +527,7 @@ def _job_view(job: MaintenanceJob) -> BackgroundJob:
         failure_message=job.failure_message,
         cancellation_requested=job.cancellation_requested,
         cancellable=job.status in _ACTIVE_STATUSES,
+        clearable=job.status in _CLEARABLE_STATUSES,
         library_root_id=job.library_root_id,
         request_id=job.request_id,
     )

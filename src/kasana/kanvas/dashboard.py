@@ -942,6 +942,12 @@ async def administration_action(request: Request) -> JSONResponse:
         if operation == "cancel-job":
             job = await service.cancel_job(_string(payload, "jobId", maximum_length=100))
             return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "clear-job":
+            if payload.get("confirmed") is not True:
+                return _invalid_action("Clearing a problem job requires explicit confirmation.")
+            job_id = _string(payload, "jobId", maximum_length=100)
+            await service.clear_job(job_id)
+            return JSONResponse({"jobId": job_id, "action": "cleared"})
         if operation in {"match", "reject"}:
             item_id = _integer(payload, "itemId")
             provider = _string(payload, "provider", maximum_length=100)
@@ -3120,25 +3126,44 @@ async def design_page() -> None:
             """
             <div class="k-admin-list">
                 <article class="k-job-row">
-                    <div><strong>Queued scan</strong><small>queued</small></div>
                     <div class="k-job-row__progress">
                         <span class="k-progress-edge k-progress-edge--unknown"></span>
-                        <small>Waiting</small>
                     </div>
-                    <div><small>Unknown total</small></div>
+                    <div class="k-job-row__summary">
+                        <strong>Queued scan</strong><small>queued · waiting</small>
+                    </div>
+                    <div class="k-job-row__actions">
+                        <button type="button" class="k-button">Details</button>
+                        <button type="button" class="k-button">Cancel</button>
+                    </div>
                 </article>
                 <article class="k-job-row">
-                    <div><strong>Running artwork</strong><small>running</small></div>
                     <div class="k-job-row__progress">
                         <span class="k-progress-edge"><span style="--k-progress:62%"></span></span>
-                        <small>62/100 artwork</small>
                     </div>
-                    <div><small>Progress edge</small></div>
+                    <div class="k-job-row__summary">
+                        <strong>Running artwork</strong><small>running · 62/100 artwork</small>
+                    </div>
+                    <div class="k-job-row__actions">
+                        <button type="button" class="k-button">Details</button>
+                        <button type="button" class="k-button">Cancel</button>
+                    </div>
                 </article>
                 <article class="k-job-row">
-                    <div><strong>Failed scan</strong><small>failed · interrupted</small></div>
-                    <div><small>Inspectable failure</small></div>
-                    <div><small>Cancelled / completed states</small></div>
+                    <div class="k-job-row__progress">
+                        <span class="k-progress-edge"></span>
+                    </div>
+                    <div class="k-job-row__summary">
+                        <strong>Failed scan</strong><small>failed · matching · 358/358 files</small>
+                    </div>
+                    <div class="k-job-row__actions">
+                        <button type="button" class="k-button">Details</button>
+                        <button type="button" class="k-button k-button--danger">Clear</button>
+                    </div>
+                    <section class="k-job-row__details">
+                        <div>TMDB returned HTTP 404.</div>
+                        <small>Submitted just now</small>
+                    </section>
                 </article>
                 <article class="k-root-row">
                     <div><strong>Unavailable root</strong><small>movie · offline</small></div>

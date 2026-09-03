@@ -780,6 +780,9 @@ class KatalogClient:
     async def cancel_job(self, job_id: str) -> BackgroundJob:
         return await self._send_model("POST", f"/api/v1/jobs/{job_id}/cancel", None, BackgroundJob)
 
+    async def clear_job(self, job_id: str) -> None:
+        await self._request("DELETE", f"/api/v1/jobs/{job_id}")
+
     async def list_library_roots(self) -> tuple[LibraryRootSummary, ...]:
         response = await self._request("GET", "/api/v1/library/roots")
         if not isinstance(response.payload, list):

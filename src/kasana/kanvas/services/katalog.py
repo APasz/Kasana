@@ -482,6 +482,10 @@ class KanvasKatalogService:
         async with self._client() as client:
             return job_view(await client.cancel_job(job_id))
 
+    async def clear_job(self, job_id: str) -> None:
+        async with self._client() as client:
+            await client.clear_job(job_id)
+
     async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
         async with self._client() as client:
             return await client.create_library_root(request)

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const {escapeHtml, jobDetail, providerEntryUrl} = window.kanvasInternals;
+  const {escapeHtml, jobDetail, providerEntryUrl, tmdbEntryReferenceFromValue} = window.kanvasInternals;
   const adminDate = (value) => {
     if (typeof value !== 'string') return '—';
     const parsed = new Date(value);
@@ -27,6 +27,7 @@
     'root-update': 'Library root saved',
     'root-delete': 'Library root removed',
     'cancel-job': 'Job cancellation',
+    'clear-job': 'Clear job',
     match: 'Metadata match',
     reject: 'Candidate rejected',
     ignore: 'Metadata item ignored',
@@ -70,6 +71,7 @@
       this.cursor = null;
       this.submittedJobId = null;
       this.activity = null;
+      this.expandedJobIds = new Set();
       this.reviewedItemCount = 0;
       this.lastMatchedItemId = null;
       this.manualSearchOpen = false;
@@ -77,6 +79,7 @@
       this.manualSearchResults = [];
       this.manualSearchStatus = '';
       this.manualSelection = null;
+      this.manualReferenceValue = '';
       this.inFlight = false;
       this.timer = null;
       this.abort = null;
@@ -99,6 +102,7 @@
       window.clearTimeout(this.timer);
       this.abort?.abort();
       this.manualAbort?.abort();
+      this.manualAbort = null;
     }
 
     source(name) { return this.getAttribute(name); }
@@ -467,19 +471,22 @@
 
     renderManualMatch(item) {
       if (!this.manualSearchOpen) {
-        return '<div class="k-metadata-manual"><button type="button" class="k-button" data-admin-manual-toggle>Find another match</button><button type="button" class="k-button" data-admin-metadata="refresh">Search providers again</button></div>';
+        return '<div class="k-metadata-manual"><button type="button" class="k-button" data-admin-manual-toggle>Find or enter a match</button><button type="button" class="k-button" data-admin-metadata="refresh">Search providers again</button></div>';
       }
       const results = this.manualSearchResults.map((entry, index) => {
         const selected = index === this.manualSelection;
         const title = typeof entry.title === 'string' ? entry.title : 'Untitled';
         const provider = typeof entry.provider === 'string' ? entry.provider : 'provider';
-        return `<button type="button" class="k-metadata-candidate${selected ? ' k-metadata-candidate--selected' : ''}" aria-pressed="${selected}" data-admin-manual-select="${index}"><span>${escapeHtml(title)}</span><small>${escapeHtml(provider)} · ${entry.year || '—'} · ${Math.round(Number(entry.confidence || 0) * 100)}%</small></button>`;
+        const details = entry.directReference
+          ? `${provider} · ${entry.provider_id || entry.providerId || '—'} · Direct record`
+          : `${provider} · ${entry.year || '—'} · ${Math.round(Number(entry.confidence || 0) * 100)}%`;
+        return `<button type="button" class="k-metadata-candidate${selected ? ' k-metadata-candidate--selected' : ''}" aria-pressed="${selected}" data-admin-manual-select="${index}"><span>${escapeHtml(title)}</span><small>${escapeHtml(details)}</small></button>`;
       }).join('');
       const selected = this.manualSelection === null ? null : this.manualSearchResults[this.manualSelection];
       const selection = selected
         ? `<div class="k-admin-manual-confirmation"><span>Use <strong>${escapeHtml(selected.title || 'this record')}</strong> for ${escapeHtml(item.title)}?</span><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-admin-manual-apply>Apply match</button><button type="button" class="k-button" data-admin-manual-clear>Choose another</button></div></div>`
         : '';
-      return `<section class="k-metadata-manual"><div class="k-metadata-panel__heading"><span>Manual match</span><button type="button" class="k-button" data-admin-manual-close>Close</button></div><form class="k-admin-manual-search" data-admin-manual-search><label class="k-control-shell k-input-shell"><input class="k-input" name="query" value="${escapeHtml(this.manualSearchQuery || item.title || '')}" aria-label="Search metadata records" required></label><button type="submit" class="k-button">Search</button></form><div class="k-picker__status" aria-live="polite">${escapeHtml(this.manualSearchStatus)}</div><div class="k-metadata-candidate-list">${results}</div>${selection}</section>`;
+      return `<section class="k-metadata-manual"><div class="k-metadata-panel__heading"><span>Manual match</span><button type="button" class="k-button" data-admin-manual-close>Close</button></div><div class="k-admin-manual-reference"><form class="k-admin-manual-search" data-admin-manual-reference><label class="k-control-shell k-input-shell"><input class="k-input" name="reference" value="${escapeHtml(this.manualReferenceValue)}" placeholder="TMDB link or ID" aria-label="TMDB link or ID" autocomplete="off" required></label><button type="submit" class="k-button">Use TMDB record</button></form><small>Paste a TMDB movie or TV link, or enter its numeric ID.</small></div><form class="k-admin-manual-search" data-admin-manual-search><label class="k-control-shell k-input-shell"><input class="k-input" name="query" value="${escapeHtml(this.manualSearchQuery || item.title || '')}" placeholder="Search by title" aria-label="Search metadata records" required></label><button type="submit" class="k-button">Search</button></form><div class="k-picker__status" aria-live="polite">${escapeHtml(this.manualSearchStatus)}</div><div class="k-metadata-candidate-list">${results}</div>${selection}</section>`;
     }
 
     renderJob(job) {
@@ -491,9 +498,19 @@
       const jobId = String(job.id || 'unknown');
       const anchorId = jobAnchorId(jobId);
       const targeted = currentHashTarget() === anchorId;
-      const failure = job.failure || (isProblemJob(job) ? job.message : '');
-      const details = `<details class="k-job-row__details"${targeted ? ' open' : ''}><summary>Details</summary><div>${escapeHtml(jobDetail(job, counters) || 'No additional job details.')}<br>${escapeHtml(`Submitted ${adminDate(job.submittedAt)}${job.startedAt ? ` · Started ${adminDate(job.startedAt)}` : ''}${job.completedAt ? ` · Finished ${adminDate(job.completedAt)}` : ''}`)}${failure ? `<br><strong>${escapeHtml(failure)}</strong>` : ''}</div></details>`;
-      return `<article id="${escapeHtml(anchorId)}" class="k-job-row${targeted ? ' k-job-row--target' : ''}" tabindex="-1" data-job-id="${escapeHtml(jobId)}"><div><strong>${escapeHtml(adminOperationLabel(job.kind))}</strong><small>${escapeHtml(job.status)}${job.phase ? ` · ${escapeHtml(job.phase)}` : ''}</small>${failure ? `<small class="k-job-row__failure">${escapeHtml(failure)}</small>` : ''}</div><div class="k-job-row__progress">${percent === null ? '<span class="k-progress-edge k-progress-edge--unknown"></span>' : `<span class="k-progress-edge"><span style="--k-progress:${percent}%"></span></span>`}<small>${escapeHtml(progress)}</small></div><div>${details}</div>${job.cancellable ? `<button type="button" class="k-button" data-admin-cancel="${escapeHtml(jobId)}">Cancel</button>` : ''}</article>`;
+      const detailsOpen = targeted || this.expandedJobIds.has(jobId);
+      const detailId = `${anchorId}-details`;
+      const status = [job.status, job.phase, progress === '—' ? null : progress]
+        .filter(Boolean)
+        .join(' · ');
+      const detail = jobDetail(job, counters) || 'No additional job details.';
+      const details = `<section id="${escapeHtml(detailId)}" class="k-job-row__details" aria-label="Job details"${detailsOpen ? '' : ' hidden'}><div>${escapeHtml(detail)}</div><small>${escapeHtml(`Submitted ${adminDate(job.submittedAt)}${job.startedAt ? ` · Started ${adminDate(job.startedAt)}` : ''}${job.completedAt ? ` · Finished ${adminDate(job.completedAt)}` : ''}`)}</small></section>`;
+      const action = job.cancellable
+        ? `<button type="button" class="k-button" data-admin-cancel="${escapeHtml(jobId)}">Cancel</button>`
+        : job.clearable
+          ? `<button type="button" class="k-button k-button--danger" data-admin-clear="${escapeHtml(jobId)}">Clear</button>`
+          : '';
+      return `<article id="${escapeHtml(anchorId)}" class="k-job-row${targeted ? ' k-job-row--target' : ''}" tabindex="-1" data-job-id="${escapeHtml(jobId)}"><div class="k-job-row__progress" aria-label="${escapeHtml(`Progress: ${progress}`)}">${percent === null ? '<span class="k-progress-edge k-progress-edge--unknown"></span>' : `<span class="k-progress-edge"><span style="--k-progress:${percent}%"></span></span>`}</div><div class="k-job-row__summary"><strong>${escapeHtml(adminOperationLabel(job.kind))}</strong><small>${escapeHtml(status || '—')}</small></div><div class="k-job-row__actions"><button type="button" class="k-button" data-admin-job-details="${escapeHtml(jobId)}" aria-controls="${escapeHtml(detailId)}" aria-expanded="${detailsOpen}">Details</button>${action}</div>${details}</article>`;
     }
 
     renderJobs() {
@@ -513,6 +530,13 @@
         ${this.cursor ? '<button type="button" class="k-button" data-admin-more>Load earlier jobs</button>' : ''}
       </section>`;
       this.bindActions();
+    }
+
+    toggleJobDetails(jobId) {
+      if (!jobId) return;
+      if (this.expandedJobIds.has(jobId)) this.expandedJobIds.delete(jobId);
+      else this.expandedJobIds.add(jobId);
+      this.renderJobs();
     }
 
     bindActions() {
@@ -554,6 +578,14 @@
       this.querySelectorAll('[data-admin-cancel]').forEach((button) => button.addEventListener('click', () => {
         if (window.confirm('Cancel this job? Work already completed will be kept.')) this.operation('cancel-job', {jobId: button.dataset.adminCancel});
       }));
+      this.querySelectorAll('[data-admin-clear]').forEach((button) => button.addEventListener('click', () => {
+        if (window.confirm('Clear this problem job? Its job history and details will be removed.')) {
+          this.operation('clear-job', {jobId: button.dataset.adminClear, confirmed: true});
+        }
+      }));
+      this.querySelectorAll('[data-admin-job-details]').forEach((button) => button.addEventListener('click', () => {
+        this.toggleJobDetails(button.dataset.adminJobDetails);
+      }));
       this.querySelector('[data-admin-more]')?.addEventListener('click', () => this.moreJobs());
       this.querySelector('[data-admin-more-review]')?.addEventListener('click', () => this.moreReviewItems());
       this.querySelectorAll('[data-admin-candidate]').forEach((button) => button.addEventListener('click', () => {
@@ -576,6 +608,11 @@
         event.preventDefault();
         const form = new FormData(event.currentTarget);
         this.searchManualMatches(String(form.get('query') || ''));
+      });
+      this.querySelector('[data-admin-manual-reference]')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        this.selectManualTmdbReference(String(form.get('reference') || ''));
       });
       this.querySelectorAll('[data-admin-manual-select]').forEach((button) => button.addEventListener('click', () => {
         this.manualSelection = Number(button.dataset.adminManualSelect);
@@ -603,6 +640,10 @@
       this.render();
       try {
         const payload = await this.postJson(source, {operation, ...extra});
+        if (operation === 'clear-job' && typeof extra.jobId === 'string') {
+          this.expandedJobIds.delete(extra.jobId);
+          if (this.submittedJobId === extra.jobId) this.submittedJobId = null;
+        }
         if (typeof payload.job?.id === 'string' && payload.job.id) {
           this.submittedJobId = payload.job.id;
           this.activity = {state: 'active', message: `${adminOperationLabel(operation)} queued.`};
@@ -632,8 +673,10 @@
       const phase = typeof job.phase === 'string' && job.phase ? ` · ${job.phase}` : '';
       const progress = jobProgress(job);
       if (isProblemJob(job)) {
+        const jobId = this.submittedJobId;
         this.activity = {state: 'error', message: job.failure || job.message || `${label} ${job.status}. Opening job details.`};
-        window.location.assign(`/administration/jobs#${jobAnchorId(this.submittedJobId)}`);
+        this.submittedJobId = null;
+        window.location.assign(`/administration/jobs#${jobAnchorId(jobId)}`);
         return;
       }
       if (job.status === 'completed') {
@@ -651,11 +694,13 @@
 
     resetManualMatch() {
       this.manualAbort?.abort();
+      this.manualAbort = null;
       this.manualSearchOpen = false;
       this.manualSearchQuery = '';
       this.manualSearchResults = [];
       this.manualSearchStatus = '';
       this.manualSelection = null;
+      this.manualReferenceValue = '';
     }
 
     closeManualMatch() {
@@ -700,26 +745,55 @@
       const search = query.trim();
       if (!item || !search) return;
       this.manualSearchQuery = search;
+      this.manualReferenceValue = '';
       this.manualSearchStatus = 'Searching metadata records…';
       this.manualSearchResults = [];
       this.manualSelection = null;
       this.renderMetadata();
       this.manualAbort?.abort();
-      this.manualAbort = new AbortController();
+      const controller = new AbortController();
+      this.manualAbort = controller;
       try {
         const response = await fetch(`/kanvas/data/items/${Number(item.itemId)}/metadata-search?query=${encodeURIComponent(search)}`, {
           headers: {'Accept': 'application/json'},
           credentials: 'same-origin',
-          signal: this.manualAbort.signal,
+          signal: controller.signal,
         });
         const payload = await response.json();
+        if (this.manualAbort !== controller) return;
         if (!response.ok) throw new Error(payload?.error || 'Metadata search could not be completed.');
         this.manualSearchResults = Array.isArray(payload.results) ? payload.results : [];
-        this.manualSearchStatus = this.manualSearchResults.length ? '' : 'No matches found. Try another title.';
+        this.manualSearchStatus = this.manualSearchResults.length
+          ? ''
+          : 'No matches found. Try another title or enter a TMDB link or ID.';
       } catch (error) {
-        if (error?.name === 'AbortError') return;
+        if (error?.name === 'AbortError' || this.manualAbort !== controller) return;
         this.manualSearchStatus = error?.message || 'Metadata search could not be completed.';
+      } finally {
+        if (this.manualAbort === controller) this.manualAbort = null;
       }
+      this.renderMetadata();
+    }
+
+    selectManualTmdbReference(value) {
+      const item = this.reviewItems[this.reviewIndex];
+      this.manualAbort?.abort();
+      this.manualAbort = null;
+      this.manualReferenceValue = typeof value === 'string' ? value.trim() : '';
+      const reference = tmdbEntryReferenceFromValue(this.manualReferenceValue, item?.kind);
+      if (!item || !reference) {
+        this.manualSearchStatus = 'Enter a TMDB movie or TV link, or a numeric ID that matches this item type.';
+        this.renderMetadata();
+        return;
+      }
+      this.manualSearchResults = [{
+        ...reference,
+        title: `TMDB record ${reference.provider_id}`,
+        year: null,
+        directReference: true,
+      }];
+      this.manualSelection = 0;
+      this.manualSearchStatus = 'Review the TMDB record below, then apply it.';
       this.renderMetadata();
     }
 

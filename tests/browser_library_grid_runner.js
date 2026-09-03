@@ -814,6 +814,31 @@ async function testAdministrationReportsTrackedJobProgressWithoutChangingTab() {
   assert.deepEqual(instance.activity, {state: 'complete', message: '42 files scanned.'});
 }
 
+async function testAdministrationStopsTrackingProblemJobs() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.submittedJobId = 'job-18';
+  instance.fetchJson = async () => ({items: [{
+    id: 'job-18',
+    kind: 'scan',
+    status: 'failed',
+    failure: 'Provider unavailable.'
+  }]});
+  const originalAssign = window.location.assign;
+  let destination = null;
+  window.location.assign = (value) => { destination = value; };
+
+  try {
+    await instance.checkSubmittedJob();
+  } finally {
+    if (originalAssign) window.location.assign = originalAssign;
+    else delete window.location.assign;
+  }
+
+  assert.equal(instance.submittedJobId, null);
+  assert.deepEqual(instance.activity, {state: 'error', message: 'Provider unavailable.'});
+  assert.equal(destination, '/administration/jobs#job-job-18');
+}
+
 async function testAdministrationReusesLoadedJobPageForTracking() {
   const instance = new globalThis.__administrationTest.KanvasAdministration();
   instance.section = 'jobs';
@@ -902,7 +927,8 @@ function testAdministrationKeepsEncodedJobAnchorsTargetable() {
     submittedAt: '2026-09-03T10:00:00Z',
     startedAt: null,
     completedAt: null,
-    cancellable: false
+    cancellable: false,
+    clearable: true
   }];
   const hash = window.location.hash;
   window.location.hash = '#job-repair%201';
@@ -912,7 +938,46 @@ function testAdministrationKeepsEncodedJobAnchorsTargetable() {
   window.location.hash = hash;
   assert.match(instance.innerHTML, /id="job-repair%201"/);
   assert.match(instance.innerHTML, /k-job-row--target/);
-  assert.match(instance.innerHTML, /k-job-row__details" open/);
+  assert.match(instance.innerHTML, /data-admin-job-details="repair 1"/);
+  assert.match(instance.innerHTML, /aria-expanded="true"/);
+  assert.match(instance.innerHTML, /class="k-job-row__details"/);
+  assert.match(instance.innerHTML, /data-admin-clear="repair 1"/);
+}
+
+function testAdministrationJobCardsKeepActionsAndDetailsSeparate() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.querySelectorAll = () => [];
+  instance.jobs = [{
+    id: 'failure-1',
+    kind: 'artwork-fetch',
+    status: 'failed',
+    phase: 'fetching',
+    progressCurrent: 0,
+    progressTotal: null,
+    progressUnit: 'artwork',
+    counters: [],
+    message: 'Maintenance job failed.',
+    failure: 'TMDB returned HTTP 404.',
+    submittedAt: '2026-09-03T10:00:00Z',
+    startedAt: '2026-09-03T10:01:00Z',
+    completedAt: '2026-09-03T10:02:00Z',
+    cancellable: false,
+    clearable: true
+  }];
+
+  instance.renderJobs();
+
+  assert.match(instance.innerHTML, /class="k-job-row__progress"/);
+  assert.match(instance.innerHTML, /class="k-job-row__actions"><button[^>]*>Details<\/button><button[^>]*data-admin-clear="failure-1"/);
+  assert.doesNotMatch(instance.innerHTML, /k-job-row__failure/);
+  assert.match(instance.innerHTML, /class="k-job-row__details"[^>]* hidden>/);
+  assert.equal((instance.innerHTML.match(/TMDB returned HTTP 404\./g) || []).length, 1);
+
+  instance.toggleJobDetails('failure-1');
+
+  assert.match(instance.innerHTML, /class="k-job-row__details"/);
+  assert.doesNotMatch(instance.innerHTML, /class="k-job-row__details"[^>]* hidden>/);
+  assert.match(instance.innerHTML, /<small>Submitted /);
 }
 
 async function testAdministrationReplacesPriorCompletionWithActionFailure() {
@@ -931,6 +996,65 @@ async function testAdministrationReplacesPriorCompletionWithActionFailure() {
     state: 'error',
     message: 'A batch may not contain duplicate sources.'
   });
+}
+
+async function testAdministrationClearingTrackedJobStopsTracking() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.setAttribute('action-source', '/kanvas/actions/administration');
+  instance.submittedJobId = 'job-17';
+  instance.expandedJobIds.add('job-17');
+  instance.render = () => {};
+  let loads = 0;
+  instance.load = () => { loads += 1; };
+  instance.postJson = async (source, payload) => {
+    assert.equal(source, '/kanvas/actions/administration');
+    assert.deepEqual(payload, {operation: 'clear-job', jobId: 'job-17', confirmed: true});
+    return {jobId: 'job-17', action: 'cleared'};
+  };
+
+  const succeeded = await instance.operation('clear-job', {jobId: 'job-17', confirmed: true});
+
+  assert.equal(succeeded, true);
+  assert.equal(instance.submittedJobId, null);
+  assert.equal(instance.expandedJobIds.has('job-17'), false);
+  assert.equal(loads, 1);
+  assert.deepEqual(instance.activity, {state: 'complete', message: 'Clear job completed.'});
+}
+
+async function testAdministrationDirectReferenceSupersedesPendingSearch() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.reviewItems = [{itemId: 17, kind: 'series', title: 'Automan'}];
+  instance.renderMetadata = () => {};
+  const originalFetch = global.fetch;
+  let aborts = 0;
+  global.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => {
+      aborts += 1;
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      reject(error);
+    });
+  });
+
+  try {
+    const search = instance.searchManualMatches('Automan');
+    instance.selectManualTmdbReference('12751');
+    await search;
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.equal(aborts, 1);
+  assert.equal(instance.manualAbort, null);
+  assert.equal(instance.manualSelection, 0);
+  assert.deepEqual(instance.manualSearchResults, [{
+    provider: 'tmdb',
+    provider_id: '12751',
+    kind: 'series',
+    title: 'TMDB record 12751',
+    year: null,
+    directReference: true
+  }]);
 }
 
 function fakeFormValues(values) {
@@ -1043,7 +1167,7 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
 
   metadata.renderMetadata();
 
-  assert.match(metadata.innerHTML, /Find another match/);
+  assert.match(metadata.innerHTML, /Find or enter a match/);
   await metadata.metadataAction('match');
   assert.deepEqual(metadataOperations, [{
     operation: 'match',
@@ -1063,8 +1187,10 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
   }];
   metadata.reviewIndex = 0;
   metadata.manualSearchOpen = true;
-  metadata.manualSearchResults = [{provider: 'tmdb', provider_id: '20', title: 'Manual title', year: 2001, kind: 'movie', confidence: 0.8}];
-  metadata.manualSelection = 0;
+  metadata.selectManualTmdbReference('https://www.themoviedb.org/movie/20-manual-title');
+  assert.match(metadata.innerHTML, /TMDB link or ID/);
+  assert.match(metadata.innerHTML, /TMDB record 20/);
+  assert.match(metadata.innerHTML, /Direct record/);
   metadata.postJson = async (source, payload) => {
     assert.equal(source, '/kanvas/actions/items/20/metadata-match');
     assert.deepEqual(payload, {provider: 'tmdb', providerId: '20', confirmed: true});
@@ -1162,7 +1288,7 @@ function testItemEditorUsesTaskFocusedTabs() {
 }
 
 function testMetadataProviderLinksSupportDirectReassignment() {
-  const {tmdbEntryReferenceFromUrl, providerEntryUrl} = window.kanvasInternals;
+  const {tmdbEntryReferenceFromUrl, tmdbEntryReferenceFromValue, providerEntryUrl} = window.kanvasInternals;
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
 
   assert.equal(
@@ -1183,6 +1309,15 @@ function testMetadataProviderLinksSupportDirectReassignment() {
     null
   );
   assert.equal(tmdbEntryReferenceFromUrl('https://example.com/movie/550', 'movie'), null);
+  assert.deepEqual(
+    tmdbEntryReferenceFromValue('12751', 'series'),
+    {provider: 'tmdb', provider_id: '12751', kind: 'series'}
+  );
+  assert.deepEqual(
+    tmdbEntryReferenceFromValue('https://www.themoviedb.org/tv/12751-automan', 'series'),
+    {provider: 'tmdb', provider_id: '12751', kind: 'series'}
+  );
+  assert.equal(tmdbEntryReferenceFromValue('12751', 'season'), null);
   editor.currentItem = {kind: 'series'};
   const directMatch = editor.metadataMatchFromLink(
     'https://www.themoviedb.org/tv/63712-acchi-kocchi'
@@ -1386,12 +1521,16 @@ async function main() {
   testKeyboardNavigationLoadsAcrossVirtualPageEdges();
   await testAdministrationPollingWaitsForOpenDialog();
   await testAdministrationReportsTrackedJobProgressWithoutChangingTab();
+  await testAdministrationStopsTrackingProblemJobs();
   await testAdministrationReusesLoadedJobPageForTracking();
   testAdministrationPollsTrackedJobsFrequently();
   testAdministrationPollsActiveJobsFrequently();
   await testAdministrationContinuesMetadataReviewPages();
   testAdministrationKeepsEncodedJobAnchorsTargetable();
+  testAdministrationJobCardsKeepActionsAndDetailsSeparate();
   await testAdministrationReplacesPriorCompletionWithActionFailure();
+  await testAdministrationClearingTrackedJobStopsTracking();
+  await testAdministrationDirectReferenceSupersedesPendingSearch();
   await testAdministrationPrimaryFlowKeepsWorkInFourAreas();
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorUsesTaskFocusedTabs();

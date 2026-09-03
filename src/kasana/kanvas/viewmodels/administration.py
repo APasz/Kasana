@@ -67,6 +67,7 @@ class JobView(BaseModel):
     completed_at: datetime | None = Field(default=None, alias="completedAt")
     cancellable: bool
     cancellation_requested: bool = Field(alias="cancellationRequested")
+    clearable: bool = False
 
 
 class LibraryRootView(BaseModel):
@@ -186,6 +187,7 @@ def job_view(job: BackgroundJob) -> JobView:
         completedAt=job.completed_at,
         cancellable=job.cancellable,
         cancellationRequested=job.cancellation_requested,
+        clearable=job.clearable,
     )
 
 

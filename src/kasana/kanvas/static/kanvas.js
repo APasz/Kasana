@@ -202,6 +202,14 @@
     }
     return null;
   };
+  const tmdbEntryReferenceFromValue = (value, expectedKind) => {
+    if (typeof value !== 'string' || !['movie', 'series'].includes(expectedKind)) return null;
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return {provider: 'tmdb', provider_id: trimmed, kind: expectedKind};
+    }
+    return tmdbEntryReferenceFromUrl(trimmed, expectedKind);
+  };
   const providerDisplayName = (provider) => ({tmdb: 'TMDB', imdb: 'IMDb', omdb: 'OMDb', tvmaze: 'TVmaze'})[
     typeof provider === 'string' ? provider.toLowerCase() : ''
   ] || provider;
@@ -5162,6 +5170,7 @@
     escapeHtml,
     jobDetail,
     tmdbEntryReferenceFromUrl,
+    tmdbEntryReferenceFromValue,
     providerEntryUrl,
   };
 

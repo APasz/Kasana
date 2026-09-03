@@ -41,6 +41,8 @@ from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
     KeiroKind,
+    MaintenanceJob,
+    MaintenanceJobStatus,
     MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
@@ -1103,6 +1105,56 @@ async def test_metadata_review_only_returns_unresolved_suggestions(
         (3, []),
     ]
     assert updated_status.json()["unresolved_metadata_count"] == 2
+
+
+async def test_only_failed_or_interrupted_jobs_can_be_cleared(api_fixture: ApiFixture) -> None:
+    async def fail() -> None:
+        raise RuntimeError("Fixture failure")
+
+    failed = await api_fixture.runtime.jobs.submit("fixture", fail)
+    await api_fixture.runtime.jobs._tasks[failed.id]  # pyright: ignore[reportPrivateUsage]
+
+    failed_response = await api_fixture.client.get(f"/api/v1/jobs/{failed.id}")
+    assert failed_response.status_code == 200
+    assert failed_response.json()["status"] == "failed"
+    assert failed_response.json()["clearable"] is True
+
+    cleared_response = await api_fixture.client.delete(f"/api/v1/jobs/{failed.id}")
+    assert cleared_response.status_code == 204
+    assert (await api_fixture.client.get(f"/api/v1/jobs/{failed.id}")).status_code == 404
+
+    interrupted_id = "interrupted-fixture"
+    interrupted_at = datetime.now(UTC)
+
+    def add_interrupted_job(session: Session) -> None:
+        session.add(
+            MaintenanceJob(
+                id=interrupted_id,
+                kind="fixture",
+                status=MaintenanceJobStatus.INTERRUPTED,
+                submitted_at=interrupted_at,
+                updated_at=interrupted_at,
+                completed_at=interrupted_at,
+                progress_current=0,
+                result_counters={},
+                cancellation_requested=False,
+            )
+        )
+
+    api_fixture.database.run_transaction(add_interrupted_job)
+    interrupted_response = await api_fixture.client.get(f"/api/v1/jobs/{interrupted_id}")
+    assert interrupted_response.status_code == 200
+    assert interrupted_response.json()["clearable"] is True
+    assert (await api_fixture.client.delete(f"/api/v1/jobs/{interrupted_id}")).status_code == 204
+
+    async def complete() -> str:
+        return "Completed fixture job."
+
+    completed = await api_fixture.runtime.jobs.submit("fixture", complete)
+    await api_fixture.runtime.jobs._tasks[completed.id]  # pyright: ignore[reportPrivateUsage]
+
+    response = await api_fixture.client.delete(f"/api/v1/jobs/{completed.id}")
+    assert response.status_code == 409
 
 
 async def test_metadata_binding_and_search_endpoints_support_reassignment(

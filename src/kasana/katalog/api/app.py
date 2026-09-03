@@ -989,6 +989,19 @@ def create_app(
     ) -> BackgroundJob:
         return await runtime.jobs.cancel(job_id)
 
+    @app.delete(
+        "/api/v1/jobs/{job_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        operation_id="v1_clear_job",
+        responses=_ERROR_RESPONSES,
+    )
+    async def clear_job(
+        job_id: str,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        await runtime.jobs.clear(job_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.post(
         "/api/v1/playback/plans",
         response_model=PlaybackPlanLaunch,

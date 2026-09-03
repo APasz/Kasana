@@ -961,6 +961,7 @@ class BackgroundJob(APIModel):
     failure_message: str | None = Field(default=None, max_length=2_000)
     cancellation_requested: bool = False
     cancellable: bool = True
+    clearable: bool = False
     library_root_id: int | None = Field(default=None, gt=0)
     request_id: str | None = Field(default=None, max_length=100)
 
