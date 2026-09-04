@@ -467,9 +467,9 @@ async def test_system_incidents_persist_acknowledgement_and_recovery_history(
             for _ in range(8)
         )
     )
-    assert {
-        incident.id for feed in concurrent_feeds for incident in feed.active
-    } == {concurrent_feeds[0].active[0].id}
+    assert {incident.id for feed in concurrent_feeds for incident in feed.active} == {
+        concurrent_feeds[0].active[0].id
+    }
 
     opened = await api_fixture.client.get("/api/v1/system-incidents")
     assert opened.status_code == 200

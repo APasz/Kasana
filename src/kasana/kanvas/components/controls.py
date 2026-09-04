@@ -160,10 +160,7 @@ def action_form_props(action: str) -> str:
     ):
         msg = "Kanvas action forms must use an internal absolute path."
         raise ValueError(msg)
-    return (
-        f'method="post" action="{escape(action, quote=True)}" '
-        'data-kanvas-action-form="true"'
-    )
+    return f'method="post" action="{escape(action, quote=True)}" data-kanvas-action-form="true"'
 
 
 def icon_action(label: str, icon: IconName, handler: Callable[..., Any] | None = None) -> Element:

@@ -20,6 +20,8 @@ from kasana.kanvas.components.controls import action_form_props
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.notifications import consume_toasts, queue_toast
 from kasana.kanvas.profiles import SessionProfile
+from kasana.kanvas.routes import api_administration, api_collections
+from kasana.kanvas.routes import common as route_common
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.toasts import ToastSeverity, ToastView
 from kasana.katalog.public import UserRole, UserSummary
@@ -62,7 +64,7 @@ async def test_toast_feed_clears_the_session_batch(
     async def current_profile(_request: object) -> SessionProfile:
         return _profile()
 
-    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
+    monkeypatch.setattr(api_administration, "data_profile", current_profile)
     request = Request({"type": "http", "query_string": b"", "headers": [], "session": {}})
     queue_toast(request, ToastView(severity=ToastSeverity.ERROR, title="Could not save changes"))
 
@@ -79,7 +81,7 @@ async def test_toast_feed_requires_a_profile(monkeypatch: MonkeyPatch) -> None:
     async def no_profile(_request: object) -> None:
         return None
 
-    monkeypatch.setattr(dashboard, "_data_profile", no_profile)
+    monkeypatch.setattr(api_administration, "data_profile", no_profile)
     request = Request({"type": "http", "query_string": b"", "headers": [], "session": {}})
 
     response = await dashboard.consume_toasts_data(request)
@@ -90,7 +92,7 @@ async def test_toast_feed_requires_a_profile(monkeypatch: MonkeyPatch) -> None:
 def test_toast_redirect_queues_a_valid_success_message() -> None:
     request = cast(Request, SimpleNamespace(session={}))
 
-    response = dashboard._toast_redirect(request, "/collections/4", "Collection created")  # pyright: ignore[reportPrivateUsage]
+    response = route_common.toast_redirect(request, "/collections/4", "Collection created")
 
     assert response.status_code == 303
     assert response.headers["location"] == "/collections/4"
@@ -118,8 +120,8 @@ async def test_native_collection_action_queues_its_redirect_toast(monkeypatch: M
         async def form(self) -> FormData:
             return FormData({"name": "Stargate", "overview": ""})
 
-    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
-    monkeypatch.setattr(dashboard, "KanvasKatalogService", Catalogue)
+    monkeypatch.setattr(route_common, "data_profile", current_profile)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", Catalogue)
     request = FormRequest()
 
     response = await dashboard.create_collection_action(cast(Request, request))

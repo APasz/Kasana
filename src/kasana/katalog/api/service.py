@@ -495,7 +495,9 @@ class KatalogQueryService:
             acknowledged_at = datetime.now(UTC)
             user = _require(session, User, request.actor_user_id, "User")
             if user.is_disabled:
-                raise CatalogueValidationError("Disabled users cannot acknowledge system incidents.")
+                raise CatalogueValidationError(
+                    "Disabled users cannot acknowledge system incidents."
+                )
             if user.role not in (ModelUserRole.ADMIN, ModelUserRole.OWNER):
                 raise CatalogueValidationError(
                     "Only administrators can acknowledge system incidents."
@@ -523,13 +525,17 @@ class KatalogQueryService:
         roots: tuple[Kura, ...] | None = None,
     ) -> StatusResponse:
         resolved_roots = (
-            roots if roots is not None else tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
+            roots
+            if roots is not None
+            else tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
         )
         resolved_metadata_binding = (
             select(MetadataBinding.id)
             .where(
                 MetadataBinding.library_item_id == Zaisan.id,
-                MetadataBinding.status.in_((MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)),
+                MetadataBinding.status.in_(
+                    (MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)
+                ),
             )
             .exists()
         )
@@ -2378,9 +2384,7 @@ class KatalogQueryService:
             )
             if cursor_value is not None:
                 statement = statement.where(Zaisan.id > _cursor_int(cursor_value, "id"))
-            rows = tuple(
-                session.scalars(statement.order_by(Zaisan.id).limit(normalised_limit + 1))
-            )
+            rows = tuple(session.scalars(statement.order_by(Zaisan.id).limit(normalised_limit + 1)))
             page, has_next = _split_page(rows, normalised_limit)
             item_ids = tuple(item.id for item in page)
             candidates_by_item: dict[int, list[MetadataReviewCandidate]] = {

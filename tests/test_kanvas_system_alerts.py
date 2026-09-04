@@ -16,6 +16,7 @@ from kasana.kanvas import dashboard
 from kasana.kanvas.components.browser import BrowserComponent
 from kasana.kanvas.components.shell import page_shell
 from kasana.kanvas.profiles import SessionProfile
+from kasana.kanvas.routes import api_administration
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.kanvas.viewmodels.system_alerts import (
@@ -166,8 +167,7 @@ async def test_system_alert_feed_derives_safe_administrator_conditions(
             severity=SystemAlertSeverity.WARNING,
             title="Library root unavailable",
             detail=(
-                "A configured library root is not accessible. "
-                "Check the disk or mount, then rescan."
+                "A configured library root is not accessible. Check the disk or mount, then rescan."
             ),
             firstDetectedAt=observed_at,
             lastDetectedAt=observed_at,
@@ -236,8 +236,8 @@ async def test_system_alert_endpoint_scopes_the_feed_to_the_active_profile(
     async def current_profile(_request: object) -> SessionProfile:
         return _profile(UserRole.USER)
 
-    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
-    monkeypatch.setattr(dashboard, "KanvasKatalogService", AlertCatalogue)
+    monkeypatch.setattr(api_administration, "data_profile", current_profile)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", AlertCatalogue)
 
     response = await dashboard.system_alerts_data(
         Request({"type": "http", "query_string": b"", "headers": []})
@@ -309,8 +309,8 @@ async def test_system_alert_acknowledgement_requires_an_administrator(
         return _profile(UserRole.ADMIN)
 
     request = Request({"type": "http", "query_string": b"", "headers": []})
-    monkeypatch.setattr(dashboard, "_data_profile", administrator_profile)
-    monkeypatch.setattr(dashboard, "KanvasKatalogService", AlertCatalogue)
+    monkeypatch.setattr(api_administration, "data_profile", administrator_profile)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", AlertCatalogue)
 
     acknowledged_response = await dashboard.acknowledge_system_alert_data(9, request)
 
@@ -320,7 +320,7 @@ async def test_system_alert_acknowledgement_requires_an_administrator(
     async def viewer_profile(_request: object) -> SessionProfile:
         return _profile(UserRole.USER)
 
-    monkeypatch.setattr(dashboard, "_data_profile", viewer_profile)
+    monkeypatch.setattr(api_administration, "data_profile", viewer_profile)
 
     forbidden_response = await dashboard.acknowledge_system_alert_data(10, request)
 

@@ -273,9 +273,7 @@ class JobRegistry:
         def clear(session: Session) -> None:
             job = _require_job(session, job_id)
             if job.status not in _CLEARABLE_STATUSES:
-                raise JobConflictError(
-                    f"Job {job_id} is {job.status.value} and cannot be cleared."
-                )
+                raise JobConflictError(f"Job {job_id} is {job.status.value} and cannot be cleared.")
             session.delete(job)
 
         await run_blocking(self._database.run_transaction, clear)

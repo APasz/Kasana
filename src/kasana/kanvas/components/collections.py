@@ -167,11 +167,7 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
         _preview_list("Duplicates", preview.duplicate_titles)
         _preview_list("Ignored non-playable", preview.non_playable_titles)
         _preview_list("Existing entries removed", preview.removed_entry_titles)
-        with (
-            ui.element("form")
-            .classes("k-action-row")
-            .props(action_form_props(apply_action))
-        ):
+        with ui.element("form").classes("k-action-row").props(action_form_props(apply_action)):
             hidden_input(name="revision", value=str(preview.revision))
             hidden_input(name="mode", value=preview.mode)
             hidden_input(name="apply_mode", value=preview.apply_mode)

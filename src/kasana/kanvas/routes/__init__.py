@@ -1,1 +1,1 @@
-"""First-pass Kanvas route renderers."""
+"""Kanvas page renderers and HTTP endpoint modules."""

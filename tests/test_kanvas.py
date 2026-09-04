@@ -95,10 +95,20 @@ from kasana.kanvas.dashboard import (
 )
 from kasana.kanvas.katalog_clients import KatalogClientPool
 from kasana.kanvas.profiles import SessionProfile
+from kasana.kanvas.routes import (
+    api_administration,
+    api_collections,
+    api_library,
+    api_playback,
+    api_profiles,
+)
 from kasana.kanvas.routes import collections as collections_route
+from kasana.kanvas.routes import common as route_common
 from kasana.kanvas.routes import home as home_route
 from kasana.kanvas.routes import item as item_route
 from kasana.kanvas.routes import library as library_route
+from kasana.kanvas.routes import pages as kanvas_pages
+from kasana.kanvas.routes import runtime as route_runtime
 from kasana.kanvas.routes.about import render_about
 from kasana.kanvas.routes.administration import (
     AdministrationSection,
@@ -238,7 +248,14 @@ def active_profile(monkeypatch: MonkeyPatch) -> SessionProfile:
     async def current_profile(_request: object) -> SessionProfile:
         return profile
 
-    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
+    monkeypatch.setattr(route_common, "data_profile", current_profile)
+    for endpoint_module in (
+        api_administration,
+        api_collections,
+        api_library,
+        api_profiles,
+    ):
+        monkeypatch.setattr(endpoint_module, "data_profile", current_profile)
     return profile
 
 
@@ -252,7 +269,7 @@ def test_watch_order_playback_failure_detail_preserves_validation_cause() -> Non
         "Playback queues cannot contain more than 100 entries.",
     )
 
-    assert dashboard._watch_order_playback_error_detail(error) == (  # pyright: ignore[reportPrivateUsage]
+    assert kanvas_pages._watch_order_playback_error_detail(error) == (  # pyright: ignore[reportPrivateUsage]
         "Playback queues cannot contain more than 100 entries."
     )
 
@@ -261,7 +278,7 @@ def test_watch_order_playback_failure_detail_hides_non_validation_cause() -> Non
     error = KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "Connection refused")
 
     assert (
-        dashboard._watch_order_playback_error_detail(error)  # pyright: ignore[reportPrivateUsage]
+        kanvas_pages._watch_order_playback_error_detail(error)  # pyright: ignore[reportPrivateUsage]
         == "Could not start this watch order."
     )
 
@@ -274,7 +291,7 @@ def test_watch_order_playback_failures_are_logged(caplog: pytest.LogCaptureFixtu
         request_id="playback-request-1",
     )
 
-    dashboard._log_watch_order_playback_failure(  # pyright: ignore[reportPrivateUsage]
+    kanvas_pages._log_watch_order_playback_failure(  # pyright: ignore[reportPrivateUsage]
         error,
         watch_order_id=1,
         user_id=2,
@@ -727,9 +744,7 @@ async def test_item_detail_builds_linked_season_and_episode_title_hierarchies(
         _item_detail_client(season, {season.id: ()}, season_child_requests),
     )
 
-    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
-        season.id
-    )
+    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(season.id)
 
     assert season_detail.title_hierarchy == SeasonItemTitleView(
         series=ItemTitleLinkView(id=10, title="The Expanse"),
@@ -1272,7 +1287,7 @@ def test_poster_context_and_actions_keep_artwork_uncluttered() -> None:
 
 
 def test_playback_proxy_preserves_range_headers_and_disables_media_caching() -> None:
-    headers = dashboard._stream_response_headers(  # pyright: ignore[reportPrivateUsage]
+    headers = api_playback._stream_response_headers(  # pyright: ignore[reportPrivateUsage]
         {
             "Accept-Ranges": "bytes",
             "Content-Length": "10",
@@ -1338,7 +1353,7 @@ async def test_download_grant_proxies_attachment_content_and_forwards_validators
             nonlocal client_closed
             client_closed = True
 
-    monkeypatch.setattr(dashboard, "KatalogClient", DownloadClient)
+    monkeypatch.setattr(api_playback, "KatalogClient", DownloadClient)
     request = Request(
         {
             "type": "http",
@@ -1386,7 +1401,7 @@ async def test_create_item_download_requires_csrf_and_redirects_to_an_opaque_gra
         async def form(self) -> FormData:
             return self._form
 
-    monkeypatch.setattr(dashboard, "KanvasKatalogService", DownloadCatalogue)
+    monkeypatch.setattr(api_playback, "KanvasKatalogService", DownloadCatalogue)
 
     response = await dashboard.create_item_download(7, cast(Request, FormRequest(csrf_token)))
 
@@ -1401,8 +1416,8 @@ async def test_create_item_download_requires_csrf_and_redirects_to_an_opaque_gra
     assert invalid_item.value.status_code == 422
 
     monkeypatch.setattr(
-        dashboard,
-        "_settings",
+        route_runtime.runtime,
+        "settings",
         Kanvas_Settings(download_public_url=HttpUrl("https://downloads.example.test")),
     )
     direct_response = await dashboard.create_item_download(
@@ -1626,7 +1641,7 @@ async def test_library_endpoint_exposes_intentional_katalog_failure_state(
         assert kinds == (LibraryItemKind.MOVIE,)
         raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", unavailable)
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", unavailable)
     request = Request({"type": "http", "query_string": b"search=ghost&kind=movie", "headers": []})
 
     response = await library_data(request)
@@ -1662,7 +1677,7 @@ async def test_library_endpoint_serialises_only_safe_poster_data(monkeypatch: Mo
             next_cursor=None,
         )
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", page)
     request = Request(
         {
             "type": "http",
@@ -1781,9 +1796,7 @@ async def test_item_detail_omits_redundant_series_context_from_child_posters(
         _item_detail_client(series, {series.id: (season_one, season_two)}, child_requests),
     )
 
-    series_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
-        series.id
-    )
+    series_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(series.id)
 
     assert [child.context for child in series_detail.children] == [None, None]
 
@@ -1820,9 +1833,7 @@ async def test_item_detail_omits_redundant_series_context_from_child_posters(
         _item_detail_client(season, {season.id: episodes}, child_requests),
     )
 
-    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
-        season.id
-    )
+    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(season.id)
 
     assert [child.context for child in season_detail.children] == [None, None]
 
@@ -2023,7 +2034,7 @@ async def test_library_endpoint_preserves_typed_katalog_failure_statuses(
         assert kinds == (LibraryItemKind.MOVIE,)
         raise error
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", failed)
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", failed)
 
     response = await library_data(
         Request(
@@ -2062,7 +2073,7 @@ async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
         assert kinds == (LibraryItemKind.MOVIE,)
         raise RuntimeError(leaking_value)
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", broken)
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", broken)
     response = await library_data(
         Request({"type": "http", "query_string": b"kind=movie", "headers": []})
     )
@@ -2094,7 +2105,7 @@ async def test_library_endpoint_hides_unexpected_and_serialisation_failures(
     ) -> dict[str, object]:
         raise TypeError("serialisation failed")
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.library_page", page)
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", page)
     monkeypatch.setattr(LibraryPageEnvelope, "model_dump", serialisation_failure)
     serialisation = await library_data(
         Request({"type": "http", "query_string": b"kind=movie", "headers": []})
@@ -2117,10 +2128,8 @@ async def test_library_endpoint_development_diagnostic_is_safe_and_opt_in(
         assert kinds == (LibraryItemKind.MOVIE,)
         raise LibraryPosterTransformationError(7, ("artwork", "id", "title"))
 
-    monkeypatch.setattr(
-        "kasana.kanvas.dashboard.KanvasKatalogService.library_page", transformation_failure
-    )
-    monkeypatch.setattr(dashboard, "_settings", Kanvas_Settings(development_mode=True))
+    monkeypatch.setattr(api_library.KanvasKatalogService, "library_page", transformation_failure)
+    monkeypatch.setattr(route_runtime.runtime, "settings", Kanvas_Settings(development_mode=True))
     response = await library_data(
         Request({"type": "http", "query_string": b"kind=movie", "headers": []})
     )
@@ -2210,7 +2219,7 @@ async def test_collection_index_endpoint_is_cursor_bounded_and_serialises_safe_t
             None,
         )
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService.collection_page", page)
+    monkeypatch.setattr(api_collections.KanvasKatalogService, "collection_page", page)
     request = Request(
         {
             "type": "http",
@@ -2254,7 +2263,8 @@ async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
         async def json(self) -> object:
             return {"operation": "add", "revision": 7, "itemId": 12}
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", ConflictCatalogue)
+    monkeypatch.setattr(route_common, "KanvasKatalogService", ConflictCatalogue)
 
     response = await collection_member_action(4, cast(Request, JsonRequest()))
 
@@ -2318,7 +2328,7 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
         async def form(self) -> FormData:
             return self._form
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", FakeCatalogue)
 
     created = await create_collection_action(
         cast(Request, FormRequest(name="Stargate", overview="Gate travel"))
@@ -2389,7 +2399,7 @@ async def test_watch_order_save_reports_revision_conflicts_without_a_server_erro
         async def form(self) -> FormData:
             return FormData({"revision": "24", "name": "Release", "kind": "custom"})
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", ConflictCatalogue)
 
     with pytest.raises(HTTPException) as error:
         await update_watch_order_action(9, cast(Request, FormRequest()))
@@ -2481,7 +2491,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FakeCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", FakeCatalogue)
 
     picker_response = await collection_picker_data(
         4,
@@ -2594,7 +2604,7 @@ async def test_artwork_proxy_and_invalid_browser_actions_have_local_failure_stat
         async def json(self) -> object:
             return {"operation": "unknown", "revision": 1}
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ArtworkCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", ArtworkCatalogue)
 
     response = await artwork(7, 8)
     invalid = await collection_member_action(4, cast(Request, JsonRequest()))
@@ -2625,7 +2635,7 @@ async def test_browser_data_endpoints_return_typed_katalog_failure_states(
         async def watch_order_page(self, _watch_order_id: int, **_arguments: object) -> object:
             raise KatalogClientError(KatalogClientErrorKind.TRANSPORT, "offline")
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingCatalogue)
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", FailingCatalogue)
 
     collections = await collections_data(
         Request({"type": "http", "query_string": b"", "headers": []})
@@ -3191,7 +3201,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", AdminCatalogue)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", AdminCatalogue)
     request = Request({"type": "http", "query_string": b"", "headers": []})
     overview_response = await administration_overview_data(request)
     jobs_response = await administration_jobs_data(
@@ -3289,6 +3299,7 @@ async def test_katalog_administration_service_transforms_only_public_contracts(
         completed_at=None,
         progress=JobProgress(phase="scan", current=1, total=2, unit="files"),
     )
+
     class FakeClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -3737,7 +3748,7 @@ async def test_item_edit_endpoints_report_data_and_validation(
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", EditingCatalogue)
+    monkeypatch.setattr(api_library, "KanvasKatalogService", EditingCatalogue)
     detail_response = await item_edit_data(
         7, Request({"type": "http", "query_string": b"", "headers": []})
     )
@@ -3866,7 +3877,7 @@ async def test_metadata_match_action_preserves_katalog_conflict_guidance(
         async def json(self) -> object:
             return {"provider": "tmdb", "providerId": "338970", "confirmed": True}
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictingCatalogue)
+    monkeypatch.setattr(api_library, "KanvasKatalogService", ConflictingCatalogue)
 
     response = await item_metadata_match_action(7, cast(Request, JsonRequest()))
 
@@ -3881,7 +3892,7 @@ async def test_metadata_match_action_preserves_katalog_conflict_guidance(
 
 
 def test_item_edit_error_preserves_safe_katalog_validation_detail() -> None:
-    response = dashboard._item_edit_error(  # pyright: ignore[reportPrivateUsage]
+    response = route_common.item_edit_error(
         KatalogClientError(
             KatalogClientErrorKind.VALIDATION,
             "Artwork 418 does not belong to item 7688.",
@@ -3897,7 +3908,7 @@ def test_item_edit_error_preserves_safe_katalog_validation_detail() -> None:
 
 
 def test_item_edit_payload_omits_null_non_nullable_playback_flags() -> None:
-    payload = dashboard._library_item_update_payload(  # pyright: ignore[reportPrivateUsage]
+    payload = route_common.library_item_update_payload(
         {
             "title": "Future Diary",
             "selectedArtwork": [{"kind": "poster", "artworkId": 419}],
@@ -3918,9 +3929,7 @@ def test_item_edit_payload_omits_null_non_nullable_playback_flags() -> None:
 
 
 def test_item_edit_payload_maps_artwork_label_visibility() -> None:
-    payload = dashboard._library_item_update_payload(  # pyright: ignore[reportPrivateUsage]
-        {"showArtworkLabel": False}, actor="tester"
-    )
+    payload = route_common.library_item_update_payload({"showArtworkLabel": False}, actor="tester")
 
     update = LibraryItemUpdate.model_validate(payload)
 
@@ -3954,7 +3963,7 @@ async def test_administration_error_states_and_local_section_routes(
         async def json(self) -> object:
             return self._payload
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalogue)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", FailingAdminCatalogue)
     responses = (
         await administration_overview_data(
             Request({"type": "http", "query_string": b"", "headers": []})
@@ -4018,8 +4027,8 @@ async def test_administration_match_failure_is_logged_with_katalog_request_id(
                 "providerId": "314",
             }
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", FailingAdminCatalogue)
-    caplog.set_level("WARNING", logger="kasana.kanvas.dashboard")
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", FailingAdminCatalogue)
+    caplog.set_level("WARNING", logger="kasana.kanvas.routes.common")
 
     response = await administration_action(cast(Request, JsonRequest()))
 
@@ -4060,7 +4069,7 @@ async def test_administration_match_conflict_keeps_its_resolution_guidance(
                 "providerId": "314",
             }
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", ConflictingAdminCatalogue)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", ConflictingAdminCatalogue)
 
     response = await administration_action(cast(Request, JsonRequest()))
 
@@ -4094,7 +4103,7 @@ async def test_administration_batch_duplicate_route_explains_when_katalog_needs_
                 "resolutions": [{"source_item_id": 1, "target_item_id": 2}],
             }
 
-    monkeypatch.setattr("kasana.kanvas.dashboard.KanvasKatalogService", StaleKatalogAdminCatalogue)
+    monkeypatch.setattr(api_administration, "KanvasKatalogService", StaleKatalogAdminCatalogue)
 
     response = await administration_action(cast(Request, JsonRequest()))
 
@@ -4271,9 +4280,7 @@ def test_administration_sections_mount_distinct_browser_states_and_active_tabs()
 
     for section, subsection in sections:
         with Client(page("")) as client:
-            render_administration(
-                Kanvas_Settings(), _selected_profile(), section, subsection
-            )
+            render_administration(Kanvas_Settings(), _selected_profile(), section, subsection)
             administration = next(
                 element
                 for element in client.elements.values()
@@ -4523,8 +4530,7 @@ def test_item_title_renders_linked_season_and_episode_hierarchies() -> None:
         ]
 
     linked_titles = [
-        (_element_text(element), _element_props(element)["href"])
-        for element in title_links
+        (_element_text(element), _element_props(element)["href"]) for element in title_links
     ]
 
     assert linked_titles == [

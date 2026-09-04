@@ -1,9 +1,13 @@
+import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from fastapi import FastAPI
 
 from kasana.__main__ import main as kasana_main
+from kasana.kanvas import dashboard
 from kasana.kanvas.__main__ import main as kanvas_main
 from kasana.kanvas.dashboard import build_dashboard
+from kasana.kanvas.routes import runtime as route_runtime
+from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.api import server as katalog_server
 from kasana.katalog.backend import create_backend
 from kasana.katalog.cli.app import main as katalog_main
@@ -52,3 +56,14 @@ def test_katalog_api_server_suppresses_normal_keyboard_interrupt(
 
 def test_dashboard_can_be_composed() -> None:
     build_dashboard()
+
+
+def test_dashboard_rejects_reconfiguration_after_assets_are_registered(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    first_settings = Kanvas_Settings()
+    monkeypatch.setattr(dashboard, "_assets_registered", True)
+    monkeypatch.setattr(route_runtime.runtime, "settings", first_settings)
+
+    with pytest.raises(RuntimeError, match="already configured with different settings"):
+        dashboard.build_dashboard(Kanvas_Settings(port=5371))

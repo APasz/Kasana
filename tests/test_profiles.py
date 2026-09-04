@@ -16,6 +16,9 @@ from starlette.requests import Request
 
 from kasana.kanvas import dashboard
 from kasana.kanvas.profiles import ProfileSessionRegistry, ProfileSessions, SessionProfile
+from kasana.kanvas.routes import api_profiles
+from kasana.kanvas.routes import common as route_common
+from kasana.kanvas.routes import runtime as route_runtime
 from kasana.kanvas.routes.profiles import render_profile_selection
 from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.api.contracts import (
@@ -290,9 +293,9 @@ async def test_profile_dashboard_session_and_administration_actions(
         del timeout_seconds
         return FakeKatalogClient()
 
-    monkeypatch.setattr(dashboard, "ProfileSessions", profile_sessions)
-    monkeypatch.setattr(dashboard, "KatalogClient", katalog_client)
-    monkeypatch.setattr(dashboard, "_settings", Kanvas_Settings())
+    monkeypatch.setattr(api_profiles, "ProfileSessions", profile_sessions)
+    monkeypatch.setattr(api_profiles, "KatalogClient", katalog_client)
+    monkeypatch.setattr(route_runtime.runtime, "settings", Kanvas_Settings())
     monkeypatch.setenv("KASANA_CONFIG_DIRECTORY", str(tmp_path / "configs"))
 
     selected = FormRequest({"user_id": "2", "pin": "2468"})
@@ -314,7 +317,8 @@ async def test_profile_dashboard_session_and_administration_actions(
             )
         )
 
-    monkeypatch.setattr(dashboard, "_data_profile", current_profile)
+    monkeypatch.setattr(api_profiles, "data_profile", current_profile)
+    monkeypatch.setattr(route_common, "data_profile", current_profile)
     language_response = await dashboard.current_profile_playback_languages(_request({}))
     assert language_response.status_code == 200
     assert json.loads(bytes(language_response.body)) == {

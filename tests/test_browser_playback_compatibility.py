@@ -30,6 +30,8 @@ from kasana.kanvas.playback_compatibility import (
     PlaybackMode,
     classify_playback,
 )
+from kasana.kanvas.routes import api_playback
+from kasana.kanvas.routes import pages as kanvas_pages
 from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.subtitles import SubtitleConversionError, as_webvtt
 from kasana.katalog.api.service import _stream_summary  # pyright: ignore[reportPrivateUsage]
@@ -308,29 +310,29 @@ def test_playback_delivery_query_validation_keeps_direct_ranges_and_copy_boundar
     request = Request({"type": "http", "query_string": b"mode=remux&audioStream=0", "headers": []})
     entry = _entry(container="matroska")
 
-    mode, audio_index = dashboard._requested_playback_delivery(  # pyright: ignore[reportPrivateUsage]
+    mode, audio_index = api_playback._requested_playback_delivery(  # pyright: ignore[reportPrivateUsage]
         request
     )
 
     assert mode is PlaybackMode.REMUX
     assert audio_index == 0
-    assert dashboard._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
+    assert api_playback._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
         entry, mode, audio_index
     )
-    assert not dashboard._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
+    assert not api_playback._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
         entry, PlaybackMode.DIRECT, audio_index
     )
 
     seek_request = Request({"type": "http", "query_string": b"startSeconds=30.5", "headers": []})
     assert (
-        dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
             seek_request, entry.duration_seconds
         )
         == 30.5
     )
 
     with pytest.raises(HTTPException):
-        dashboard._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_stream_start_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"startSeconds=nan", "headers": []}),
             entry.duration_seconds,
         )
@@ -359,9 +361,9 @@ async def test_compatibility_endpoint_returns_remux_or_visible_kestrel_fallback(
     async def payload(_request: Request) -> dict[str, object]:
         return {"media": []}
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
-    monkeypatch.setattr(dashboard, "_json_object", payload)
+    monkeypatch.setattr(api_playback, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(api_playback, "require_profile", require_profile)
+    monkeypatch.setattr(api_playback, "json_object", payload)
     request = Request({"type": "http", "query_string": b"", "headers": []})
 
     remux_response = await dashboard.playback_compatibility("s" * 32, 0, request)
@@ -382,17 +384,17 @@ async def test_compatibility_endpoint_returns_remux_or_visible_kestrel_fallback(
 def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None:
     entry = _entry(container="isobmff")
     assert (
-        dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"offsetSeconds=42.5", "headers": []}),
             entry.duration_seconds,
         )
         == 42.5
     )
-    assert dashboard._optional_track_id("embedded-3") == "embedded-3"  # pyright: ignore[reportPrivateUsage]
-    assert dashboard._optional_track_id(None) is None  # pyright: ignore[reportPrivateUsage]
-    assert dashboard._is_webvtt_track("webvtt")  # pyright: ignore[reportPrivateUsage]
+    assert api_playback._optional_track_id("embedded-3") == "embedded-3"  # pyright: ignore[reportPrivateUsage]
+    assert api_playback._optional_track_id(None) is None  # pyright: ignore[reportPrivateUsage]
+    assert api_playback._is_webvtt_track("webvtt")  # pyright: ignore[reportPrivateUsage]
     assert (
-        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request(
                 {
                     "type": "http",
@@ -405,21 +407,21 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
         == -0.5
     )
     assert (
-        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"", "headers": []}),
             default_milliseconds=500,
         )
         == 0.5
     )
     with pytest.raises(HTTPException):
-        dashboard._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_subtitle_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"offsetSeconds=nan", "headers": []}),
             entry.duration_seconds,
         )
     with pytest.raises(ValueError):
-        dashboard._optional_track_id("not-a-track")  # pyright: ignore[reportPrivateUsage]
+        api_playback._optional_track_id("not-a-track")  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(HTTPException):
-        dashboard._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_subtitle_timing_offset_seconds(  # pyright: ignore[reportPrivateUsage]
             Request(
                 {
                     "type": "http",
@@ -536,8 +538,8 @@ async def test_browser_completion_returns_the_next_item_playback_page(
     async def require_profile(_request: Request) -> object:
         return profile
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
+    monkeypatch.setattr(api_playback, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(api_playback, "require_profile", require_profile)
 
     response = await dashboard.complete_playback("s" * 32, cast(Request, JsonRequest()))
 
@@ -591,8 +593,8 @@ async def test_browser_current_completion_preserves_the_queue_position(
     async def require_profile(_request: Request) -> object:
         return profile
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
+    monkeypatch.setattr(api_playback, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(api_playback, "require_profile", require_profile)
 
     response = await dashboard.complete_current_playback("s" * 32, cast(Request, JsonRequest()))
 
@@ -617,8 +619,8 @@ async def test_explicit_start_is_retained_when_playback_redirects_to_its_current
     async def page_profile(_request: Request) -> object:
         return profile
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+    monkeypatch.setattr(kanvas_pages, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(kanvas_pages, "page_profile", page_profile)
 
     response = await dashboard.item_page(
         1,
@@ -653,8 +655,8 @@ async def test_expired_playback_session_returns_to_the_requested_item_page(
     async def page_profile(_request: Request) -> object:
         return profile
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+    monkeypatch.setattr(kanvas_pages, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(kanvas_pages, "page_profile", page_profile)
 
     response = await dashboard.item_page(
         2,
@@ -691,8 +693,8 @@ async def test_play_route_starts_new_on_deck_items_but_respects_true_resume_auto
     async def page_profile(_request: Request) -> object:
         return profile
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_page_profile", page_profile)
+    monkeypatch.setattr(kanvas_pages, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(kanvas_pages, "page_profile", page_profile)
 
     played = await dashboard.play_item_page(
         2, Request({"type": "http", "query_string": b"resume=false", "headers": []})
@@ -1003,9 +1005,9 @@ async def test_stale_progress_after_stopping_a_session_is_ignored(
     async def payload(_request: Request) -> dict[str, object]:
         return {"positionSeconds": 30, "entryPosition": 0}
 
-    monkeypatch.setattr(dashboard, "KanvasPlaybackService", FakePlaybackService)
-    monkeypatch.setattr(dashboard, "_require_profile", require_profile)
-    monkeypatch.setattr(dashboard, "_json_object", payload)
+    monkeypatch.setattr(api_playback, "KanvasPlaybackService", FakePlaybackService)
+    monkeypatch.setattr(api_playback, "require_profile", require_profile)
+    monkeypatch.setattr(api_playback, "json_object", payload)
 
     response = await dashboard.playback_progress("s" * 32, Request({"type": "http", "headers": []}))
 
@@ -1107,9 +1109,9 @@ def test_browser_playback_card_rejects_a_session_without_a_current_entry() -> No
 
 def test_delivery_validation_rejects_invalid_query_and_unavailable_audio_stream() -> None:
     with pytest.raises(HTTPException):
-        dashboard._requested_playback_delivery(  # pyright: ignore[reportPrivateUsage]
+        api_playback._requested_playback_delivery(  # pyright: ignore[reportPrivateUsage]
             Request({"type": "http", "query_string": b"mode=video-transcode", "headers": []})
         )
-    assert not dashboard._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
+    assert not api_playback._valid_playback_delivery(  # pyright: ignore[reportPrivateUsage]
         _entry(container="matroska"), PlaybackMode.REMUX, 1
     )

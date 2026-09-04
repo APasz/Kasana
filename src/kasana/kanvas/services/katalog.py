@@ -168,9 +168,7 @@ class _SystemIncidentPresentation:
     action: SystemAlertActionView
 
 
-_SYSTEM_INCIDENT_PRESENTATIONS: Mapping[
-    KatalogSystemIncidentCode, _SystemIncidentPresentation
-] = {
+_SYSTEM_INCIDENT_PRESENTATIONS: Mapping[KatalogSystemIncidentCode, _SystemIncidentPresentation] = {
     KatalogSystemIncidentCode.DATABASE_UNHEALTHY: _SystemIncidentPresentation(
         alert_id="database-unhealthy",
         action=SystemAlertActionView(
@@ -1536,11 +1534,7 @@ def _season_title_view(item: LibraryItemDetail) -> SeasonTitleView | None:
         return None
     return SeasonTitleView(
         number=item.season_number,
-        name=(
-            None
-            if is_generic_season_title(item.title, item.season_number)
-            else item.title
-        ),
+        name=(None if is_generic_season_title(item.title, item.season_number) else item.title),
     )
 
 

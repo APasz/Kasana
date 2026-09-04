@@ -135,9 +135,7 @@ def _item_title(detail: ItemDetailView) -> None:
             ui.link(hierarchy.series.title, f"/item/{hierarchy.series.id}").classes(
                 "k-item__title-link"
             )
-            ui.label(f" - {_season_title_text(hierarchy.season)}").classes(
-                "k-item__title-text"
-            )
+            ui.label(f" - {_season_title_text(hierarchy.season)}").classes("k-item__title-text")
         return
     if isinstance(hierarchy, EpisodeItemTitleView):
         with ui.element("div").classes("k-item__title"):
@@ -148,9 +146,7 @@ def _item_title(detail: ItemDetailView) -> None:
                 ui.label(" - ").classes("k-item__title-text")
                 ui.link(
                     _season_title_text(hierarchy.season), f"/item/{hierarchy.season.id}"
-                ).classes(
-                    "k-item__title-link"
-                )
+                ).classes("k-item__title-link")
             with ui.element("div").classes("k-item__title-line"):
                 episode_title = f"Episode {hierarchy.episode_number}"
                 if hierarchy.episode_name is not None:
