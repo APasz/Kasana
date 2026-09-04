@@ -13,6 +13,19 @@ class FakeElement {
     this.parentElement = null;
     this.textContent = '';
     this.className = '';
+    this.classList = {
+      add: (...names) => {
+        this.className = [...new Set([...this.className.split(' ').filter(Boolean), ...names])].join(' ');
+      },
+      contains: (name) => this.className.split(' ').includes(name),
+      toggle: (name, enabled) => {
+        const names = new Set(this.className.split(' ').filter(Boolean));
+        if (enabled === undefined ? !names.has(name) : enabled) names.add(name);
+        else names.delete(name);
+        this.className = [...names].join(' ');
+        return names.has(name);
+      }
+    };
     this.type = '';
     this.innerHTML = '';
     this.isConnected = true;
@@ -31,6 +44,14 @@ class FakeElement {
 
   getAttribute(name) {
     return this.attributes.get(name) || null;
+  }
+
+  hasAttribute(name) {
+    return this.attributes.has(name);
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
   }
 
   append(...nodes) {
@@ -111,16 +132,42 @@ const storage = new Map();
 const consoleErrors = [];
 const railElements = [];
 const documentListeners = new Map();
+const windowListeners = new Map();
 const timerDelays = [];
 let throwPosterCreation = false;
 
 global.Element = FakeElement;
 global.HTMLElement = FakeHTMLElement;
 global.HTMLFormElement = class extends FakeHTMLElement {};
+global.HTMLButtonElement = class extends FakeHTMLElement {};
 global.HTMLInputElement = class extends FakeHTMLElement {};
 global.HTMLTextAreaElement = class extends FakeHTMLElement {};
 global.HTMLSelectElement = class extends FakeHTMLElement {};
-global.HTMLDialogElement = class extends FakeHTMLElement {};
+global.HTMLDialogElement = class extends FakeHTMLElement {
+  constructor(...arguments_) {
+    super(...arguments_);
+    this.open = false;
+  }
+
+  showModal() {
+    this.open = true;
+  }
+
+  close() {
+    this.open = false;
+  }
+};
+global.CustomEvent = class {
+  constructor(type, {detail = null} = {}) {
+    this.type = type;
+    this.detail = detail;
+  }
+};
+global.Event = class {
+  constructor(type) {
+    this.type = type;
+  }
+};
 global.customElements = {
   define(name, constructor) {
     elementRegistry.set(name, constructor);
@@ -146,6 +193,7 @@ global.document = {
   },
   createElement(name) {
     if (name === 'kanvas-poster' && throwPosterCreation) throw new Error('rendering failed');
+    if (name === 'dialog') return new global.HTMLDialogElement(name);
     const Constructor = elementRegistry.get(name);
     return Constructor ? new Constructor() : new FakeElement(name);
   },
@@ -158,8 +206,19 @@ global.window = {
   innerHeight: 800,
   scrollY: 42,
   scrollByCalls: [],
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(name, listener) {
+    const listeners = windowListeners.get(name) || [];
+    listeners.push(listener);
+    windowListeners.set(name, listeners);
+  },
+  removeEventListener(name, listener) {
+    const listeners = windowListeners.get(name) || [];
+    windowListeners.set(name, listeners.filter((entry) => entry !== listener));
+  },
+  dispatchEvent(event) {
+    for (const listener of windowListeners.get(event.type) || []) listener(event);
+    return true;
+  },
   scrollBy(...values) {
     this.scrollByCalls.push(values);
   },
@@ -195,6 +254,12 @@ const source = [
   fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8')
 ].join('\n');
 const exposed = source.replace(
+  "if (!customElements.get('kanvas-toasts')) {\n    customElements.define('kanvas-toasts', KanvasToasts);\n  }",
+  "globalThis.__toastsTest = {KanvasToasts, kanvasActionSubmission, normaliseToast, publishKanvasToast, submitKanvasActionForm};\n  if (!customElements.get('kanvas-toasts')) {\n    customElements.define('kanvas-toasts', KanvasToasts);\n  }"
+).replace(
+  "if (!customElements.get('kanvas-system-alerts')) {\n    customElements.define('kanvas-system-alerts', KanvasSystemAlerts);\n  }",
+  "globalThis.__systemAlertsTest = {KanvasSystemAlerts, normaliseSystemAlert, normaliseSystemAlertHistory};\n  if (!customElements.get('kanvas-system-alerts')) {\n    customElements.define('kanvas-system-alerts', KanvasSystemAlerts);\n  }"
+).replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
   "globalThis.__libraryTest = {KanvasPosterGrid, LibraryPageDirection, normalisePoster, posterMarkup, libraryGridPayload, updateRailControls, libraryFilterUrl, libraryGridLayout, libraryGridMarkup};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
 ).replace(
@@ -259,6 +324,340 @@ const grid = (developmentMode = true) => {
 };
 
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
+
+function testSystemAlertNormalisationAndRendering() {
+  const {KanvasSystemAlerts, normaliseSystemAlert, normaliseSystemAlertHistory} = globalThis.__systemAlertsTest;
+  const alert = normaliseSystemAlert({
+    id: 'library-roots-unavailable',
+    code: 'library_root_unavailable',
+    severity: 'warning',
+    title: 'Library root unavailable',
+    detail: 'Films is not accessible. Check the disk or mount, then rescan.',
+    action: {kind: 'navigate', label: 'Open library roots', href: '/administration/libraries'}
+  });
+
+  assert.deepEqual(alert, {
+    id: 'library-roots-unavailable',
+    code: 'library_root_unavailable',
+    severity: 'warning',
+    title: 'Library root unavailable',
+    detail: 'Films is not accessible. Check the disk or mount, then rescan.',
+    action: {kind: 'navigate', label: 'Open library roots', href: '/administration/libraries'}
+  });
+  assert.equal(normaliseSystemAlert({...alert, action: {...alert.action, href: '//unsafe'}}), null);
+  assert.equal(normaliseSystemAlert({...alert, action: {...alert.action, href: '/\\unsafe'}}), null);
+  assert.equal(normaliseSystemAlert({...alert, action: {...alert.action, href: '/unsafe\n'}}), null);
+  assert.equal(normaliseSystemAlert({...alert, action: {kind: 'retry', label: 'Retry', href: '/bad'}}), null);
+  assert.equal(normaliseSystemAlert({...alert, incidentId: 0}), null);
+  assert.equal(normaliseSystemAlert({...alert, code: 'browser_offline', incidentId: 1}), null);
+  const history = normaliseSystemAlertHistory({
+    incidentId: 8,
+    code: 'library_root_unavailable',
+    severity: 'warning',
+    title: 'Library root unavailable',
+    detail: 'A configured library root was not accessible.',
+    firstDetectedAt: '2026-09-04T00:00:00Z',
+    lastDetectedAt: '2026-09-04T00:01:00Z',
+    resolvedAt: '2026-09-04T00:02:00Z'
+  });
+  assert.equal(history.incidentId, 8);
+  assert.equal(normaliseSystemAlertHistory({...history, incidentId: -1}), null);
+
+  const shell = new KanvasSystemAlerts();
+  shell.applyAlerts([alert]);
+
+  assert.equal(shell.hidden, false);
+  assert.equal(shell.children.length, 2);
+  assert.match(shell.children[0].className, /k-system-alerts__banner--warning/);
+  assert.equal(shell.children[0].children[0].children[0].textContent, alert.title);
+  shell.openDrawer();
+  assert.equal(shell.drawer.open, true);
+  shell.applyFeed([{...alert, detail: 'The mount is still unavailable.'}], []);
+  assert.equal(shell.drawer.open, true);
+  shell.applyFeed([], [history]);
+  assert.equal(shell.hidden, false);
+  assert.match(shell.children[0].className, /k-system-alerts__history-bar/);
+  shell.applyAlerts([]);
+  assert.equal(shell.hidden, true);
+  assert.equal(shell.children.length, 0);
+}
+
+async function testRecoveredAcknowledgementRefreshesTheAlertFeed() {
+  const {KanvasSystemAlerts} = globalThis.__systemAlertsTest;
+  const shell = new KanvasSystemAlerts();
+  shell.setAttribute('source', '/kanvas/data/system-alerts');
+  shell.setAttribute('acknowledgement-source', '/kanvas/data/system-alerts');
+  shell.applyFeed([{
+    id: 'library-roots-unavailable',
+    code: 'library_root_unavailable',
+    severity: 'warning',
+    title: 'Library root unavailable',
+    detail: 'The mount is unavailable.',
+    action: {kind: 'navigate', label: 'Open library roots', href: '/administration/libraries'},
+    incidentId: 1
+  }], []);
+
+  const originalFetch = global.fetch;
+  const requests = [];
+  const toasts = [];
+  const captureToast = (event) => toasts.push(event.detail);
+  window.addEventListener('kanvas:toast', captureToast);
+  try {
+    global.fetch = async (url) => {
+      requests.push(url);
+      if (requests.length === 1) {
+        return response({status: 409, body: {detail: 'This system incident has already recovered.'}});
+      }
+      return response({body: {alerts: [], history: []}});
+    };
+
+    await shell.acknowledge(1);
+
+    assert.deepEqual(requests, [
+      '/kanvas/data/system-alerts/1/acknowledge',
+      '/kanvas/data/system-alerts'
+    ]);
+    assert.equal(shell.hidden, true);
+    assert.deepEqual(toasts, [{
+      severity: 'info',
+      title: 'System issue is no longer active',
+      detail: 'The alert list has been refreshed.',
+    }]);
+  } finally {
+    window.removeEventListener('kanvas:toast', captureToast);
+    global.fetch = originalFetch;
+  }
+}
+
+async function testAcknowledgementRefreshesAfterAnInFlightAlertPoll() {
+  const {KanvasSystemAlerts} = globalThis.__systemAlertsTest;
+  const shell = new KanvasSystemAlerts();
+  shell.setAttribute('source', '/kanvas/data/system-alerts');
+  shell.setAttribute('acknowledgement-source', '/kanvas/data/system-alerts');
+  const activeAlert = {
+    id: 'library-roots-unavailable',
+    code: 'library_root_unavailable',
+    severity: 'warning',
+    title: 'Library root unavailable',
+    detail: 'The mount is unavailable.',
+    action: {kind: 'navigate', label: 'Open library roots', href: '/administration/libraries'},
+    incidentId: 1
+  };
+  shell.applyFeed([activeAlert], []);
+
+  const originalFetch = global.fetch;
+  const requests = [];
+  let resolvePoll;
+  const pendingPoll = new Promise((resolve) => { resolvePoll = resolve; });
+  try {
+    global.fetch = async (url) => {
+      requests.push(url);
+      if (url.endsWith('/acknowledge')) return response({});
+      if (requests.filter((request) => request === '/kanvas/data/system-alerts').length === 1) {
+        return pendingPoll;
+      }
+      return response({body: {
+        alerts: [{...activeAlert, acknowledgedAt: '2026-09-04T00:02:00Z'}],
+        history: []
+      }});
+    };
+
+    const polling = shell.load();
+    await nextTick();
+    const acknowledgement = shell.acknowledge(1);
+    await nextTick();
+    resolvePoll(response({body: {alerts: [activeAlert], history: []}}));
+    await Promise.all([polling, acknowledgement]);
+    await nextTick();
+
+    assert.deepEqual(requests, [
+      '/kanvas/data/system-alerts',
+      '/kanvas/data/system-alerts/1/acknowledge',
+      '/kanvas/data/system-alerts'
+    ]);
+    assert.equal(shell.alerts[0].acknowledgedAt, '2026-09-04T00:02:00Z');
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
+
+async function testTimedOutSystemAlertRequestShowsAnAvailabilityAlert() {
+  const {KanvasSystemAlerts} = globalThis.__systemAlertsTest;
+  const shell = new KanvasSystemAlerts();
+  shell.setAttribute('source', '/kanvas/data/system-alerts');
+  const originalFetch = global.fetch;
+  const originalSetTimeout = window.setTimeout;
+  let timeout = null;
+  try {
+    window.setTimeout = (callback, delay) => {
+      if (delay === 15_000) timeout = callback;
+      return originalSetTimeout(callback, delay);
+    };
+    global.fetch = (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        const error = new Error('Timed out');
+        error.name = 'AbortError';
+        reject(error);
+      });
+    });
+
+    const loading = shell.load();
+    assert.equal(typeof timeout, 'function');
+    timeout();
+    await loading;
+
+    assert.equal(shell.alerts[0].code, 'kanvas_unavailable');
+  } finally {
+    global.fetch = originalFetch;
+    window.setTimeout = originalSetTimeout;
+  }
+}
+
+function testToastNormalisationAndPublishing() {
+  const {KanvasToasts, normaliseToast} = globalThis.__toastsTest;
+  const toast = normaliseToast({
+    severity: 'success',
+    title: 'Collection saved',
+    detail: 'Your changes are ready.'
+  });
+
+  assert.deepEqual(toast, {
+    severity: 'success',
+    title: 'Collection saved',
+    detail: 'Your changes are ready.'
+  });
+  assert.equal(normaliseToast({...toast, severity: 'urgent'}), null);
+  assert.equal(normaliseToast({...toast, detail: '  '}), null);
+
+  const region = new KanvasToasts();
+  region.connectedCallback();
+  assert.equal(region.hidden, true);
+  assert.equal(window.kanvas.toast(toast), true);
+  assert.equal(region.hidden, false);
+  assert.equal(region.children.length, 1);
+  assert.match(region.children[0].className, /k-toast--success/);
+  assert.equal(region.children[0].children[0].children[0].textContent, toast.title);
+
+  assert.equal(window.kanvas.toast(toast), true);
+  assert.equal(region.children.length, 1);
+  region.dismiss(region.toasts[0].id);
+  assert.equal(region.hidden, true);
+  assert.equal(region.children.length, 0);
+  region.disconnectedCallback();
+}
+
+async function testNativeActionFormKeepsTheClickedSubmitter() {
+  const {kanvasActionSubmission, submitKanvasActionForm} = globalThis.__toastsTest;
+  const form = new global.HTMLFormElement('form');
+  form.action = 'http://kanvas.test/kanvas/actions/collections';
+  form.method = 'post';
+  const submitter = new global.HTMLButtonElement('button');
+  submitter.setAttribute('name', 'intent');
+  submitter.setAttribute('value', 'save-and-continue');
+
+  const originalFormData = global.FormData;
+  const originalFetch = global.fetch;
+  const originalAssign = window.location.assign;
+  let submittedData = null;
+  let destination = null;
+  try {
+    global.FormData = class {
+      constructor(target, clickedSubmitter) {
+        assert.equal(target, form);
+        this.clickedSubmitter = clickedSubmitter;
+        submittedData = this;
+      }
+    };
+    global.fetch = async (_url, options) => {
+      assert.equal(options.body, submittedData);
+      return {...response({}), url: 'http://kanvas.test/collections/4'};
+    };
+    window.location.assign = (value) => { destination = value; };
+
+    await submitKanvasActionForm(form, submitter);
+
+    assert.equal(submittedData.clickedSubmitter, submitter);
+    assert.equal(destination, 'http://kanvas.test/collections/4');
+    form.method = 'get';
+    assert.equal(kanvasActionSubmission(form, submitter), null);
+    form.method = 'post';
+    form.action = 'https://untrusted.example/action';
+    assert.equal(kanvasActionSubmission(form, submitter), null);
+  } finally {
+    global.FormData = originalFormData;
+    global.fetch = originalFetch;
+    window.location.assign = originalAssign;
+  }
+}
+
+function testNativeActionFormPreventsDuplicateSubmission() {
+  const form = new global.HTMLFormElement('form');
+  form.setAttribute('data-kanvas-action-form', 'true');
+  form.dataset.kanvasSubmitting = 'true';
+  let prevented = false;
+
+  dispatchDocumentEvent('submit', {
+    target: form,
+    submitter: null,
+    preventDefault() {
+      prevented = true;
+    }
+  });
+
+  assert.equal(prevented, true);
+}
+
+async function testQueuedToastConsumptionCanBeRequestedInPlace() {
+  const {KanvasToasts} = globalThis.__toastsTest;
+  const region = new KanvasToasts();
+  region.setAttribute('source', '/kanvas/data/toasts/consume');
+  const originalFetch = global.fetch;
+  let requestCount = 0;
+  try {
+    global.fetch = async () => {
+      requestCount += 1;
+      return response({body: {
+        toasts: [{severity: 'success', title: `Saved ${requestCount}`, detail: null}]
+      }});
+    };
+    region.connectedCallback();
+    await nextTick();
+    assert.equal(requestCount, 1);
+    assert.equal(region.toasts.length, 1);
+
+    window.kanvas.consumeToasts();
+    await nextTick();
+    assert.equal(requestCount, 2);
+    assert.equal(region.toasts.length, 2);
+  } finally {
+    region.disconnectedCallback();
+    global.fetch = originalFetch;
+  }
+}
+
+async function testToastsIgnoreConsumptionAfterDisconnection() {
+  const {KanvasToasts} = globalThis.__toastsTest;
+  const region = new KanvasToasts();
+  region.setAttribute('source', '/kanvas/data/toasts/consume');
+  const originalFetch = global.fetch;
+  let resolveConsumption;
+  const pendingConsumption = new Promise((resolve) => { resolveConsumption = resolve; });
+  try {
+    global.fetch = async () => pendingConsumption;
+    region.connectedCallback();
+    await nextTick();
+    region.disconnectedCallback();
+    resolveConsumption(response({body: {
+      toasts: [{severity: 'success', title: 'Stale toast', detail: null}]
+    }}));
+    await nextTick();
+
+    assert.equal(region.toasts.length, 0);
+    assert.equal(region.children.length, 0);
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
 
 const dispatchDocumentEvent = (name, event) => {
   for (const listener of documentListeners.get(name) || []) listener(event);
@@ -1379,6 +1778,34 @@ async function testAdministrationDirectReferenceSupersedesPendingSearch() {
   }]);
 }
 
+async function testManualMetadataMatchFailurePublishesToast() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.reviewItems = [{itemId: 17, kind: 'movie'}];
+  instance.reviewIndex = 0;
+  instance.manualSelection = 0;
+  instance.manualSearchResults = [{provider: 'tmdb', providerId: '17'}];
+  instance.render = () => {};
+  instance.postJson = async () => { throw new Error('The selected metadata record is stale.'); };
+  const toasts = [];
+  const captureToast = (event) => toasts.push(event.detail);
+  window.addEventListener('kanvas:toast', captureToast);
+  try {
+    await instance.applyManualMatch();
+  } finally {
+    window.removeEventListener('kanvas:toast', captureToast);
+  }
+
+  assert.deepEqual(instance.activity, {
+    state: 'error',
+    message: 'The selected metadata record is stale.'
+  });
+  assert.deepEqual(toasts, [{
+    severity: 'error',
+    title: 'Manual metadata match could not be applied',
+    detail: 'The selected metadata record is stale.'
+  }]);
+}
+
 function fakeFormValues(values) {
   return {
     get(name) {
@@ -1820,6 +2247,15 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
 }
 
 async function main() {
+  testToastNormalisationAndPublishing();
+  await testNativeActionFormKeepsTheClickedSubmitter();
+  testNativeActionFormPreventsDuplicateSubmission();
+  await testQueuedToastConsumptionCanBeRequestedInPlace();
+  await testToastsIgnoreConsumptionAfterDisconnection();
+  testSystemAlertNormalisationAndRendering();
+  await testRecoveredAcknowledgementRefreshesTheAlertFeed();
+  await testAcknowledgementRefreshesAfterAnInFlightAlertPoll();
+  await testTimedOutSystemAlertRequestShowsAnAvailabilityAlert();
   await testValidPageRetainsAvailable();
   testPosterArtworkLabelNormalisation();
   testPosterArtworkLabelMarkup();
@@ -1865,6 +2301,7 @@ async function main() {
   await testAdministrationReplacesPriorCompletionWithActionFailure();
   await testAdministrationClearingTrackedJobStopsTracking();
   await testAdministrationDirectReferenceSupersedesPendingSearch();
+  await testManualMetadataMatchFailurePublishesToast();
   await testAdministrationPrimaryFlowKeepsWorkInFourAreas();
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorUsesTaskFocusedTabs();

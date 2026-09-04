@@ -46,6 +46,7 @@ from kasana.kanvas.katalog_clients import (
     katalog_client_context,
     start_katalog_client_pool,
 )
+from kasana.kanvas.notifications import consume_toasts, queue_toast
 from kasana.kanvas.playback_compatibility import (
     BrowserPlaybackCapabilities,
     PlaybackMode,
@@ -94,6 +95,7 @@ from kasana.kanvas.viewmodels.playback import (
     BrowserPlaybackCompletionView,
     BrowserPlaybackEntryView,
 )
+from kasana.kanvas.viewmodels.toasts import ToastFeedView, ToastSeverity, ToastView
 from kasana.katalog.public import (
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
     ArtworkFetchRequest,
@@ -213,6 +215,21 @@ def _administration_forbidden(profile: SessionProfile) -> JSONResponse | None:
     return JSONResponse(
         {"error": "Administration requires an owner or admin profile."}, status_code=403
     )
+
+
+def _toast_redirect(
+    request: Request, destination: str, title: str, detail: str | None = None
+) -> RedirectResponse:
+    """Redirect after a native mutation while preserving its short-lived success feedback."""
+
+    _queue_success_toast(request, title, detail)
+    return RedirectResponse(destination, status_code=303)
+
+
+def _queue_success_toast(request: Request, title: str, detail: str | None = None) -> None:
+    """Keep the server-side action success convention in one place."""
+
+    queue_toast(request, ToastView(severity=ToastSeverity.SUCCESS, title=title, detail=detail))
 
 
 @app.post("/profiles/select", include_in_schema=False)
@@ -603,6 +620,7 @@ async def item_metadata_match_action(item_id: int, request: Request) -> JSONResp
         return _item_edit_error(error)
     except (ValidationError, ValueError) as error:
         return _invalid_action(str(error))
+    _queue_success_toast(request, "Metadata match applied")
     return JSONResponse({"itemId": item_id, "action": "reassigned"})
 
 
@@ -639,6 +657,7 @@ async def item_edit_action(item_id: int, request: Request) -> JSONResponse:
         return _item_edit_error(error)
     except (ValidationError, ValueError) as error:
         return _invalid_action(str(error))
+    _queue_success_toast(request, "Item saved")
     return JSONResponse(result.model_dump(mode="json"))
 
 
@@ -656,7 +675,7 @@ async def add_item_to_collection_action(item_id: int, request: Request) -> Redir
         item_id=item_id,
         relationship=_optional_relationship(_form_optional(form, "relationship")),
     )
-    return RedirectResponse(f"/item/{item_id}", status_code=303)
+    return _toast_redirect(request, f"/item/{item_id}", "Collection membership saved")
 
 
 @app.post(
@@ -676,7 +695,7 @@ async def remove_item_from_collection_action(
         revision=_form_integer(form, "revision"),
         item_id=item_id,
     )
-    return RedirectResponse(f"/item/{item_id}", status_code=303)
+    return _toast_redirect(request, f"/item/{item_id}", "Collection membership removed")
 
 
 def _library_request_id(request: Request) -> str:
@@ -750,6 +769,47 @@ async def collections_data(request: Request) -> JSONResponse:
             "nextCursor": next_cursor,
         }
     )
+
+
+@app.get("/kanvas/data/system-alerts", include_in_schema=False)
+async def system_alerts_data(request: Request) -> JSONResponse:
+    """Return safe shell-wide operational alerts for the active profile."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    feed = await KanvasKatalogService(_settings).system_alert_feed(
+        is_administrator=profile.is_administrator
+    )
+    return JSONResponse(feed.model_dump(by_alias=True, exclude_none=True, mode="json"))
+
+
+@app.post("/kanvas/data/system-alerts/{incident_id}/acknowledge", include_in_schema=False)
+async def acknowledge_system_alert_data(incident_id: int, request: Request) -> Response:
+    """Persist the active administrator's acknowledgement of one visible condition."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := _administration_forbidden(profile):
+        return forbidden
+    try:
+        await KanvasKatalogService(_settings, profile.user.id).acknowledge_system_incident(
+            incident_id
+        )
+    except KatalogClientError as error:
+        return _katalog_data_error(error, "Katalog could not record the acknowledgement.")
+    return Response(status_code=204)
+
+
+@app.post("/kanvas/data/toasts/consume", include_in_schema=False)
+async def consume_toasts_data(request: Request) -> JSONResponse:
+    """Consume the current profile's one-time action feedback after page load."""
+
+    profile = await _data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    return JSONResponse(ToastFeedView(toasts=consume_toasts(request)).model_dump(mode="json"))
 
 
 @app.get("/kanvas/data/administration/overview", include_in_schema=False)
@@ -1128,6 +1188,7 @@ async def collection_member_action(collection_id: int, request: Request) -> JSON
         return await _collection_mutation_error(collection_id, profile, error, payload)
     except ValueError as error:
         return _invalid_action(str(error))
+    _queue_success_toast(request, "Item added to collection")
     return JSONResponse({"revision": next_revision})
 
 
@@ -1681,7 +1742,7 @@ async def create_collection_action(request: Request) -> RedirectResponse:
     collection_id = await KanvasKatalogService(_settings, profile.user.id).create_collection(
         name=_form_required(form, "name"), overview=_form_optional(form, "overview")
     )
-    return RedirectResponse(f"/collections/{collection_id}", status_code=303)
+    return _toast_redirect(request, f"/collections/{collection_id}", "Collection created")
 
 
 @app.post("/kanvas/actions/collections/{collection_id}", include_in_schema=False)
@@ -1700,7 +1761,7 @@ async def update_collection_action(collection_id: int, request: Request) -> Redi
         default_watch_order_id=_form_optional_integer(form, "default_watch_order_id"),
         update_preferences=True,
     )
-    return RedirectResponse(f"/collections/{collection_id}", status_code=303)
+    return _toast_redirect(request, f"/collections/{collection_id}", "Collection saved")
 
 
 @app.post("/kanvas/actions/collections/{collection_id}/delete", include_in_schema=False)
@@ -1714,7 +1775,7 @@ async def delete_collection_action(collection_id: int, request: Request) -> Redi
     await KanvasKatalogService(_settings, profile.user.id).delete_collection(
         collection_id, revision=_form_integer(form, "revision")
     )
-    return RedirectResponse("/collections", status_code=303)
+    return _toast_redirect(request, "/collections", "Collection deleted")
 
 
 @app.post("/kanvas/actions/collections/{collection_id}/members/{item_id}", include_in_schema=False)
@@ -1732,7 +1793,9 @@ async def update_collection_member_action(
         item_id=item_id,
         relationship=_optional_relationship(_form_optional(form, "relationship")),
     )
-    return RedirectResponse(f"/collections/{collection_id}/edit", status_code=303)
+    return _toast_redirect(
+        request, f"/collections/{collection_id}/edit", "Collection member saved"
+    )
 
 
 @app.post(
@@ -1750,7 +1813,9 @@ async def remove_collection_member_action(
     await KanvasKatalogService(_settings, profile.user.id).remove_collection_member(
         collection_id, revision=_form_integer(form, "revision"), item_id=item_id
     )
-    return RedirectResponse(f"/collections/{collection_id}/edit", status_code=303)
+    return _toast_redirect(
+        request, f"/collections/{collection_id}/edit", "Collection member removed"
+    )
 
 
 @app.post("/kanvas/actions/collections/{collection_id}/watch-orders", include_in_schema=False)
@@ -1770,7 +1835,7 @@ async def create_watch_order_action(collection_id: int, request: Request) -> Red
         name=_form_required(form, "name"),
         kind=kind,
     )
-    return RedirectResponse(f"/watch-orders/{watch_order_id}/edit", status_code=303)
+    return _toast_redirect(request, f"/watch-orders/{watch_order_id}/edit", "Watch order created")
 
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}", include_in_schema=False)
@@ -1798,7 +1863,7 @@ async def update_watch_order_action(watch_order_id: int, request: Request) -> Re
             else "Watch-order changes could not be saved."
         )
         raise HTTPException(status_code=_katalog_status(error), detail=message) from error
-    return RedirectResponse(f"/watch-orders/{watch_order_id}/edit", status_code=303)
+    return _toast_redirect(request, f"/watch-orders/{watch_order_id}/edit", "Watch order saved")
 
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}/delete", include_in_schema=False)
@@ -1814,7 +1879,7 @@ async def delete_watch_order_action(watch_order_id: int, request: Request) -> Re
     )
     collection_id = _form_optional_integer(form, "collection_id")
     destination = f"/collections/{collection_id}" if collection_id is not None else "/collections"
-    return RedirectResponse(destination, status_code=303)
+    return _toast_redirect(request, destination, "Watch order deleted")
 
 
 @app.post(
@@ -1840,7 +1905,9 @@ async def apply_watch_order_generation_action(
         mode=mode,
         apply_mode=apply_mode,
     )
-    return RedirectResponse(f"/watch-orders/{watch_order_id}/edit", status_code=303)
+    return _toast_redirect(
+        request, f"/watch-orders/{watch_order_id}/edit", "Generated order applied"
+    )
 
 
 @app.get("/kanvas/artwork/{item_id}/{artwork_id}", include_in_schema=False)

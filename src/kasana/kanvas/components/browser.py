@@ -19,6 +19,8 @@ class BrowserComponent(StrEnum):
     ONBOARDING = "kanvas-onboarding"
     ITEM_PICKER = "kanvas-item-picker"
     POSTER_GRID = "kanvas-poster-grid"
+    SYSTEM_ALERTS = "kanvas-system-alerts"
+    TOASTS = "kanvas-toasts"
     WATCH_ORDER_LIST = "kanvas-watch-order-list"
     WATCH_ORDER_WORKSPACE = "kanvas-watch-order-workspace"
 

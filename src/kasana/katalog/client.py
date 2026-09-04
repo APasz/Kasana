@@ -79,6 +79,9 @@ from kasana.katalog.api.contracts import (
     ScanRequest,
     SessionProgressUpdate,
     StatusResponse,
+    SystemIncidentAcknowledgeRequest,
+    SystemIncidentFeed,
+    SystemIncidentResponse,
     UserAuthentication,
     UserCreate,
     UserSummary,
@@ -281,6 +284,21 @@ class KatalogClient:
 
     async def status(self) -> StatusResponse:
         return await self._get_model("/api/v1/status", StatusResponse)
+
+    async def system_incidents(self) -> SystemIncidentFeed:
+        """Return Katalog's current operational conditions and recovery history."""
+
+        return await self._get_model("/api/v1/system-incidents", SystemIncidentFeed)
+
+    async def acknowledge_system_incident(
+        self, incident_id: int, request: SystemIncidentAcknowledgeRequest
+    ) -> SystemIncidentResponse:
+        return await self._send_model(
+            "POST",
+            f"/api/v1/system-incidents/{incident_id}/acknowledge",
+            request,
+            SystemIncidentResponse,
+        )
 
     async def list_users(self) -> tuple[UserSummary, ...]:
         response = await self._request("GET", "/api/v1/users")

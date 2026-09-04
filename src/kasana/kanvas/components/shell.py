@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nicegui import ui
 
+from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
 from kasana.kanvas.components.navigation import primary_navigation
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.settings import Kanvas_Settings
@@ -79,6 +80,18 @@ def page_shell(
 
     with ui.element("div").classes("k-app"):
         primary_navigation(active_route, profile, settings)
+        if profile is not None:
+            mount_browser_component(
+                BrowserComponent.SYSTEM_ALERTS,
+                {
+                    "source": "/kanvas/data/system-alerts",
+                    "acknowledgement-source": "/kanvas/data/system-alerts",
+                },
+            )
+            mount_browser_component(
+                BrowserComponent.TOASTS,
+                {"source": "/kanvas/data/toasts/consume"},
+            )
         main_classes = "k-main k-main--home" if active_route == "/" else "k-main"
         with ui.element("main").classes(main_classes).props(f'aria-label="{title}"'):
             with ui.element("div").classes("k-page-content"):

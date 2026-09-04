@@ -149,6 +149,23 @@ def action_button(
     return ActionButton(button, visible_label)
 
 
+def action_form_props(action: str) -> str:
+    """Mark a same-origin native mutation form for shared toast-aware handling."""
+
+    if (
+        not action.startswith("/")
+        or action.startswith("//")
+        or "\\" in action
+        or any(character.isspace() for character in action)
+    ):
+        msg = "Kanvas action forms must use an internal absolute path."
+        raise ValueError(msg)
+    return (
+        f'method="post" action="{escape(action, quote=True)}" '
+        'data-kanvas-action-form="true"'
+    )
+
+
 def icon_action(label: str, icon: IconName, handler: Callable[..., Any] | None = None) -> Element:
     """Build a labelled icon action with a persistent accessible name."""
 

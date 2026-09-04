@@ -185,6 +185,825 @@
     customElements.define('kanvas-confirmation-dialog', KanvasConfirmationDialog);
   }
 
+  const TOAST_EVENT = 'kanvas:toast';
+  const TOAST_CONSUME_EVENT = 'kanvas:consume-toasts';
+  const TOAST_MAX_VISIBLE = 4;
+  const TOAST_SEVERITIES = new Set(['success', 'info', 'warning', 'error']);
+  const TOAST_TIMEOUTS_MS = Object.freeze({
+    success: 5_000,
+    info: 6_000,
+    warning: 8_000,
+    error: null,
+  });
+  const normaliseToastText = (value, maximumLength) => {
+    if (typeof value !== 'string') return null;
+    const text = value.trim();
+    return text && text.length <= maximumLength ? text : null;
+  };
+  const normaliseToast = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const severity = typeof value.severity === 'string' && TOAST_SEVERITIES.has(value.severity)
+      ? value.severity
+      : null;
+    const title = normaliseToastText(value.title, 120);
+    const detail = value.detail == null ? null : normaliseToastText(value.detail, 400);
+    return severity && title && (value.detail == null || detail)
+      ? {severity, title, detail}
+      : null;
+  };
+  const publishKanvasToast = (value) => {
+    const toast = normaliseToast(value);
+    if (!toast) return false;
+    window.dispatchEvent(new CustomEvent(TOAST_EVENT, {detail: toast}));
+    return true;
+  };
+  const consumeQueuedKanvasToasts = () => {
+    window.dispatchEvent(new Event(TOAST_CONSUME_EVENT));
+  };
+  window.kanvas = window.kanvas || {};
+  window.kanvas.toast = publishKanvasToast;
+  window.kanvas.consumeToasts = consumeQueuedKanvasToasts;
+
+  const actionErrorDetail = async (response) => {
+    const payload = await response.json().catch(() => null);
+    return normaliseToastText(payload?.error, 400)
+      || normaliseToastText(payload?.detail, 400)
+      || 'Try again in a moment.';
+  };
+
+  const kanvasActionSubmission = (form, submitter) => {
+    const submitterAction = submitter instanceof HTMLElement ? submitter.getAttribute('formaction') : null;
+    const submitterMethod = submitter instanceof HTMLElement ? submitter.getAttribute('formmethod') : null;
+    let action;
+    try {
+      action = new URL(submitterAction || form.action, window.location.origin);
+    } catch (_) {
+      return null;
+    }
+    const method = (submitterMethod || form.method || 'POST').toUpperCase();
+    return action.origin === window.location.origin && method === 'POST' ? {action, method} : null;
+  };
+
+  const isKanvasActionSubmitter = (value) => (
+    value instanceof HTMLButtonElement || value instanceof HTMLInputElement
+  );
+
+  const submitKanvasActionForm = async (form, submitter, submission = kanvasActionSubmission(form, submitter)) => {
+    if (!submission) return;
+    const {action, method} = submission;
+    const formData = isKanvasActionSubmitter(submitter)
+      ? new FormData(form, submitter)
+      : new FormData(form);
+    form.dataset.kanvasSubmitting = 'true';
+    form.setAttribute('aria-busy', 'true');
+    if (isKanvasActionSubmitter(submitter)) submitter.disabled = true;
+    try {
+      const response = await fetch(action, {
+        method,
+        body: formData,
+        credentials: 'same-origin',
+      });
+      if (!response.ok) {
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Could not save changes',
+          detail: await actionErrorDetail(response),
+        });
+        return;
+      }
+      const destination = new URL(response.url || action, window.location.origin);
+      if (destination.origin !== window.location.origin) throw new Error('Unexpected action destination.');
+      window.location.assign(destination.href);
+    } catch (_) {
+      publishKanvasToast({
+        severity: 'error',
+        title: 'Could not save changes',
+        detail: 'Check your connection and try again.',
+      });
+    } finally {
+      delete form.dataset.kanvasSubmitting;
+      form.removeAttribute('aria-busy');
+      if (isKanvasActionSubmitter(submitter)) submitter.disabled = false;
+    }
+  };
+
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-kanvas-action-form')) return;
+    if (form.dataset.kanvasSubmitting === 'true') {
+      event.preventDefault();
+      return;
+    }
+    const submission = kanvasActionSubmission(form, event.submitter);
+    event.preventDefault();
+    if (!submission) {
+      publishKanvasToast({
+        severity: 'error',
+        title: 'Could not submit form',
+        detail: 'This action is unavailable. Reload the page and try again.',
+      });
+      return;
+    }
+    void submitKanvasActionForm(form, event.submitter, submission);
+  });
+
+  class KanvasToasts extends HTMLElement {
+    constructor() {
+      super();
+      this.toasts = [];
+      this.nextId = 0;
+      this.timers = new Map();
+      this.consuming = false;
+      this.consumeAgain = false;
+      this.consumeAbort = null;
+      this.consumeRequest = 0;
+      this.onToast = (event) => this.add(event.detail);
+      this.onConsume = () => this.requestConsumption();
+    }
+
+    connectedCallback() {
+      this.hidden = true;
+      this.setAttribute('aria-label', 'Notifications');
+      window.addEventListener(TOAST_EVENT, this.onToast);
+      window.addEventListener(TOAST_CONSUME_EVENT, this.onConsume);
+      void this.consumeInitialToasts();
+    }
+
+    disconnectedCallback() {
+      window.removeEventListener(TOAST_EVENT, this.onToast);
+      window.removeEventListener(TOAST_CONSUME_EVENT, this.onConsume);
+      this.consumeRequest += 1;
+      this.consumeAbort?.abort();
+      this.consumeAbort = null;
+      this.consuming = false;
+      this.consumeAgain = false;
+      for (const timer of this.timers.values()) window.clearTimeout(timer);
+      this.timers.clear();
+      this.toasts = [];
+    }
+
+    async consumeInitialToasts() {
+      const source = this.getAttribute('source');
+      if (!source || this.consuming) return;
+      const controller = new AbortController();
+      const request = ++this.consumeRequest;
+      this.consumeAbort = controller;
+      this.consuming = true;
+      try {
+        const response = await fetch(source, {
+          method: 'POST',
+          headers: {'Accept': 'application/json'},
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        if (request !== this.consumeRequest || !this.isConnected) return;
+        if (response.status === 401) {
+          window.location.assign('/profiles');
+          return;
+        }
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || typeof payload !== 'object' || !Array.isArray(payload.toasts)) {
+          return;
+        }
+        for (const toast of payload.toasts) this.add(toast);
+      } catch (_) {
+        // Shell-level connectivity alerts already explain a failed dashboard request.
+      } finally {
+        if (request !== this.consumeRequest) return;
+        this.consumeAbort = null;
+        this.consuming = false;
+        if (this.consumeAgain && this.isConnected) {
+          this.consumeAgain = false;
+          void this.consumeInitialToasts();
+        }
+      }
+    }
+
+    requestConsumption() {
+      if (this.consuming) {
+        this.consumeAgain = true;
+        return;
+      }
+      void this.consumeInitialToasts();
+    }
+
+    add(value) {
+      const toast = normaliseToast(value);
+      if (!toast) return false;
+      const signature = JSON.stringify(toast);
+      const existing = this.toasts.find((entry) => entry.signature === signature);
+      if (existing) {
+        this.scheduleDismissal(existing);
+        return true;
+      }
+      while (this.toasts.length >= TOAST_MAX_VISIBLE) this.dismiss(this.toasts[0]?.id);
+      const entry = {id: ++this.nextId, signature, ...toast};
+      this.toasts.push(entry);
+      this.render();
+      this.scheduleDismissal(entry);
+      return true;
+    }
+
+    dismiss(id) {
+      if (!Number.isInteger(id)) return;
+      const index = this.toasts.findIndex((toast) => toast.id === id);
+      if (index < 0) return;
+      const timer = this.timers.get(id);
+      if (timer !== undefined) window.clearTimeout(timer);
+      this.timers.delete(id);
+      this.toasts.splice(index, 1);
+      this.render();
+    }
+
+    scheduleDismissal(toast) {
+      const timeout = TOAST_TIMEOUTS_MS[toast.severity];
+      if (timeout === null) return;
+      const existingTimer = this.timers.get(toast.id);
+      if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+      this.timers.set(toast.id, window.setTimeout(() => this.dismiss(toast.id), timeout));
+    }
+
+    render() {
+      this.hidden = this.toasts.length === 0;
+      this.replaceChildren();
+      for (const toast of this.toasts) {
+        const item = document.createElement('section');
+        item.className = `k-toast k-toast--${toast.severity}`;
+        item.setAttribute('role', toast.severity === 'error' ? 'alert' : 'status');
+        item.setAttribute('aria-live', toast.severity === 'error' ? 'assertive' : 'polite');
+        const message = document.createElement('div');
+        message.className = 'k-toast__message';
+        const title = document.createElement('strong');
+        title.className = 'k-toast__title';
+        title.textContent = toast.title;
+        message.append(title);
+        if (toast.detail) {
+          const detail = document.createElement('span');
+          detail.className = 'k-toast__detail';
+          detail.textContent = toast.detail;
+          message.append(detail);
+        }
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'k-icon-action k-toast__close';
+        close.textContent = '×';
+        close.setAttribute('aria-label', `Dismiss ${toast.title}`);
+        close.addEventListener('click', () => this.dismiss(toast.id));
+        item.append(message, close);
+        this.append(item);
+      }
+    }
+  }
+
+  if (!customElements.get('kanvas-toasts')) {
+    customElements.define('kanvas-toasts', KanvasToasts);
+  }
+
+  const SYSTEM_ALERT_REFRESH_MS = 30_000;
+  const SYSTEM_ALERT_DEGRADED_REFRESH_MS = 10_000;
+  const SYSTEM_ALERT_REQUEST_TIMEOUT_MS = 15_000;
+  const SYSTEM_ALERT_SEVERITIES = new Set(['info', 'warning', 'error']);
+  const SYSTEM_ALERT_CODES = new Set([
+    'browser_offline',
+    'kanvas_unavailable',
+    'katalog_unavailable',
+    'database_unhealthy',
+    'library_root_unavailable',
+    'maintenance_jobs_failed'
+  ]);
+  const DURABLE_SYSTEM_ALERT_CODES = new Set([
+    'database_unhealthy',
+    'library_root_unavailable',
+    'maintenance_jobs_failed'
+  ]);
+  const SYSTEM_ALERT_ACTION_KINDS = new Set(['navigate', 'retry']);
+  const safeSystemAlertHref = (value) => (
+    typeof value === 'string'
+    && value.startsWith('/')
+    && !value.startsWith('//')
+    && !/[\\\s]/.test(value)
+    && value.length <= 500
+      ? value
+      : null
+  );
+  const normaliseSystemAlertText = (value, maximumLength) => {
+    if (typeof value !== 'string') return null;
+    const text = value.trim();
+    return text && text.length <= maximumLength ? text : null;
+  };
+  const normaliseSystemIncidentId = (value) => (
+    Number.isInteger(value) && value > 0 ? value : null
+  );
+  const normaliseSystemAlertTimestamp = (value) => (
+    typeof value === 'string' && value.length <= 80 && !Number.isNaN(Date.parse(value))
+      ? value
+      : null
+  );
+  const normaliseSystemAlertAction = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const kind = typeof value.kind === 'string' ? value.kind : null;
+    const label = normaliseSystemAlertText(value.label, 80);
+    if (!kind || !SYSTEM_ALERT_ACTION_KINDS.has(kind) || !label) return null;
+    if (kind === 'retry') return value.href == null ? {kind, label} : null;
+    const href = safeSystemAlertHref(value.href);
+    return href ? {kind, label, href} : null;
+  };
+  const normaliseSystemAlert = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const id = typeof value.id === 'string' && /^[a-z][a-z0-9_-]{0,99}$/.test(value.id)
+      ? value.id
+      : null;
+    const code = typeof value.code === 'string' && SYSTEM_ALERT_CODES.has(value.code)
+      ? value.code
+      : null;
+    const severity = typeof value.severity === 'string' && SYSTEM_ALERT_SEVERITIES.has(value.severity)
+      ? value.severity
+      : null;
+    const title = normaliseSystemAlertText(value.title, 160);
+    const detail = normaliseSystemAlertText(value.detail, 500);
+    const action = normaliseSystemAlertAction(value.action);
+    const incidentId = value.incidentId == null ? null : normaliseSystemIncidentId(value.incidentId);
+    const acknowledgedAt = value.acknowledgedAt == null
+      ? null
+      : normaliseSystemAlertTimestamp(value.acknowledgedAt);
+    if (
+      (value.incidentId != null && !incidentId)
+      || (value.acknowledgedAt != null && !acknowledgedAt)
+      || (acknowledgedAt && !incidentId)
+      || (incidentId && !DURABLE_SYSTEM_ALERT_CODES.has(code))
+    ) return null;
+    return id && code && severity && title && detail && action
+      ? {
+          id,
+          code,
+          severity,
+          title,
+          detail,
+          action,
+          ...(incidentId ? {incidentId} : {}),
+          ...(acknowledgedAt ? {acknowledgedAt} : {})
+        }
+      : null;
+  };
+  const normaliseSystemAlertHistory = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const incidentId = normaliseSystemIncidentId(value.incidentId);
+    const code = typeof value.code === 'string' && DURABLE_SYSTEM_ALERT_CODES.has(value.code)
+      ? value.code
+      : null;
+    const severity = typeof value.severity === 'string' && SYSTEM_ALERT_SEVERITIES.has(value.severity)
+      ? value.severity
+      : null;
+    const title = normaliseSystemAlertText(value.title, 160);
+    const detail = normaliseSystemAlertText(value.detail, 500);
+    const firstDetectedAt = normaliseSystemAlertTimestamp(value.firstDetectedAt);
+    const lastDetectedAt = normaliseSystemAlertTimestamp(value.lastDetectedAt);
+    const resolvedAt = normaliseSystemAlertTimestamp(value.resolvedAt);
+    const acknowledgedAt = value.acknowledgedAt == null
+      ? null
+      : normaliseSystemAlertTimestamp(value.acknowledgedAt);
+    if (
+      !incidentId
+      || !code
+      || !severity
+      || !title
+      || !detail
+      || !firstDetectedAt
+      || !lastDetectedAt
+      || !resolvedAt
+      || (value.acknowledgedAt != null && !acknowledgedAt)
+    ) return null;
+    return {
+      incidentId,
+      code,
+      severity,
+      title,
+      detail,
+      firstDetectedAt,
+      lastDetectedAt,
+      resolvedAt,
+      ...(acknowledgedAt ? {acknowledgedAt} : {})
+    };
+  };
+  const systemAlertTimeLabel = (value) => {
+    const timestamp = new Date(value);
+    return Number.isNaN(timestamp.getTime()) ? 'at an unknown time' : timestamp.toLocaleString();
+  };
+  const browserOfflineAlert = () => ({
+    id: 'browser-offline',
+    code: 'browser_offline',
+    severity: 'error',
+    title: 'Connection lost',
+    detail: 'This device is offline. Kanvas will reconnect when the network returns.',
+    action: {kind: 'retry', label: 'Retry'}
+  });
+  const kanvasUnavailableAlert = () => ({
+    id: 'kanvas-unavailable',
+    code: 'kanvas_unavailable',
+    severity: 'error',
+    title: 'Kanvas is unreachable',
+    detail: 'The dashboard cannot be reached right now. Try again in a moment.',
+    action: {kind: 'retry', label: 'Retry'}
+  });
+
+  class KanvasSystemAlerts extends HTMLElement {
+    constructor() {
+      super();
+      this.alerts = [];
+      this.history = [];
+      this.signature = '';
+      this.loading = false;
+      this.loadAgain = false;
+      this.acknowledgingIncidentIds = new Set();
+      this.timer = null;
+      this.abort = null;
+      this.drawer = null;
+      this.onVisibilityChange = () => this.visibilityChanged();
+      this.onOnline = () => this.load();
+      this.onOffline = () => this.offline();
+    }
+
+    connectedCallback() {
+      this.hidden = true;
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+      window.addEventListener('online', this.onOnline);
+      window.addEventListener('offline', this.onOffline);
+      void this.load();
+    }
+
+    disconnectedCallback() {
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+      window.removeEventListener('online', this.onOnline);
+      window.removeEventListener('offline', this.onOffline);
+      this.stopPolling();
+      this.abort?.abort();
+      this.abort = null;
+      this.loadAgain = false;
+    }
+
+    source() {
+      return this.getAttribute('source');
+    }
+
+    acknowledgementSource() {
+      return safeSystemAlertHref(this.getAttribute('acknowledgement-source'));
+    }
+
+    visibilityChanged() {
+      if (document.visibilityState === 'hidden') {
+        this.stopPolling();
+        return;
+      }
+      void this.load();
+    }
+
+    offline() {
+      this.abort?.abort();
+      this.loadAgain = false;
+      this.applyFeed([browserOfflineAlert()], []);
+      this.stopPolling();
+    }
+
+    async load() {
+      if (this.loading) {
+        this.loadAgain = true;
+        return;
+      }
+      if (!this.isConnected || document.visibilityState === 'hidden') return;
+      if (navigator.onLine === false) {
+        this.applyFeed([browserOfflineAlert()], []);
+        this.stopPolling();
+        return;
+      }
+      const source = this.source();
+      if (!source) return;
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, SYSTEM_ALERT_REQUEST_TIMEOUT_MS);
+      this.abort = controller;
+      this.loading = true;
+      try {
+        const response = await fetch(source, {
+          headers: {'Accept': 'application/json'},
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        if (response.status === 401) {
+          window.location.assign('/profiles');
+          return;
+        }
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || typeof payload !== 'object') {
+          throw new Error('System alert request failed.');
+        }
+        const alerts = Array.isArray(payload.alerts)
+          ? payload.alerts.map(normaliseSystemAlert).filter(Boolean)
+          : null;
+        const history = payload.history == null
+          ? []
+          : (Array.isArray(payload.history)
+            ? payload.history.map(normaliseSystemAlertHistory).filter(Boolean)
+            : null);
+        if (alerts === null || history === null) throw new Error('System alert payload was invalid.');
+        this.applyFeed(alerts, history);
+      } catch (error) {
+        if (error?.name !== 'AbortError' || timedOut) {
+          this.applyFeed([
+            navigator.onLine === false ? browserOfflineAlert() : kanvasUnavailableAlert()
+          ], []);
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        if (this.abort === controller) this.abort = null;
+        this.loading = false;
+        if (
+          this.loadAgain
+          && this.isConnected
+          && document.visibilityState !== 'hidden'
+          && navigator.onLine !== false
+        ) {
+          this.loadAgain = false;
+          void this.load();
+          return;
+        }
+        this.loadAgain = false;
+        this.schedulePolling();
+      }
+    }
+
+    schedulePolling() {
+      this.stopPolling();
+      if (
+        !this.isConnected ||
+        document.visibilityState === 'hidden' ||
+        navigator.onLine === false
+      ) return;
+      const degraded = this.alerts.some((alert) => alert.severity === 'error');
+      this.timer = window.setTimeout(
+        () => void this.load(),
+        degraded ? SYSTEM_ALERT_DEGRADED_REFRESH_MS : SYSTEM_ALERT_REFRESH_MS
+      );
+    }
+
+    stopPolling() {
+      if (this.timer !== null) window.clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    applyAlerts(alerts) {
+      this.applyFeed(alerts, []);
+    }
+
+    applyFeed(alerts, history) {
+      const signature = JSON.stringify({alerts, history});
+      if (signature === this.signature) return;
+      this.alerts = alerts;
+      this.history = history;
+      this.signature = signature;
+      this.render();
+    }
+
+    render() {
+      const previousDrawer = this.drawer;
+      const restoreDrawer = previousDrawer instanceof HTMLDialogElement && previousDrawer.open;
+      if (restoreDrawer) previousDrawer.close();
+      if (!this.alerts.length && !this.history.length) {
+        this.hidden = true;
+        this.drawer = null;
+        this.replaceChildren();
+        return;
+      }
+      this.hidden = false;
+      const drawer = this.drawerElement();
+      if (!this.alerts.length) {
+        const historyBar = document.createElement('section');
+        historyBar.className = 'k-system-alerts__history-bar';
+        const message = document.createElement('div');
+        message.className = 'k-system-alerts__message';
+        const title = document.createElement('strong');
+        title.className = 'k-system-alerts__title';
+        title.textContent = 'No active system issues';
+        const detail = document.createElement('span');
+        detail.className = 'k-system-alerts__detail';
+        detail.textContent = `${this.history.length} recovered ${this.history.length === 1 ? 'condition' : 'conditions'} retained.`;
+        message.append(title, detail);
+        const drawerButton = this.drawerButton('System history');
+        historyBar.append(message, drawerButton);
+        this.replaceChildren(historyBar, drawer);
+        if (restoreDrawer) this.openDrawer();
+        return;
+      }
+      const primary = this.alerts.find((alert) => alert.severity === 'error') || this.alerts[0];
+      const banner = document.createElement('section');
+      banner.className = `k-system-alerts__banner k-system-alerts__banner--${primary.severity}`;
+      banner.setAttribute('role', primary.severity === 'error' ? 'alert' : 'status');
+      banner.setAttribute('aria-live', primary.severity === 'error' ? 'assertive' : 'polite');
+
+      const message = document.createElement('div');
+      message.className = 'k-system-alerts__message';
+      const title = document.createElement('strong');
+      title.className = 'k-system-alerts__title';
+      title.textContent = primary.title;
+      const detail = document.createElement('span');
+      detail.className = 'k-system-alerts__detail';
+      detail.textContent = primary.detail;
+      message.append(title, detail);
+      const primaryAction = this.actionElement(primary.action);
+      primaryAction.classList.add('k-system-alerts__primary-action');
+      banner.append(message, primaryAction);
+
+      const drawerButton = this.drawerButton(
+        this.alerts.length === 1 ? 'Attention' : `Attention (${this.alerts.length})`
+      );
+      banner.append(drawerButton);
+
+      this.replaceChildren(banner, drawer);
+      if (restoreDrawer) this.openDrawer();
+    }
+
+    drawerButton(label) {
+      const drawerButton = document.createElement('button');
+      drawerButton.type = 'button';
+      drawerButton.className = 'k-button k-system-alerts__drawer-button';
+      drawerButton.textContent = label;
+      drawerButton.setAttribute('aria-haspopup', 'dialog');
+      drawerButton.addEventListener('click', () => this.openDrawer());
+      return drawerButton;
+    }
+
+    drawerElement() {
+      const drawer = document.createElement('dialog');
+      drawer.className = 'k-kanvas-dialog k-system-alerts__drawer';
+      const drawerTitleText = this.alerts.length ? 'System attention' : 'System history';
+      drawer.setAttribute('aria-label', drawerTitleText);
+      const drawerContent = document.createElement('section');
+      drawerContent.className = 'k-picker k-system-alerts__drawer-content';
+      const drawerHeader = document.createElement('div');
+      drawerHeader.className = 'k-picker__header';
+      const drawerTitle = document.createElement('strong');
+      drawerTitle.textContent = drawerTitleText;
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'k-button';
+      closeButton.textContent = 'Close';
+      closeButton.addEventListener('click', () => drawer.close());
+      drawerHeader.append(drawerTitle, closeButton);
+      drawerContent.append(drawerHeader);
+      if (this.alerts.length) {
+        const activeSection = document.createElement('section');
+        activeSection.className = 'k-system-alerts__section';
+        const activeTitle = document.createElement('strong');
+        activeTitle.className = 'k-system-alerts__section-title';
+        activeTitle.textContent = 'Active conditions';
+        const activeList = document.createElement('ul');
+        activeList.className = 'k-system-alerts__list';
+        for (const alert of this.alerts) activeList.append(this.alertItem(alert));
+        activeSection.append(activeTitle, activeList);
+        drawerContent.append(activeSection);
+      }
+      if (this.history.length) {
+        const historySection = document.createElement('section');
+        historySection.className = 'k-system-alerts__section';
+        const historyTitle = document.createElement('strong');
+        historyTitle.className = 'k-system-alerts__section-title';
+        historyTitle.textContent = 'Recently resolved';
+        const historyList = document.createElement('ul');
+        historyList.className = 'k-system-alerts__history-list';
+        for (const incident of this.history) historyList.append(this.historyItem(incident));
+        historySection.append(historyTitle, historyList);
+        drawerContent.append(historySection);
+      }
+      drawer.append(drawerContent);
+      drawer.addEventListener('click', (event) => {
+        if (event.target === drawer) drawer.close();
+      });
+
+      this.drawer = drawer;
+      return drawer;
+    }
+
+    actionElement(action) {
+      if (action.kind === 'navigate') {
+        const link = document.createElement('a');
+        link.className = 'k-button';
+        link.href = action.href;
+        link.textContent = action.label;
+        return link;
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'k-button';
+      button.textContent = action.label;
+      button.addEventListener('click', () => {
+        this.abort?.abort();
+        void this.load();
+      });
+      return button;
+    }
+
+    alertItem(alert) {
+      const item = document.createElement('li');
+      item.className = `k-system-alerts__item k-system-alerts__item--${alert.severity}`;
+      const message = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = alert.title;
+      const detail = document.createElement('span');
+      detail.textContent = alert.detail;
+      message.append(title, detail);
+      const controls = document.createElement('div');
+      controls.className = 'k-system-alerts__controls';
+      controls.append(this.actionElement(alert.action));
+      const acknowledgement = this.acknowledgementElement(alert);
+      if (acknowledgement) controls.append(acknowledgement);
+      item.append(message, controls);
+      return item;
+    }
+
+    acknowledgementElement(alert) {
+      if (!alert.incidentId) return null;
+      if (alert.acknowledgedAt) {
+        const acknowledgement = document.createElement('span');
+        acknowledgement.className = 'k-system-alerts__acknowledged';
+        acknowledgement.textContent = `Acknowledged ${systemAlertTimeLabel(alert.acknowledgedAt)}`;
+        return acknowledgement;
+      }
+      if (!this.acknowledgementSource()) return null;
+      const acknowledgement = document.createElement('button');
+      acknowledgement.type = 'button';
+      acknowledgement.className = 'k-button k-system-alerts__acknowledge';
+      acknowledgement.disabled = this.acknowledgingIncidentIds.has(alert.incidentId);
+      acknowledgement.textContent = acknowledgement.disabled ? 'Acknowledging…' : 'Acknowledge';
+      acknowledgement.addEventListener('click', () => void this.acknowledge(alert.incidentId));
+      return acknowledgement;
+    }
+
+    historyItem(incident) {
+      const item = document.createElement('li');
+      item.className = `k-system-alerts__history-item k-system-alerts__history-item--${incident.severity}`;
+      const title = document.createElement('strong');
+      title.textContent = incident.title;
+      const detail = document.createElement('span');
+      const acknowledgement = incident.acknowledgedAt
+        ? ` Acknowledged ${systemAlertTimeLabel(incident.acknowledgedAt)}.`
+        : '';
+      detail.textContent = `${incident.detail} Recovered ${systemAlertTimeLabel(incident.resolvedAt)}.${acknowledgement}`;
+      item.append(title, detail);
+      return item;
+    }
+
+    async acknowledge(incidentId) {
+      const source = this.acknowledgementSource();
+      if (!source || !normaliseSystemIncidentId(incidentId) || this.acknowledgingIncidentIds.has(incidentId)) return;
+      this.acknowledgingIncidentIds.add(incidentId);
+      this.render();
+      try {
+        const response = await fetch(`${source}/${incidentId}/acknowledge`, {
+          method: 'POST',
+          headers: {'Accept': 'application/json'},
+          credentials: 'same-origin',
+        });
+        if (response.status === 401) {
+          window.location.assign('/profiles');
+          return;
+        }
+        if (!response.ok) {
+          if (response.status === 404 || response.status === 409) {
+            await this.load();
+            publishKanvasToast({
+              severity: 'info',
+              title: 'System issue is no longer active',
+              detail: 'The alert list has been refreshed.',
+            });
+            return;
+          }
+          throw new Error(await actionErrorDetail(response));
+        }
+        await this.load();
+      } catch (error) {
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Could not acknowledge the system issue',
+          detail: error instanceof Error ? error.message : 'Check your connection and try again.',
+        });
+      } finally {
+        this.acknowledgingIncidentIds.delete(incidentId);
+        this.render();
+      }
+    }
+
+    openDrawer() {
+      if (!(this.drawer instanceof HTMLDialogElement) || this.drawer.open) return;
+      this.drawer.showModal();
+    }
+  }
+
+  if (!customElements.get('kanvas-system-alerts')) {
+    customElements.define('kanvas-system-alerts', KanvasSystemAlerts);
+  }
+
   const POSTER_STATES = new Set([
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
@@ -600,8 +1419,15 @@
         if (pinInput instanceof HTMLInputElement) pinInput.value = '';
         this.pinClearRequested = false;
         this.setStatus('Saved.');
+        publishKanvasToast({severity: 'success', title: 'Profile settings saved'});
       } catch (error) {
-        this.setStatus(error?.message || 'Changes could not be saved.', true);
+        const message = error?.message || 'Changes could not be saved.';
+        this.setStatus(message, true);
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Profile settings could not be saved',
+          detail: message,
+        });
       } finally {
         this.saveButton?.removeAttribute('disabled');
       }
@@ -1986,7 +2812,9 @@
         this.status.textContent = '';
         return true;
       } catch (_) {
-        this.status.textContent = 'Could not save this change.';
+        const message = 'Could not save this change.';
+        this.status.textContent = message;
+        publishKanvasToast({severity: 'error', title: 'Collection update failed', detail: message});
         return false;
       }
     }
@@ -3103,7 +3931,13 @@
         this.status.textContent = `Matched ${match.title}.`;
         window.setTimeout(() => window.location.reload(), 450);
       } catch (error) {
-        this.status.textContent = error?.message || 'Metadata reassignment could not be applied.';
+        const message = error?.message || 'Metadata reassignment could not be applied.';
+        this.status.textContent = message;
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Metadata match could not be applied',
+          detail: message,
+        });
         if (applyButton) applyButton.disabled = false;
         this.isSaving = false;
       }
@@ -3333,7 +4167,13 @@
         if (!response.ok) throw new Error('Collection membership could not be saved.');
         window.location.reload();
       } catch (error) {
-        this.status.textContent = error?.message || 'Collection membership could not be saved.';
+        const message = error?.message || 'Collection membership could not be saved.';
+        this.status.textContent = message;
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Collection membership could not be saved',
+          detail: message,
+        });
       }
     }
 
@@ -3510,7 +4350,13 @@
         this.status.textContent = `Saved ${result.audit?.changed_fields?.join(', ') || 'metadata'}.`;
         window.setTimeout(() => window.location.reload(), 450);
       } catch (error) {
-        this.status.textContent = error?.message || 'Item edit could not be applied.';
+        const message = error?.message || 'Item edit could not be applied.';
+        this.status.textContent = message;
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Item could not be saved',
+          detail: message,
+        });
         if (button) button.disabled = false;
         this.isSaving = false;
       }
@@ -5248,6 +6094,8 @@
   window.kanvasInternals = {
     escapeHtml,
     jobDetail,
+    normaliseToast,
+    publishKanvasToast,
     requestKanvasConfirmation,
     tmdbEntryReferenceFromUrl,
     tmdbEntryReferenceFromValue,

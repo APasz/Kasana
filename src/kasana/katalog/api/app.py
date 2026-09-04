@@ -84,6 +84,9 @@ from kasana.katalog.api.contracts import (
     ScanRequest,
     SessionProgressUpdate,
     StatusResponse,
+    SystemIncidentAcknowledgeRequest,
+    SystemIncidentFeed,
+    SystemIncidentResponse,
     UserAuthentication,
     UserCreate,
     UserSummary,
@@ -190,6 +193,42 @@ def create_app(
             queued_jobs=job_counts[JobStatus.QUEUED],
             running_jobs=job_counts[JobStatus.RUNNING],
             interrupted_jobs=job_counts[JobStatus.INTERRUPTED],
+        )
+
+    @app.get(
+        "/api/v1/system-incidents",
+        response_model=SystemIncidentFeed,
+        operation_id="v1_get_system_incidents",
+        responses=_ERROR_RESPONSES,
+    )
+    async def get_system_incidents(
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> SystemIncidentFeed:
+        job_counts = await runtime.jobs.counts()
+        return await run_blocking(
+            runtime.queries.system_incidents,
+            active_jobs=job_counts[JobStatus.QUEUED] + job_counts[JobStatus.RUNNING],
+            failed_jobs=job_counts[JobStatus.FAILED],
+            queued_jobs=job_counts[JobStatus.QUEUED],
+            running_jobs=job_counts[JobStatus.RUNNING],
+            interrupted_jobs=job_counts[JobStatus.INTERRUPTED],
+        )
+
+    @app.post(
+        "/api/v1/system-incidents/{incident_id}/acknowledge",
+        response_model=SystemIncidentResponse,
+        operation_id="v1_acknowledge_system_incident",
+        responses=_ERROR_RESPONSES,
+    )
+    async def acknowledge_system_incident(
+        incident_id: Annotated[int, Path(gt=0)],
+        acknowledgement: SystemIncidentAcknowledgeRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> SystemIncidentResponse:
+        return await run_blocking(
+            runtime.queries.acknowledge_system_incident,
+            incident_id,
+            acknowledgement,
         )
 
     @app.get(

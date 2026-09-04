@@ -106,6 +106,9 @@ from kasana.katalog.api.contracts import (
     SpecialItemDetail,
     StandalonePlaybackContext,
     StatusResponse,
+    SystemIncidentAcknowledgeRequest,
+    SystemIncidentFeed,
+    SystemIncidentResponse,
     UserAuthentication,
     UserCreate,
     UserRole,
@@ -127,6 +130,12 @@ from kasana.katalog.api.contracts import (
     WatchOrderProgress,
     WatchOrderSummary,
     WatchOrderUpdate,
+)
+from kasana.katalog.api.contracts import (
+    SystemIncidentCode as APIIncidentCode,
+)
+from kasana.katalog.api.contracts import (
+    SystemIncidentSeverity as APIIncidentSeverity,
 )
 from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
@@ -164,6 +173,7 @@ from kasana.katalog.models import (
     PlaybackSessionEntry,
     PlaybackState,
     SubtitleVerticalPosition,
+    SystemIncident,
     User,
     Zaisan,
     ZaisanKind,
@@ -182,6 +192,12 @@ from kasana.katalog.models import (
 )
 from kasana.katalog.models import (
     PlaybackSessionEventKind as ModelPlaybackSessionEventKind,
+)
+from kasana.katalog.models import (
+    SystemIncidentCode as ModelSystemIncidentCode,
+)
+from kasana.katalog.models import (
+    SystemIncidentSeverity as ModelSystemIncidentSeverity,
 )
 from kasana.katalog.models import (
     UserRole as ModelUserRole,
@@ -205,6 +221,7 @@ from kasana.katalog.user_configuration import (
 )
 
 _MAX_PAGE_SIZE = 100
+_SYSTEM_INCIDENT_HISTORY_LIMIT = 20
 _LOGGER = logging.getLogger(__name__)
 _SEASON_DIRECTORY = re.compile(r"^(?:season|volume)\s*(?P<number>\d{1,3})$", re.IGNORECASE)
 _SEASON_EPISODE_MARKER = re.compile(
@@ -239,6 +256,16 @@ class CatalogueValidationError(ValueError):
 
 class CatalogueConflictError(RuntimeError):
     """A revisioned catalogue mutation was based on stale client state."""
+
+
+@dataclass(frozen=True)
+class _SystemIncidentObservation:
+    """The current safe presentation of one condition Katalog has observed."""
+
+    code: ModelSystemIncidentCode
+    severity: ModelSystemIncidentSeverity
+    title: str
+    detail: str
 
 
 class _ExpiredDownloadGrantError(LookupError):
@@ -378,56 +405,169 @@ class KatalogQueryService:
         running_jobs: int = 0,
         interrupted_jobs: int = 0,
     ) -> StatusResponse:
-        def load(session: Session) -> StatusResponse:
-            revision = self._database_revision(session)
-            roots = tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
-            resolved_metadata_binding = (
-                select(MetadataBinding.id)
-                .where(
-                    MetadataBinding.library_item_id == Zaisan.id,
-                    MetadataBinding.status.in_(
-                        (MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)
-                    ),
-                )
-                .exists()
+        return self._database.run_transaction(
+            lambda session: self._status_response(
+                session,
+                active_jobs=active_jobs,
+                failed_jobs=failed_jobs,
+                queued_jobs=queued_jobs,
+                running_jobs=running_jobs,
+                interrupted_jobs=interrupted_jobs,
             )
-            return StatusResponse(
-                database_revision=revision,
-                enabled_root_count=sum(root.enabled for root in roots),
-                unavailable_root_count=sum(
-                    root.enabled and not _library_root_available(root) for root in roots
-                ),
-                item_count=_count(session, Zaisan),
-                media_file_count=_count(session, MediaFile),
-                available_file_count=session.scalar(
-                    select(func.count())
-                    .select_from(MediaFile)
-                    .where(MediaFile.availability == AvailabilityState.AVAILABLE)
-                )
-                or 0,
-                unresolved_audit_issue_count=session.scalar(
-                    select(func.count())
-                    .select_from(AuditIssue)
-                    .where(AuditIssue.is_resolved.is_(False))
-                )
-                or 0,
-                unresolved_metadata_count=session.scalar(
-                    select(func.count())
-                    .select_from(Zaisan)
-                    .where(
-                        Zaisan.item_kind.in_((ZaisanKind.MOVIE, ZaisanKind.SERIES)),
-                        ~resolved_metadata_binding,
-                    )
-                )
-                or 0,
-                active_job_count=active_jobs,
-                failed_job_count=failed_jobs,
-                queued_job_count=queued_jobs,
-                running_job_count=running_jobs,
-                interrupted_job_count=interrupted_jobs,
-            )
+        )
 
-        return self._database.run_transaction(load)
+    def system_incidents(
+        self,
+        *,
+        active_jobs: int,
+        failed_jobs: int,
+        queued_jobs: int = 0,
+        running_jobs: int = 0,
+        interrupted_jobs: int = 0,
+    ) -> SystemIncidentFeed:
+        """Synchronise current operational conditions and return their durable history."""
+
+        def synchronise(session: Session) -> SystemIncidentFeed:
+            observed_at = datetime.now(UTC)
+            roots = tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
+            status = self._status_response(
+                session,
+                active_jobs=active_jobs,
+                failed_jobs=failed_jobs,
+                queued_jobs=queued_jobs,
+                running_jobs=running_jobs,
+                interrupted_jobs=interrupted_jobs,
+                roots=roots,
+            )
+            observations = _system_incident_observations(status)
+            active_by_code = {
+                incident.code: incident
+                for incident in session.scalars(
+                    select(SystemIncident).where(SystemIncident.resolved_at.is_(None))
+                )
+            }
+            observed_codes = {observation.code for observation in observations}
+            for observation in observations:
+                incident = active_by_code.get(observation.code)
+                if incident is None:
+                    incident = SystemIncident(
+                        code=observation.code,
+                        severity=observation.severity,
+                        title=observation.title,
+                        detail=observation.detail,
+                        first_detected_at=observed_at,
+                        last_detected_at=observed_at,
+                    )
+                    session.add(incident)
+                    active_by_code[observation.code] = incident
+                    continue
+                incident.severity = observation.severity
+                incident.title = observation.title
+                incident.detail = observation.detail
+                incident.last_detected_at = observed_at
+            for code, incident in active_by_code.items():
+                if code not in observed_codes:
+                    incident.resolved_at = observed_at
+            session.flush()
+            active = tuple(
+                _system_incident_response(active_by_code[observation.code])
+                for observation in observations
+            )
+            history = tuple(
+                _system_incident_response(incident)
+                for incident in session.scalars(
+                    select(SystemIncident)
+                    .where(SystemIncident.resolved_at.is_not(None))
+                    .order_by(SystemIncident.resolved_at.desc(), SystemIncident.id.desc())
+                    .limit(_SYSTEM_INCIDENT_HISTORY_LIMIT)
+                )
+            )
+            return SystemIncidentFeed(active=active, history=history)
+
+        return self._database.run_transaction(synchronise, immediate=True)
+
+    def acknowledge_system_incident(
+        self, incident_id: int, request: SystemIncidentAcknowledgeRequest
+    ) -> SystemIncidentResponse:
+        """Record the signed-in administrator who has seen one active condition."""
+
+        def acknowledge(session: Session) -> SystemIncidentResponse:
+            acknowledged_at = datetime.now(UTC)
+            user = _require(session, User, request.actor_user_id, "User")
+            if user.is_disabled:
+                raise CatalogueValidationError("Disabled users cannot acknowledge system incidents.")
+            if user.role not in (ModelUserRole.ADMIN, ModelUserRole.OWNER):
+                raise CatalogueValidationError(
+                    "Only administrators can acknowledge system incidents."
+                )
+            incident = _require(session, SystemIncident, incident_id, "System incident")
+            if incident.resolved_at is not None:
+                raise CatalogueConflictError("This system incident has already recovered.")
+            if incident.acknowledged_at is None:
+                incident.acknowledged_at = acknowledged_at
+                incident.acknowledged_by_user_id = user.id
+                session.flush()
+            return _system_incident_response(incident)
+
+        return self._database.run_transaction(acknowledge, immediate=True)
+
+    def _status_response(
+        self,
+        session: Session,
+        *,
+        active_jobs: int,
+        failed_jobs: int,
+        queued_jobs: int,
+        running_jobs: int,
+        interrupted_jobs: int,
+        roots: tuple[Kura, ...] | None = None,
+    ) -> StatusResponse:
+        resolved_roots = (
+            roots if roots is not None else tuple(session.scalars(select(Kura).order_by(Kura.id)).all())
+        )
+        resolved_metadata_binding = (
+            select(MetadataBinding.id)
+            .where(
+                MetadataBinding.library_item_id == Zaisan.id,
+                MetadataBinding.status.in_((MetadataMatchStatus.MATCHED, MetadataMatchStatus.IGNORED)),
+            )
+            .exists()
+        )
+        return StatusResponse(
+            database_revision=self._database_revision(session),
+            enabled_root_count=sum(root.enabled for root in resolved_roots),
+            unavailable_root_count=sum(
+                root.enabled and not _library_root_available(root) for root in resolved_roots
+            ),
+            item_count=_count(session, Zaisan),
+            media_file_count=_count(session, MediaFile),
+            available_file_count=session.scalar(
+                select(func.count())
+                .select_from(MediaFile)
+                .where(MediaFile.availability == AvailabilityState.AVAILABLE)
+            )
+            or 0,
+            unresolved_audit_issue_count=session.scalar(
+                select(func.count())
+                .select_from(AuditIssue)
+                .where(AuditIssue.is_resolved.is_(False))
+            )
+            or 0,
+            unresolved_metadata_count=session.scalar(
+                select(func.count())
+                .select_from(Zaisan)
+                .where(
+                    Zaisan.item_kind.in_((ZaisanKind.MOVIE, ZaisanKind.SERIES)),
+                    ~resolved_metadata_binding,
+                )
+            )
+            or 0,
+            active_job_count=active_jobs,
+            failed_job_count=failed_jobs,
+            queued_job_count=queued_jobs,
+            running_job_count=running_jobs,
+            interrupted_job_count=interrupted_jobs,
+        )
 
     def list_users(self) -> tuple[UserSummary, ...]:
         def load(session: Session) -> tuple[UserSummary, ...]:
@@ -5624,6 +5764,94 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
 
 def _library_root_available(root: Kura) -> bool:
     return Path(root.path).is_dir()
+
+
+def _system_incident_observations(
+    status: StatusResponse,
+) -> tuple[_SystemIncidentObservation, ...]:
+    """Create safe, durable condition snapshots from current Katalog status."""
+
+    observations: list[_SystemIncidentObservation] = []
+    if not status.database_healthy:
+        observations.append(
+            _SystemIncidentObservation(
+                code=ModelSystemIncidentCode.DATABASE_UNHEALTHY,
+                severity=ModelSystemIncidentSeverity.ERROR,
+                title="Catalogue database needs attention",
+                detail="Katalog reported a database health problem. Investigate the database service.",
+            )
+        )
+    if status.unavailable_root_count:
+        root_count = status.unavailable_root_count
+        observations.append(
+            _SystemIncidentObservation(
+                code=ModelSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE,
+                severity=ModelSystemIncidentSeverity.WARNING,
+                title=(
+                    "Library root unavailable"
+                    if root_count == 1
+                    else f"{root_count} library roots unavailable"
+                ),
+                detail=(
+                    "A configured library root is not accessible. Check the disk or mount, then rescan."
+                    if root_count == 1
+                    else (
+                        f"{root_count} configured library roots are not accessible. "
+                        "Check the disks or mounts, then rescan."
+                    )
+                ),
+            )
+        )
+    problem_job_count = status.failed_job_count + status.interrupted_job_count
+    if problem_job_count:
+        job_states: list[str] = []
+        if status.failed_job_count:
+            job_states.append(
+                f"{status.failed_job_count} failed "
+                f"{'job' if status.failed_job_count == 1 else 'jobs'}"
+            )
+        if status.interrupted_job_count:
+            job_states.append(
+                f"{status.interrupted_job_count} interrupted "
+                f"{'job' if status.interrupted_job_count == 1 else 'jobs'}"
+            )
+        observations.append(
+            _SystemIncidentObservation(
+                code=ModelSystemIncidentCode.MAINTENANCE_JOBS_FAILED,
+                severity=ModelSystemIncidentSeverity.WARNING,
+                title=(
+                    "Maintenance job needs attention"
+                    if problem_job_count == 1
+                    else "Maintenance jobs need attention"
+                ),
+                detail=(
+                    f"{_join_system_incident_labels(tuple(job_states))}. "
+                    "Review the job details before retrying work."
+                ),
+            )
+        )
+    return tuple(observations)
+
+
+def _join_system_incident_labels(labels: tuple[str, ...]) -> str:
+    if len(labels) == 1:
+        return labels[0]
+    return f"{labels[0]} and {labels[1]}"
+
+
+def _system_incident_response(incident: SystemIncident) -> SystemIncidentResponse:
+    return SystemIncidentResponse(
+        id=incident.id,
+        code=APIIncidentCode(incident.code.value),
+        severity=APIIncidentSeverity(incident.severity.value),
+        title=incident.title,
+        detail=incident.detail,
+        first_detected_at=incident.first_detected_at,
+        last_detected_at=incident.last_detected_at,
+        resolved_at=incident.resolved_at,
+        acknowledged_at=incident.acknowledged_at,
+        acknowledged_by_user_id=incident.acknowledged_by_user_id,
+    )
 
 
 def _page_limit(limit: int) -> int:

@@ -148,6 +148,21 @@ class JobStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class SystemIncidentCode(StrEnum):
+    """A durable Katalog-owned operational condition."""
+
+    DATABASE_UNHEALTHY = "database_unhealthy"
+    LIBRARY_ROOT_UNAVAILABLE = "library_root_unavailable"
+    MAINTENANCE_JOBS_FAILED = "maintenance_jobs_failed"
+
+
+class SystemIncidentSeverity(StrEnum):
+    """The urgency recorded for one operational condition."""
+
+    WARNING = "warning"
+    ERROR = "error"
+
+
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -296,6 +311,48 @@ class StatusResponse(APIModel):
     running_job_count: int = Field(default=0, ge=0)
     interrupted_job_count: int = Field(default=0, ge=0)
     last_successful_scan_at: datetime | None = None
+
+
+class SystemIncidentResponse(APIModel):
+    """One persisted operational incident, safe for administrator presentation."""
+
+    id: int = Field(gt=0)
+    code: SystemIncidentCode
+    severity: SystemIncidentSeverity
+    title: str = Field(min_length=1, max_length=160)
+    detail: str = Field(min_length=1, max_length=500)
+    first_detected_at: datetime
+    last_detected_at: datetime
+    resolved_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    acknowledged_by_user_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def require_complete_acknowledgement(self) -> Self:
+        if (self.acknowledged_at is None) != (self.acknowledged_by_user_id is None):
+            raise ValueError("System incident acknowledgements require both timestamp and actor.")
+        return self
+
+
+class SystemIncidentFeed(APIModel):
+    """Current conditions plus a bounded recent recovery history."""
+
+    active: tuple[SystemIncidentResponse, ...] = Field(default=(), max_length=10)
+    history: tuple[SystemIncidentResponse, ...] = Field(default=(), max_length=20)
+
+    @model_validator(mode="after")
+    def require_correct_incident_lifecycles(self) -> Self:
+        if any(incident.resolved_at is not None for incident in self.active):
+            raise ValueError("Active system incidents cannot be recovered.")
+        if any(incident.resolved_at is None for incident in self.history):
+            raise ValueError("System incident history must contain recovered incidents.")
+        return self
+
+
+class SystemIncidentAcknowledgeRequest(APIModel):
+    """The signed-in profile responsible for acknowledging an active incident."""
+
+    actor_user_id: int = Field(gt=0)
 
 
 class ArtworkSelection(APIModel):

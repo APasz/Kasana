@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlite3 import Cursor
 from typing import TypeVar
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -74,12 +74,23 @@ class KatalogDatabase:
         Base.metadata.create_all(self.engine)
 
     @contextmanager
-    def transaction(self) -> Generator[Session]:
+    def transaction(self, *, immediate: bool = False) -> Generator[Session]:
+        """Yield one transaction, optionally acquiring SQLite's writer lock first.
+
+        ``BEGIN IMMEDIATE`` is appropriate for short read-modify-write workflows
+        that must observe and update one shared state atomically.  Establishing
+        the lock before their first read avoids SQLite's stale-snapshot race.
+        """
+
         with self.session_factory.begin() as session:
+            if immediate:
+                session.execute(text("BEGIN IMMEDIATE"))
             yield session
 
-    def run_transaction(self, operation: Callable[[Session], Result]) -> Result:
-        with self.transaction() as session:
+    def run_transaction(
+        self, operation: Callable[[Session], Result], *, immediate: bool = False
+    ) -> Result:
+        with self.transaction(immediate=immediate) as session:
             return operation(session)
 
     def backup_to(self, destination: Path) -> None:

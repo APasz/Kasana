@@ -16,7 +16,7 @@ from kasana.kanvas.components.collections import (
     watch_order_rows,
     watch_order_workspace,
 )
-from kasana.kanvas.components.controls import ButtonType, action_button
+from kasana.kanvas.components.controls import ButtonType, action_button, action_form_props
 from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.inputs import (
     SelectOption,
@@ -78,7 +78,7 @@ async def render_collection_new(settings: Kanvas_Settings, profile: SessionProfi
         with (
             ui.element("form")
             .classes("k-editor-form")
-            .props('method="post" action="/kanvas/actions/collections"')
+            .props(action_form_props("/kanvas/actions/collections"))
         ):
             text_input(
                 name="name", aria_label="Collection name", placeholder="Stargate", autofocus=True
@@ -162,7 +162,7 @@ async def render_collection_edit(
         with (
             ui.element("form")
             .classes("k-editor-form")
-            .props(f'method="post" action="/kanvas/actions/collections/{detail.id}"')
+            .props(action_form_props(f"/kanvas/actions/collections/{detail.id}"))
         ):
             hidden_input(name="revision", value=str(detail.revision))
             text_input(name="name", aria_label="Collection name", value=detail.name)
@@ -218,7 +218,7 @@ async def render_collection_edit(
         with (
             ui.element("form")
             .classes("k-danger-zone")
-            .props(f'method="post" action="/kanvas/actions/collections/{detail.id}/delete"')
+            .props(action_form_props(f"/kanvas/actions/collections/{detail.id}/delete"))
         ):
             hidden_input(name="revision", value=str(detail.revision))
             quiet_copy("Deleting a collection keeps every library item.")
@@ -250,7 +250,7 @@ async def render_watch_order_new(
         with (
             ui.element("form")
             .classes("k-editor-form")
-            .props(f'method="post" action="/kanvas/actions/collections/{detail.id}/watch-orders"')
+            .props(action_form_props(f"/kanvas/actions/collections/{detail.id}/watch-orders"))
         ):
             hidden_input(name="collection_revision", value=str(detail.revision))
             text_input(
@@ -323,7 +323,7 @@ async def render_watch_order(
             with (
                 ui.element("form")
                 .classes("k-danger-zone")
-                .props(f'method="post" action="/kanvas/actions/watch-orders/{editor.id}/delete"')
+                .props(action_form_props(f"/kanvas/actions/watch-orders/{editor.id}/delete"))
             ):
                 hidden_input(name="revision", value=str(editor.revision))
                 hidden_input(name="collection_id", value=str(editor.collection_id))
@@ -343,7 +343,7 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
             with (
                 ui.element("form")
                 .classes("k-member-editor-row__form")
-                .props(f'method="post" action="{member_action}"')
+                .props(action_form_props(member_action))
             ):
                 hidden_input(name="revision", value=str(collection.revision))
                 select_input(
@@ -359,7 +359,7 @@ def _collection_member_editor(collection: CollectionDetailView) -> None:
                     value=member.relationship or "",
                 )
                 action_button("Update", button_type=ButtonType.SUBMIT)
-            with ui.element("form").props(f'method="post" action="{member_action}/remove"'):
+            with ui.element("form").props(action_form_props(f"{member_action}/remove")):
                 hidden_input(name="revision", value=str(collection.revision))
                 action_button("Remove", button_type=ButtonType.SUBMIT)
 
@@ -385,7 +385,7 @@ def _watch_order_edit_form(detail: WatchOrderEditorView) -> None:
     with (
         ui.element("form")
         .classes("k-editor-form k-editor-form--compact")
-        .props(f'method="post" action="/kanvas/actions/watch-orders/{detail.id}"')
+        .props(action_form_props(f"/kanvas/actions/watch-orders/{detail.id}"))
     ):
         hidden_input(name="revision", value=str(detail.revision))
         text_input(name="name", aria_label="Watch-order name", value=detail.name)

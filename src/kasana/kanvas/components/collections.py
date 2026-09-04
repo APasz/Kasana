@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from nicegui import ui
 
 from kasana.kanvas.components.browser import BrowserComponent, mount_browser_component
-from kasana.kanvas.components.controls import ButtonType, action_button
+from kasana.kanvas.components.controls import ButtonType, action_button, action_form_props
 from kasana.kanvas.components.inputs import hidden_input
 from kasana.kanvas.components.poster import poster_card
 from kasana.kanvas.components.progress import progress_indicator
@@ -170,7 +170,7 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
         with (
             ui.element("form")
             .classes("k-action-row")
-            .props(f'method="post" action="{escape(apply_action, quote=True)}"')
+            .props(action_form_props(apply_action))
         ):
             hidden_input(name="revision", value=str(preview.revision))
             hidden_input(name="mode", value=preview.mode)

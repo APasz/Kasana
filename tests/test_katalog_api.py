@@ -51,6 +51,9 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
+from kasana.katalog.models import (
+    UserRole as ModelUserRole,
+)
 from kasana.katalog.public import (
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPair,
@@ -438,6 +441,85 @@ async def test_missing_library_root_is_status_only_and_recovers(api_fixture: Api
     assert recovered_status["unavailable_root_count"] == 0
     recovered_roots = (await api_fixture.client.get("/api/v1/library/roots")).json()
     assert {root["path"]: root["available"] for root in recovered_roots}[str(missing_path)] is True
+
+
+async def test_system_incidents_persist_acknowledgement_and_recovery_history(
+    api_fixture: ApiFixture,
+) -> None:
+    missing_path = api_fixture.settings.database_path.parent / "incident-root"
+    created = await api_fixture.client.post(
+        "/api/v1/library/roots",
+        json={
+            "path": str(missing_path),
+            "expected_kind": "movie",
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 201
+
+    concurrent_feeds = await asyncio.gather(
+        *(
+            run_blocking(
+                api_fixture.runtime.queries.system_incidents,
+                active_jobs=0,
+                failed_jobs=0,
+            )
+            for _ in range(8)
+        )
+    )
+    assert {
+        incident.id for feed in concurrent_feeds for incident in feed.active
+    } == {concurrent_feeds[0].active[0].id}
+
+    opened = await api_fixture.client.get("/api/v1/system-incidents")
+    assert opened.status_code == 200
+    opened_payload = opened.json()
+    assert str(missing_path) not in json.dumps(opened_payload)
+    assert opened_payload["history"] == []
+    assert len(opened_payload["active"]) == 1
+    incident = opened_payload["active"][0]
+    assert incident["code"] == "library_root_unavailable"
+    assert incident["acknowledged_at"] is None
+    assert incident["acknowledged_by_user_id"] is None
+
+    rejected_acknowledgement = await api_fixture.client.post(
+        f"/api/v1/system-incidents/{incident['id']}/acknowledge",
+        json={"actor_user_id": 1},
+    )
+    assert rejected_acknowledgement.status_code == 422
+
+    with api_fixture.database.transaction() as session:
+        user = session.get(User, 1)
+        assert user is not None
+        user.role = ModelUserRole.ADMIN
+
+    acknowledged = await api_fixture.client.post(
+        f"/api/v1/system-incidents/{incident['id']}/acknowledge",
+        json={"actor_user_id": 1},
+    )
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["id"] == incident["id"]
+    assert acknowledged.json()["acknowledged_at"] is not None
+    assert acknowledged.json()["acknowledged_by_user_id"] == 1
+
+    missing_path.mkdir()
+    recovered = await api_fixture.client.get("/api/v1/system-incidents")
+    assert recovered.status_code == 200
+    recovered_payload = recovered.json()
+    assert recovered_payload["active"] == []
+    assert len(recovered_payload["history"]) == 1
+    historical = recovered_payload["history"][0]
+    assert historical["id"] == incident["id"]
+    assert historical["resolved_at"] is not None
+    assert historical["acknowledged_by_user_id"] == 1
+
+    missing_path.rmdir()
+    reopened = await api_fixture.client.get("/api/v1/system-incidents")
+    assert reopened.status_code == 200
+    reopened_incident = reopened.json()["active"][0]
+    assert reopened_incident["id"] != incident["id"]
+    assert reopened_incident["acknowledged_at"] is None
+    assert reopened.json()["history"][0]["id"] == incident["id"]
 
 
 async def test_library_summaries_include_safe_context_labels(api_fixture: ApiFixture) -> None:

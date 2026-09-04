@@ -78,6 +78,15 @@ from kasana.kanvas.viewmodels.library import (
     PosterState,
     PosterView,
 )
+from kasana.kanvas.viewmodels.system_alerts import (
+    SystemAlertActionKind,
+    SystemAlertActionView,
+    SystemAlertCode,
+    SystemAlertFeedView,
+    SystemAlertHistoryView,
+    SystemAlertSeverity,
+    SystemAlertView,
+)
 from kasana.katalog.public import (
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     ArtworkFetchRequest,
@@ -101,6 +110,7 @@ from kasana.katalog.public import (
     HierarchyRepairPreview,
     HierarchyRepairRequest,
     KatalogClient,
+    KatalogClientError,
     LibraryConsistencyRequest,
     LibraryItemDetail,
     LibraryItemEditAudit,
@@ -120,6 +130,8 @@ from kasana.katalog.public import (
     PlaybackStateResponse,
     PlaybackStatesRequest,
     ScanRequest,
+    SystemIncidentAcknowledgeRequest,
+    SystemIncidentResponse,
     WatchOrderCreate,
     WatchOrderEntriesCreate,
     WatchOrderEntryCreate,
@@ -129,6 +141,12 @@ from kasana.katalog.public import (
     WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
     WatchOrderKind,
+)
+from kasana.katalog.public import (
+    SystemIncidentCode as KatalogSystemIncidentCode,
+)
+from kasana.katalog.public import (
+    SystemIncidentFeed as KatalogSystemIncidentFeed,
 )
 
 _RAIL_PAGE_SIZE = 20
@@ -140,6 +158,44 @@ _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SystemIncidentPresentation:
+    """The Kanvas-specific identity and remediation for one Katalog condition."""
+
+    alert_id: str
+    action: SystemAlertActionView
+
+
+_SYSTEM_INCIDENT_PRESENTATIONS: Mapping[
+    KatalogSystemIncidentCode, _SystemIncidentPresentation
+] = {
+    KatalogSystemIncidentCode.DATABASE_UNHEALTHY: _SystemIncidentPresentation(
+        alert_id="database-unhealthy",
+        action=SystemAlertActionView(
+            kind=SystemAlertActionKind.NAVIGATE,
+            label="Open Administration",
+            href="/administration",
+        ),
+    ),
+    KatalogSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE: _SystemIncidentPresentation(
+        alert_id="library-roots-unavailable",
+        action=SystemAlertActionView(
+            kind=SystemAlertActionKind.NAVIGATE,
+            label="Open library roots",
+            href="/administration/libraries",
+        ),
+    ),
+    KatalogSystemIncidentCode.MAINTENANCE_JOBS_FAILED: _SystemIncidentPresentation(
+        alert_id="maintenance-jobs-failed",
+        action=SystemAlertActionView(
+            kind=SystemAlertActionKind.NAVIGATE,
+            label="Open jobs",
+            href="/administration/jobs",
+        ),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -337,6 +393,52 @@ class KanvasKatalogService:
         async with self._client() as client:
             roots = await client.list_library_roots()
         return tuple(library_root_view(root) for root in roots)
+
+    async def system_alert_feed(self, *, is_administrator: bool) -> SystemAlertFeedView:
+        """Return current shell alerts and administrator history without transport details."""
+
+        incidents: KatalogSystemIncidentFeed | None = None
+        try:
+            async with self._client() as client:
+                if is_administrator:
+                    incidents = await client.system_incidents()
+                else:
+                    await client.status()
+        except KatalogClientError:
+            return SystemAlertFeedView(
+                connected=False,
+                alerts=(
+                    SystemAlertView(
+                        id="katalog-unavailable",
+                        code=SystemAlertCode.KATALOG_UNAVAILABLE,
+                        severity=SystemAlertSeverity.ERROR,
+                        title="Library service unavailable",
+                        detail=(
+                            "Katalog cannot be reached. "
+                            "Your library may be temporarily out of date."
+                        ),
+                        action=SystemAlertActionView(
+                            kind=SystemAlertActionKind.RETRY,
+                            label="Retry",
+                        ),
+                    ),
+                ),
+            )
+        if not is_administrator:
+            return SystemAlertFeedView(connected=True)
+        if incidents is None:
+            raise RuntimeError("Katalog did not return the administrator incident feed.")
+        return _system_alert_feed(incidents)
+
+    async def acknowledge_system_incident(self, incident_id: int) -> None:
+        """Record that the active administrator has seen one durable condition."""
+
+        user_id = self._required_user_id()
+        async with self._client() as client:
+            await client.acknowledge_system_incident(
+                incident_id,
+                SystemIncidentAcknowledgeRequest(actor_user_id=user_id),
+            )
 
     async def library_grid_revision(self) -> str:
         """Return catalogue and viewer-state revisions for saved library-grid pages."""
@@ -1294,6 +1396,47 @@ class KanvasKatalogService:
             if page.next_cursor is None:
                 return tuple(children)
             cursor = page.next_cursor
+
+
+def _system_alert_feed(incidents: KatalogSystemIncidentFeed) -> SystemAlertFeedView:
+    """Map Katalog's durable records onto shell-specific actions and aliases."""
+
+    return SystemAlertFeedView(
+        connected=True,
+        alerts=tuple(_system_incident_alert(incident) for incident in incidents.active),
+        history=tuple(_system_incident_history(incident) for incident in incidents.history),
+    )
+
+
+def _system_incident_alert(incident: SystemIncidentResponse) -> SystemAlertView:
+    presentation = _SYSTEM_INCIDENT_PRESENTATIONS[incident.code]
+    code = SystemAlertCode(incident.code.value)
+    return SystemAlertView(
+        id=presentation.alert_id,
+        code=code,
+        severity=SystemAlertSeverity(incident.severity.value),
+        title=incident.title,
+        detail=incident.detail,
+        action=presentation.action,
+        incidentId=incident.id,
+        acknowledgedAt=incident.acknowledged_at,
+    )
+
+
+def _system_incident_history(incident: SystemIncidentResponse) -> SystemAlertHistoryView:
+    if incident.resolved_at is None:
+        raise ValueError("System incident history must contain only recovered incidents.")
+    return SystemAlertHistoryView(
+        incidentId=incident.id,
+        code=SystemAlertCode(incident.code.value),
+        severity=SystemAlertSeverity(incident.severity.value),
+        title=incident.title,
+        detail=incident.detail,
+        firstDetectedAt=incident.first_detected_at,
+        lastDetectedAt=incident.last_detected_at,
+        resolvedAt=incident.resolved_at,
+        acknowledgedAt=incident.acknowledged_at,
+    )
 
 
 async def _poster_playback_states(

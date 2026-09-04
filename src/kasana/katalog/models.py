@@ -147,6 +147,21 @@ class MaintenanceJobStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class SystemIncidentCode(StrEnum):
+    """One durable Katalog-owned operational condition."""
+
+    DATABASE_UNHEALTHY = "database_unhealthy"
+    LIBRARY_ROOT_UNAVAILABLE = "library_root_unavailable"
+    MAINTENANCE_JOBS_FAILED = "maintenance_jobs_failed"
+
+
+class SystemIncidentSeverity(StrEnum):
+    """The urgency persisted for one operational condition."""
+
+    WARNING = "warning"
+    ERROR = "error"
+
+
 class CachedArtworkKind(StrEnum):
     POSTER = "poster"
     BACKDROP = "backdrop"
@@ -246,6 +261,43 @@ class MaintenanceJob(Base):
     __table_args__ = (
         Index("ix_maintenance_job_status_updated", "status", "updated_at"),
         Index("ix_maintenance_job_root_status", "library_root_id", "status"),
+    )
+
+
+class SystemIncident(Base):
+    """A bounded-lifecycle record of an observed operational condition."""
+
+    __tablename__ = "system_incident"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[SystemIncidentCode] = mapped_column(
+        _enum(SystemIncidentCode, "system_incident_code"), nullable=False
+    )
+    severity: Mapped[SystemIncidentSeverity] = mapped_column(
+        _enum(SystemIncidentSeverity, "system_incident_severity"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    first_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", ondelete="RESTRICT")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(acknowledged_at IS NULL) = (acknowledged_by_user_id IS NULL)",
+            name="complete_system_incident_acknowledgement",
+        ),
+        Index(
+            "ix_system_incident_active_code",
+            "code",
+            unique=True,
+            sqlite_where=resolved_at.is_(None),
+        ),
+        Index("ix_system_incident_resolved_at", "resolved_at"),
     )
 
 

@@ -4,6 +4,7 @@
   const {
     escapeHtml,
     jobDetail,
+    publishKanvasToast,
     providerEntryUrl,
     requestKanvasConfirmation,
     tmdbEntryReferenceFromValue,
@@ -890,7 +891,8 @@
     async operation(operation, extra = {}, refresh = true) {
       const source = this.getAttribute('action-source');
       if (!source) return false;
-      this.activity = {state: 'active', message: `${adminOperationLabel(operation)} starting…`};
+      const label = adminOperationLabel(operation);
+      this.activity = {state: 'active', message: `${label} starting…`};
       this.render();
       try {
         const payload = await this.postJson(source, {operation, ...extra});
@@ -905,16 +907,27 @@
         if (typeof payload.job?.id === 'string' && payload.job.id) {
           this.submittedJobId = payload.job.id;
           this.submittedLibraryIssueInvalidations = invalidatedIssues;
-          this.activity = {state: 'active', message: `${adminOperationLabel(operation)} queued.`};
+          this.activity = {state: 'active', message: `${label} queued.`};
+          publishKanvasToast({
+            severity: 'success',
+            title: `${label} queued`,
+            detail: 'You can follow its progress in Jobs.',
+          });
         } else {
           this.invalidateLibraryIssues(invalidatedIssues);
-          this.activity = {state: 'complete', message: `${adminOperationLabel(operation)} completed.`};
+          this.activity = {state: 'complete', message: `${label} completed.`};
+          publishKanvasToast({severity: 'success', title: `${label} completed`});
         }
         if (refresh) this.load();
         else this.render();
         return true;
       } catch (error) {
         this.activity = {state: 'error', message: error?.message || 'Action could not be applied.'};
+        publishKanvasToast({
+          severity: 'error',
+          title: `${label} could not be applied`,
+          detail: error?.message || 'Try again in a moment.',
+        });
         this.render();
         return false;
       }
@@ -1081,8 +1094,15 @@
         this.lastMatchedItemId = Number(item.itemId);
         this.completeReviewItem();
         this.render();
+        window.kanvas?.consumeToasts?.();
       } catch (error) {
-        this.activity = {state: 'error', message: error?.message || 'Manual metadata match could not be applied.'};
+        const message = error?.message || 'Manual metadata match could not be applied.';
+        this.activity = {state: 'error', message};
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Manual metadata match could not be applied',
+          detail: message,
+        });
         this.render();
       }
     }
