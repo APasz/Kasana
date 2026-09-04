@@ -4469,6 +4469,9 @@
       const autoplayNextControl = this.querySelector('[data-player-autoplay-next]');
       const autoplayNextOption = this.querySelector('[data-player-autoplay-next-option]');
       const mobileVolume = this.querySelector('[data-player-mobile-volume]');
+      const volumeValueLabels = Array.from(
+        this.querySelectorAll('[data-player-volume-value]')
+      ).filter((label) => label instanceof Element);
       const kestrelLink = this.querySelector('[data-player-kestrel]');
       const audioOptions = audioMenu?.querySelector('[data-player-audio-options]');
       const subtitleOptions = subtitleMenu?.querySelector('[data-player-subtitle-options]');
@@ -4791,11 +4794,8 @@
       const selectedSubtitleButton = () => selectedSubtitleTrack === null
         ? null
         : subtitleMenu.querySelector(`[data-player-subtitle-track="${selectedSubtitleTrack}"]`);
-      const closeTrackMenus = () => {
-        audioMenu.hidden = true;
-        subtitleMenu.hidden = true;
-      };
       const floatingMenuInset = 8;
+      const playerPopupOffset = floatingMenuInset;
       const clampFloatingMenuOffset = (offset, maximum) => {
         const boundedMaximum = Math.max(floatingMenuInset, maximum);
         return Math.max(floatingMenuInset, Math.min(offset, boundedMaximum));
@@ -4851,7 +4851,7 @@
         menu,
         playerBounds,
         menuBounds,
-        clientX,
+        preferredClientLeft,
         preferredTop,
         alternateTop
       ) => {
@@ -4861,40 +4861,136 @@
         const top = topFits(preferredTop) || !topFits(alternateTop)
           ? preferredTop
           : alternateTop;
-        menu.style.left = `${clampFloatingMenuOffset(clientX - playerBounds.left, maximumLeft)}px`;
+        const left = clampFloatingMenuOffset(preferredClientLeft - playerBounds.left, maximumLeft);
+        menu.style.left = `${left}px`;
         menu.style.top = `${clampFloatingMenuOffset(top, maximumTop)}px`;
       };
-      const overflowControl = controls.querySelector('[data-player-action="overflow"]');
-      const closeMobileMenu = () => {
-        mobileMenu.hidden = true;
-        if (overflowControl instanceof Element) overflowControl.setAttribute('aria-expanded', 'false');
-      };
-      const showMobileMenu = () => {
-        hidePlayerTooltip();
-        contextMenu.hidden = true;
-        closeTrackMenus();
-        mobileMenu.hidden = false;
-        if (overflowControl instanceof Element) overflowControl.setAttribute('aria-expanded', 'true');
-        showPlayerControls();
-      };
-      const showTrackMenu = (menu, target) => {
-        hidePlayerTooltip();
+      const positionPlayerPopup = (menu, anchorBounds) => {
         const playerBounds = this.getBoundingClientRect();
-        const targetBounds = target.getBoundingClientRect();
-        contextMenu.hidden = true;
-        closeTrackMenus();
-        closeMobileMenu();
-        menu.hidden = false;
         const menuBounds = menu.getBoundingClientRect();
         positionFloatingMenu(
           menu,
           playerBounds,
           menuBounds,
-          targetBounds.left,
-          targetBounds.top - playerBounds.top - menuBounds.height - floatingMenuInset,
-          targetBounds.bottom - playerBounds.top + floatingMenuInset
+          anchorBounds.left,
+          anchorBounds.top - playerBounds.top - menuBounds.height - playerPopupOffset,
+          anchorBounds.bottom - playerBounds.top + playerPopupOffset
         );
+      };
+      const overflowControl = controls.querySelector('[data-player-action="overflow"]');
+      const playerPopupMenus = new Map([
+        ['menu', contextMenu],
+        ['audio', audioMenu],
+        ['subtitles', subtitleMenu],
+        ['overflow', mobileMenu],
+      ]);
+      const playerPopupElements = Array.from(playerPopupMenus.values());
+      let activePlayerPopupAction = null;
+      let activePlayerPopupTrigger = null;
+      const playerPopupMenu = (action) => playerPopupMenus.get(action) || null;
+      const setPlayerPopupVisibility = (action, visible) => {
+        const menu = playerPopupMenu(action);
+        if (menu === null) return;
+        menu.hidden = !visible;
+        this.querySelectorAll(`[data-player-action="${action}"]`).forEach((control) => {
+          control.setAttribute('aria-expanded', String(visible));
+        });
+      };
+      const playerPopupContains = (target) => playerPopupElements.some(
+        (menu) => menu.contains(target)
+      );
+      const playerPopupTriggerForTarget = (target) => {
+        const element = target instanceof Element ? target : null;
+        const control = element?.closest('[data-player-action]');
+        if (!(control instanceof Element)) return null;
+        const action = control.getAttribute('data-player-action');
+        if (!playerPopupMenus.has(action)) return null;
+        return controls.contains(control) || mobileMenu.contains(control) ? control : null;
+      };
+      const isFocusablePlayerControl = (control) => (
+        control instanceof HTMLElement
+        && typeof control.focus === 'function'
+        && !control.hidden
+        && !control.hasAttribute('disabled')
+        && (
+          typeof control.getClientRects !== 'function'
+          || control.getClientRects().length > 0
+        )
+      );
+      const focusFirstPlayerPopupControl = (menu) => {
+        const control = menu.querySelector('button:not([disabled]), input:not([disabled])');
+        if (!isFocusablePlayerControl(control)) return false;
+        control.focus({preventScroll: true});
+        return true;
+      };
+      const restorePlayerPopupFocus = (action, trigger) => {
+        const controlsForAction = Array.from(
+          this.querySelectorAll(`[data-player-action="${action}"]`)
+        );
+        const focusTarget = [trigger, ...controlsForAction, overflowControl].find(
+          isFocusablePlayerControl
+        );
+        focusTarget?.focus({preventScroll: true});
+      };
+      const visiblePlayerPopupAction = () => {
+        for (const [action, menu] of playerPopupMenus) {
+          if (!menu.hidden) return action;
+        }
+        return null;
+      };
+      const dismissPlayerPopups = (restoreFocus = false) => {
+        const visibleAction = visiblePlayerPopupAction();
+        const activeMenu = activePlayerPopupAction === null
+          ? null
+          : playerPopupMenu(activePlayerPopupAction);
+        const action = activeMenu !== null && !activeMenu.hidden
+          ? activePlayerPopupAction
+          : visibleAction;
+        const trigger = action === activePlayerPopupAction ? activePlayerPopupTrigger : null;
+        hidePlayerTooltip();
+        playerPopupMenus.forEach((_menu, popupAction) => {
+          setPlayerPopupVisibility(popupAction, false);
+        });
+        activePlayerPopupAction = null;
+        activePlayerPopupTrigger = null;
         showPlayerControls();
+        if (restoreFocus && action !== null && trigger !== null) {
+          restorePlayerPopupFocus(action, trigger);
+        }
+        return visibleAction !== null;
+      };
+      const openPlayerPopup = (action, trigger, toggle = true) => {
+        const menu = playerPopupMenu(action);
+        if (menu === null) return false;
+        if (toggle && !menu.hidden) {
+          dismissPlayerPopups();
+          return false;
+        }
+        dismissPlayerPopups();
+        setPlayerPopupVisibility(action, true);
+        activePlayerPopupAction = action;
+        activePlayerPopupTrigger = trigger;
+        if (
+          !isFocusablePlayerControl(trigger)
+          && !focusFirstPlayerPopupControl(menu)
+          && trigger !== null
+        ) {
+          restorePlayerPopupFocus(action, trigger);
+        }
+        showPlayerControls();
+        return true;
+      };
+      const showMobileMenu = (target) => {
+        const targetBounds = target.getBoundingClientRect();
+        if (!openPlayerPopup('overflow', target)) return;
+        positionPlayerPopup(mobileMenu, targetBounds);
+      };
+      const showTrackMenu = (action, target) => {
+        const menu = playerPopupMenu(action);
+        if (menu === null) return;
+        const targetBounds = target.getBoundingClientRect();
+        if (!openPlayerPopup(action, target)) return;
+        positionPlayerPopup(menu, targetBounds);
       };
       const updateTrackOptions = () => {
         audioMenu.querySelectorAll('[data-player-audio-stream]').forEach((option) => {
@@ -5114,6 +5210,7 @@
         if (!Number.isSafeInteger(nextPosition) || nextPosition < 0 || !Number.isFinite(nextResumePosition) || (nextDuration !== null && (!Number.isFinite(nextDuration) || nextDuration < 0))) {
           throw new Error('Playback queue entry is invalid');
         }
+        dismissPlayerPopups();
         invalidateDeliveryRequests();
         audioSelectionVersion += 1;
         latestTrackSelectionSaveVersion += 1;
@@ -5218,6 +5315,22 @@
         return duration * ratio;
       };
       const volumeControls = [volume, mobileVolume];
+      let lastAudibleVolume = video.volume > 0 ? video.volume : 1;
+      const setPlayerVolume = (value) => {
+        const volumeLevel = Math.min(Math.max(value, 0), 1);
+        video.volume = volumeLevel;
+        if (volumeLevel > 0) lastAudibleVolume = volumeLevel;
+        video.muted = volumeLevel === 0;
+      };
+      const togglePlayerMute = () => {
+        if (video.muted || video.volume === 0) {
+          if (video.volume === 0) video.volume = lastAudibleVolume;
+          video.muted = false;
+          return;
+        }
+        lastAudibleVolume = video.volume;
+        video.muted = true;
+      };
       const isTheatreMode = () => this.hasAttribute('data-player-theatre-mode');
       const updateControls = () => {
         const duration = playbackDuration();
@@ -5232,6 +5345,7 @@
         currentTime.textContent = formatTime(position);
         remainingTime.textContent = `-${formatTime(Math.max(duration - position, 0))}`;
         updateActionPresentation('toggle', video.paused ? 'Play' : 'Pause', !video.paused);
+        if (!video.muted && video.volume > 0) lastAudibleVolume = video.volume;
         const muted = video.muted || video.volume === 0;
         updateActionPresentation('mute', muted ? 'Unmute' : 'Mute', muted);
         const theatreMode = isTheatreMode();
@@ -5247,10 +5361,16 @@
           const rate = Number(option.getAttribute('data-player-rate'));
           option.setAttribute('aria-pressed', String(Math.abs(rate - video.playbackRate) < 0.01));
         });
+        const volumeLevel = muted ? 0 : video.volume;
+        const volumePercent = volumeLevel * 100;
+        const volumePercentage = Math.round(volumeLevel * 100);
+        const volumeText = `${volumePercentage}%`;
         volumeControls.forEach((volumeControl) => {
-          volumeControl.value = String(muted ? 0 : video.volume);
-          volumeControl.style.setProperty('--volume-percent', `${muted ? 0 : video.volume * 100}%`);
+          volumeControl.value = String(volumeLevel);
+          volumeControl.setAttribute('aria-valuetext', volumeText);
+          volumeControl.style.setProperty('--volume-percent', `${volumePercent}%`);
         });
+        volumeValueLabels.forEach((label) => { label.textContent = volumeText; });
         updateTrackOptions();
       };
       const isCardFullscreen = () => document.fullscreenElement === this;
@@ -5331,10 +5451,7 @@
       };
       const playerControlsCanHide = () => (
         !video.paused
-        && contextMenu.hidden
-        && mobileMenu.hidden
-        && audioMenu.hidden
-        && subtitleMenu.hidden
+        && playerPopupElements.every((menu) => menu.hidden)
         && playerTooltip.hidden
       );
       const showPlayerControls = () => {
@@ -5345,20 +5462,14 @@
           if (playerControlsCanHide()) this.classList.add('k-player--controls-hidden');
         }, 2600);
       };
-      const hideContextMenu = () => {
-        hidePlayerTooltip();
-        contextMenu.hidden = true;
-        closeTrackMenus();
-        closeMobileMenu();
-        showPlayerControls();
-      };
-      const showContextMenu = (clientX, clientY) => {
-        hidePlayerTooltip();
+      const showContextMenu = (clientX, clientY, trigger = null) => {
+        const triggerBounds = trigger instanceof Element ? trigger.getBoundingClientRect() : null;
+        if (!openPlayerPopup('menu', trigger, trigger !== null)) return;
+        if (triggerBounds !== null) {
+          positionPlayerPopup(contextMenu, triggerBounds);
+          return;
+        }
         const playerBounds = this.getBoundingClientRect();
-        contextMenu.hidden = false;
-        closeTrackMenus();
-        closeMobileMenu();
-        showPlayerControls();
         const menuBounds = contextMenu.getBoundingClientRect();
         const preferredTop = clientY - playerBounds.top;
         positionFloatingMenu(
@@ -5624,10 +5735,27 @@
       const handlePlayerAction = (target) => {
         const action = target.getAttribute('data-player-action');
         if (action === 'overflow') {
-          if (mobileMenu.hidden) showMobileMenu();
-          else closeMobileMenu();
+          showMobileMenu(target);
+          updateControls();
           return;
         }
+        if (action === 'menu') {
+          const bounds = target.getBoundingClientRect();
+          showContextMenu(bounds.left + bounds.width / 2, bounds.bottom, target);
+          updateControls();
+          return;
+        }
+        if (action === 'audio') {
+          showTrackMenu('audio', target);
+          updateControls();
+          return;
+        }
+        if (action === 'subtitles') {
+          showTrackMenu('subtitles', target);
+          updateControls();
+          return;
+        }
+        dismissPlayerPopups(mobileMenu.contains(target));
         if (action === 'toggle') {
           if (video.paused) requestPlayback();
           else video.pause();
@@ -5638,22 +5766,13 @@
             return;
           }
           if (Number.isFinite(video.duration)) video.currentTime = Math.min(Math.max(video.currentTime + offset, 0), video.duration);
-        } else if (action === 'menu') {
-          const bounds = target.getBoundingClientRect();
-          showContextMenu(bounds.left + bounds.width / 2, bounds.bottom);
-        } else if (action === 'audio') {
-          showTrackMenu(audioMenu, target);
-        } else if (action === 'subtitles') {
-          showTrackMenu(subtitleMenu, target);
         } else if (action === 'mute') {
-          video.muted = !video.muted;
+          togglePlayerMute();
         } else if (action === 'next') {
           void completeAndAdvancePlayback();
         } else if (action === 'theatre') {
-          closeMobileMenu();
           toggleTheatreMode();
         } else if (action === 'fullscreen') {
-          closeMobileMenu();
           void toggleFullscreen();
         }
         updateControls();
@@ -5683,12 +5802,12 @@
         const option = element?.closest('[data-player-audio-stream]');
         const audioStream = Number(option?.getAttribute('data-player-audio-stream'));
         if (!Number.isSafeInteger(audioStream) || audioStream < 0 || audioStream === selectedAudioStream) {
-          closeTrackMenus();
+          dismissPlayerPopups(true);
           return;
         }
         const position = playbackPosition();
         const autoplay = !video.paused;
-        closeTrackMenus();
+        dismissPlayerPopups(true);
         selectedAudioStream = audioStream;
         invalidateDeliveryRequests();
         updateTrackOptions();
@@ -5715,11 +5834,11 @@
         if (!option) return;
         const subtitleTrack = option.getAttribute('data-player-subtitle-track') || null;
         if (subtitleTrack === selectedSubtitleTrack) {
-          closeTrackMenus();
+          dismissPlayerPopups(true);
           return;
         }
         const unsupported = option.hasAttribute('data-player-subtitle-unsupported');
-        closeTrackMenus();
+        dismissPlayerPopups(true);
         selectedSubtitleTrack = subtitleTrack;
         updateTrackOptions();
         void queueTrackSelectionSave('Subtitle track could not be changed.', true).catch(() => {});
@@ -5787,7 +5906,7 @@
         if (!Number.isFinite(rate)) return;
         video.playbackRate = rate;
         updateControls();
-        hideContextMenu();
+        dismissPlayerPopups(true);
       });
       const previewTimelineAtPointer = (event) => {
         const position = timelinePositionAt(event.clientX);
@@ -5830,14 +5949,13 @@
           showPlayerControls();
           const nextVolume = Number(volumeControl.value);
           if (!Number.isFinite(nextVolume)) return;
-          video.volume = Math.min(Math.max(nextVolume, 0), 1);
-          video.muted = video.volume === 0;
+          setPlayerVolume(nextVolume);
           updateControls();
         });
       });
       nativeControls.addEventListener('change', () => {
         video.controls = nativeControls.checked;
-        hideContextMenu();
+        dismissPlayerPopups(true);
       });
       if (autoplayNextControl instanceof HTMLInputElement) {
         autoplayNextControl.addEventListener('change', () => {
@@ -5846,7 +5964,7 @@
             return;
           }
           autoplayNext = autoplayNextControl.checked;
-          showPlayerControls();
+          dismissPlayerPopups(true);
         });
       }
       const playerTooltipButton = (target, frameToggleIconOnly = false) => {
@@ -5856,39 +5974,59 @@
         if (!frameToggleIconOnly || button !== frameToggle) return button;
         return frameToggleIcon()?.contains(element) ? button : null;
       };
-      this.addEventListener('pointerover', (event) => {
+      const onPlayerPointerOver = (event) => {
         const button = playerTooltipButton(event.target, true);
         if (button) showPlayerTooltip(button);
-      });
-      this.addEventListener('pointerout', (event) => {
+      };
+      const onPlayerPointerOut = (event) => {
         const button = playerTooltipButton(event.target, true);
         if (button && playerTooltipButton(event.relatedTarget, true) !== button) hidePlayerTooltip();
-      });
-      this.addEventListener('focusin', (event) => {
+      };
+      const onPlayerFocusIn = (event) => {
         showPlayerControls();
         const button = playerTooltipButton(event.target);
         if (button) showPlayerTooltip(button);
-      });
-      this.addEventListener('focusout', (event) => {
+      };
+      const onPlayerFocusOut = (event) => {
         const button = playerTooltipButton(event.target);
         if (button && playerTooltipButton(event.relatedTarget) !== button) hidePlayerTooltip();
-      });
-      this.addEventListener('contextmenu', (event) => {
+        const relatedPopupTrigger = playerPopupTriggerForTarget(event.relatedTarget);
+        const popupFocusWasLost = (
+          playerPopupContains(event.target)
+          || playerPopupTriggerForTarget(event.target) !== null
+        ) && !playerPopupContains(event.relatedTarget) && relatedPopupTrigger === null;
+        if (popupFocusWasLost && visiblePlayerPopupAction() !== null) dismissPlayerPopups();
+      };
+      const onPlayerContextMenu = (event) => {
         event.preventDefault();
         showContextMenu(event.clientX, event.clientY);
-      });
+      };
+      const onPlayerKeyDown = (event) => {
+        if (event.key === 'Escape' && dismissPlayerPopups(true)) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        showPlayerControls();
+      };
+      this.addEventListener('pointerover', onPlayerPointerOver);
+      this.addEventListener('pointerout', onPlayerPointerOut);
+      this.addEventListener('focusin', onPlayerFocusIn);
+      this.addEventListener('focusout', onPlayerFocusOut);
+      this.addEventListener('contextmenu', onPlayerContextMenu);
       this.addEventListener('pointerenter', showPlayerControls);
       this.addEventListener('pointermove', showPlayerControls);
       this.addEventListener('pointerdown', showPlayerControls);
       this.addEventListener('touchstart', showPlayerControls, {passive: true});
-      this.addEventListener('keydown', showPlayerControls);
+      this.addEventListener('keydown', onPlayerKeyDown);
       const onPointerDown = (event) => {
-        if (
-          !contextMenu.contains(event.target)
-          && !audioMenu.contains(event.target)
-          && !subtitleMenu.contains(event.target)
-          && !mobileMenu.contains(event.target)
-        ) hideContextMenu();
+        if (playerPopupContains(event.target) || playerPopupTriggerForTarget(event.target)) return;
+        dismissPlayerPopups();
+      };
+      const onWindowResize = () => {
+        if (visiblePlayerPopupAction() !== null) dismissPlayerPopups(true);
+        synchroniseFullscreenFrameAlignment();
+        updateFrameToggleSize();
       };
       document.addEventListener('pointerdown', onPointerDown);
       this._dispose = () => {
@@ -5897,6 +6035,16 @@
         clearFullscreenClock();
         document.removeEventListener('pointerdown', onPointerDown);
         document.removeEventListener('fullscreenchange', onFullscreenChange);
+        this.removeEventListener('pointerover', onPlayerPointerOver);
+        this.removeEventListener('pointerout', onPlayerPointerOut);
+        this.removeEventListener('focusin', onPlayerFocusIn);
+        this.removeEventListener('focusout', onPlayerFocusOut);
+        this.removeEventListener('contextmenu', onPlayerContextMenu);
+        this.removeEventListener('pointerenter', showPlayerControls);
+        this.removeEventListener('pointermove', showPlayerControls);
+        this.removeEventListener('pointerdown', showPlayerControls);
+        this.removeEventListener('touchstart', showPlayerControls);
+        this.removeEventListener('keydown', onPlayerKeyDown);
         controls.removeEventListener('click', onPlayerControlClick);
         mobileMenu.removeEventListener('click', onPlayerControlClick);
         frameToggle.removeEventListener('click', onPlayerControlClick);
@@ -5908,8 +6056,7 @@
         video.removeEventListener('resize', updateFrameToggleSize);
         if (queueNext instanceof Element) queueNext.removeEventListener('click', onQueueNext);
         window.removeEventListener('pagehide', flushProgressOnPageHide);
-        window.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
-        window.removeEventListener('resize', updateFrameToggleSize);
+        window.removeEventListener('resize', onWindowResize);
         clearNativeSubtitle();
         disposeAssRenderer();
       };
@@ -6076,8 +6223,7 @@
       showPlayerControls();
       updateFrameToggleSize();
       synchroniseFullscreenFrameAlignment();
-      window.addEventListener('resize', synchroniseFullscreenFrameAlignment);
-      window.addEventListener('resize', updateFrameToggleSize);
+      window.addEventListener('resize', onWindowResize);
       const shouldPlayOnLoad = playOnLoad || (resumePosition > 0 && autoplayOnResume);
       void loadEntry(entryPosition, resumePosition, catalogueDuration, shouldPlayOnLoad).catch(() => {
         status.textContent = 'Playback compatibility could not be checked.';

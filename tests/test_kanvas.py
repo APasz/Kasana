@@ -1028,6 +1028,8 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "let reporting = false;" in script
     assert "data-player-native-controls" in script
     assert "data-player-autoplay-next" in card
+    assert "k-player__context-toggle" in card
+    assert "data-player-volume-value" in card
     assert "_PlayerControlAction.TOGGLE" in card
     assert "IconName.PLAY" in card
     assert "IconName.PAUSE" in card
@@ -1074,12 +1076,33 @@ def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri()
     assert "data-player-mobile-menu" in card
     assert "showMobileMenu" in script
     assert ".k-player__mobile-menu:not([hidden])" in stylesheet
+    mobile_menu_style = stylesheet.split(".k-player__mobile-menu:not([hidden]) {", maxsplit=1)[
+        1
+    ].split("}", maxsplit=1)[0]
+    assert "right:" not in mobile_menu_style
+    assert "bottom:" not in mobile_menu_style
     assert "data-player-tooltip-host" in card
     assert "showPlayerTooltip" in script
     assert "hasQueuedNextItem" in script
     assert "setAutoplayNextAvailability" in script
     assert ".k-player__tooltip" in stylesheet
+    assert ".k-player__context-toggle:checked" in stylesheet
+    assert ".k-player__volume-value" in stylesheet
+    volume_style = stylesheet.split(".k-player__volume {", maxsplit=1)[1].split("}", maxsplit=1)[0]
+    volume_value_style = stylesheet.split(".k-player__volume-value {", maxsplit=1)[1].split(
+        "}", maxsplit=1
+    )[0]
+    volume_thumb_style = stylesheet.split(".k-player__volume::-webkit-slider-thumb {", maxsplit=1)[
+        1
+    ].split("}", maxsplit=1)[0]
+    assert "border-radius: 0;" in volume_style
+    assert "inset-inline-start: 3px;" in volume_value_style
+    assert "k-player__bar-label k-player__volume-value" in card
+    assert "width: 0;" in volume_thumb_style
+    assert "height: 0;" in volume_thumb_style
+    assert "background: transparent;" in volume_thumb_style
     assert "positionFloatingMenu" in script
+    assert "positionPlayerPopup" in script
     assert "max-height: calc(100% - 16px);" in stylesheet
     assert "controls autoplay" not in card
     assert 'duration-seconds="{entry.duration_seconds:g}"' in card

@@ -15,6 +15,7 @@ class FakeElement {
     this.hidden = true;
     this.children = [];
     this.listeners = new Map();
+    this.focusCalls = 0;
     this.bounds = {bottom: 180, height: 180, left: 0, right: 320, top: 0, width: 320};
     this.style = {
       properties: new Map(),
@@ -52,6 +53,10 @@ class FakeElement {
 
   emit(name, event = {}) {
     for (const listener of this.listeners.get(name) || []) listener(event);
+  }
+
+  focus() {
+    this.focusCalls += 1;
   }
 
   getAttribute(name) {
@@ -439,6 +444,8 @@ function createPlayer({
   const remainingTime = new FakeElement();
   const volume = new FakeElement();
   const mobileVolume = new FakeElement();
+  const volumeValue = new FakeElement();
+  const mobileVolumeValue = new FakeElement();
   const contextMenu = new FakeElement();
   const audioMenu = new FakeElement();
   const subtitleMenu = new FakeElement();
@@ -563,16 +570,23 @@ function createPlayer({
   player.querySelector = (selector) => elements.get(selector) || null;
   const actionControls = [
     overflowControl,
+    settingsControl,
+    audioControl,
+    subtitlesControl,
     frameToggle,
     toggleControl,
     theatreControl,
     fullscreenQueueNext,
+    mobileSettings,
+    mobileSubtitles,
+    mobileAudio,
     mobileMute,
     mobileTheatre,
     mobileFullscreen,
   ].filter(Boolean);
   const actionLabels = [mobileMuteLabel, mobileTheatreLabel, mobileFullscreenLabel];
   player.querySelectorAll = (selector) => {
+    if (selector === '[data-player-volume-value]') return [volumeValue, mobileVolumeValue];
     const action = selector.match(/^\[data-player-action="(.+)"\]$/)?.[1];
     if (action) return actionControls.filter((control) => control.getAttribute('data-player-action') === action);
     const labelAction = selector.match(/^\[data-player-action-label="(.+)"\]$/)?.[1];
@@ -610,6 +624,7 @@ function createPlayer({
     frameAlignmentStart,
     frameTogglePauseIcon,
     frameTogglePlayIcon,
+    mobileAudio,
     mobileFullscreen,
     mobileFullscreenLabel,
     mobileMenu,
@@ -617,7 +632,10 @@ function createPlayer({
     mobileMuteLabel,
     mobileTheatre,
     mobileTheatreLabel,
+    mobileSettings,
+    mobileSubtitles,
     mobileVolume,
+    mobileVolumeValue,
     overflowControl,
     frameToggle,
     player,
@@ -635,6 +653,7 @@ function createPlayer({
     timingEarlier,
     theatreControl,
     toggleControl,
+    volumeValue,
     video
   };
 }
@@ -708,8 +727,10 @@ async function testMobileOverflowKeepsSecondaryPlaybackControlsTogether() {
     mobileMute,
     mobileMuteLabel,
     mobileVolume,
+    mobileVolumeValue,
     overflowControl,
     player,
+    volumeValue,
     video,
   } = createPlayer();
   player.connectedCallback();
@@ -719,20 +740,138 @@ async function testMobileOverflowKeepsSecondaryPlaybackControlsTogether() {
   controls.emit('click', {target: overflowControl});
   assert.equal(mobileMenu.hidden, false);
   assert.equal(overflowControl.getAttribute('aria-expanded'), 'true');
+  assert.equal(volumeValue.textContent, '100%');
+  assert.equal(mobileVolumeValue.textContent, '100%');
 
   mobileMenu.emit('click', {target: mobileMute});
   assert.equal(video.muted, true);
   assert.equal(mobileMute.dataset.playerIconState, 'alternate');
   assert.equal(mobileMuteLabel.textContent, 'Unmute');
+  assert.equal(volumeValue.textContent, '0%');
+  assert.equal(mobileVolumeValue.textContent, '0%');
 
   mobileVolume.value = '0.4';
   mobileVolume.emit('input');
   assert.equal(video.volume, 0.4);
   assert.equal(video.muted, false);
+  assert.equal(volumeValue.textContent, '40%');
+  assert.equal(mobileVolumeValue.textContent, '40%');
+  assert.equal(mobileVolume.getAttribute('aria-valuetext'), '40%');
+
+  mobileVolume.value = '0';
+  mobileVolume.emit('input');
+  assert.equal(video.muted, true);
+  assert.equal(volumeValue.textContent, '0%');
+
+  mobileMenu.emit('click', {target: mobileMute});
+  assert.equal(video.muted, false);
+  assert.equal(video.volume, 0.4);
+  assert.equal(volumeValue.textContent, '40%');
 
   document.emit('pointerdown', {target: new FakeElement()});
   assert.equal(mobileMenu.hidden, true);
   assert.equal(overflowControl.getAttribute('aria-expanded'), 'false');
+}
+
+async function testPlayerPopupsShareToggleAndDismissalRules() {
+  const {
+    audioControl,
+    audioMenu,
+    autoplayNextControl,
+    contextMenu,
+    controls,
+    mobileMenu,
+    mobileSettings,
+    overflowControl,
+    player,
+    settingsControl,
+    subtitleMenu,
+    subtitlesControl,
+  } = createPlayer({hasQueuedItem: true});
+  audioControl.hidden = false;
+  settingsControl.hidden = false;
+  subtitlesControl.hidden = false;
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  controls.emit('click', {target: settingsControl});
+  assert.equal(contextMenu.hidden, false);
+  assert.equal(settingsControl.getAttribute('aria-expanded'), 'true');
+  assert.equal(mobileSettings.getAttribute('aria-expanded'), 'true');
+
+  controls.emit('click', {target: audioControl});
+  assert.equal(contextMenu.hidden, true);
+  assert.equal(audioMenu.hidden, false);
+  assert.equal(settingsControl.getAttribute('aria-expanded'), 'false');
+  assert.equal(audioControl.getAttribute('aria-expanded'), 'true');
+
+  window.emit('resize');
+  assert.equal(audioMenu.hidden, true);
+  assert.equal(audioControl.getAttribute('aria-expanded'), 'false');
+  assert.equal(audioControl.focusCalls, 1);
+
+  controls.emit('click', {target: audioControl});
+  assert.equal(audioMenu.hidden, false);
+  player.emit('focusout', {target: audioMenu, relatedTarget: settingsControl});
+  assert.equal(audioMenu.hidden, false);
+  player.emit('focusout', {target: settingsControl, relatedTarget: new FakeElement()});
+  assert.equal(audioMenu.hidden, true);
+
+  controls.emit('click', {target: audioControl});
+  assert.equal(audioMenu.hidden, false);
+  document.emit('pointerdown', {target: audioControl});
+  assert.equal(audioMenu.hidden, false);
+  controls.emit('click', {target: audioControl});
+  assert.equal(audioMenu.hidden, true);
+  assert.equal(audioControl.getAttribute('aria-expanded'), 'false');
+
+  controls.emit('click', {target: subtitlesControl});
+  assert.equal(subtitleMenu.hidden, false);
+  const keyboardEvent = {
+    key: 'Escape',
+    prevented: false,
+    propagationStopped: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() { this.propagationStopped = true; },
+  };
+  player.emit('keydown', keyboardEvent);
+  assert.equal(keyboardEvent.prevented, true);
+  assert.equal(keyboardEvent.propagationStopped, true);
+  assert.equal(contextMenu.hidden, true);
+  assert.equal(audioMenu.hidden, true);
+  assert.equal(subtitleMenu.hidden, true);
+  assert.equal(mobileMenu.hidden, true);
+  assert.equal(subtitlesControl.getAttribute('aria-expanded'), 'false');
+  assert.equal(subtitlesControl.focusCalls, 1);
+
+  controls.emit('click', {target: overflowControl});
+  assert.equal(mobileMenu.hidden, false);
+  player.emit('focusout', {target: mobileMenu, relatedTarget: new FakeElement()});
+  assert.equal(mobileMenu.hidden, true);
+  assert.equal(overflowControl.getAttribute('aria-expanded'), 'false');
+
+  controls.emit('click', {target: settingsControl});
+  assert.equal(contextMenu.hidden, false);
+  assert.ok(autoplayNextControl);
+  autoplayNextControl.checked = false;
+  autoplayNextControl.emit('change');
+  assert.equal(contextMenu.hidden, true);
+
+  const settingsFocusCalls = settingsControl.focusCalls;
+  player.emit('contextmenu', {
+    clientX: 160,
+    clientY: 90,
+    preventDefault() {},
+  });
+  assert.equal(contextMenu.hidden, false);
+  player.emit('keydown', {
+    key: 'Escape',
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(contextMenu.hidden, true);
+  assert.equal(settingsControl.focusCalls, settingsFocusCalls);
 }
 
 async function testTheatreModeExpandsThePlayerAndUpdatesBothControls() {
@@ -880,24 +1019,48 @@ function assertFloatingMenuFitsPlayer(menu, player) {
   assert.ok(top + menuBounds.height <= playerBounds.height - 8);
 }
 
-async function testFloatingMenusStayWithinTheFullscreenPlayer() {
+function assertPopupAnchorsToControl(menu, control, player) {
+  const playerBounds = player.getBoundingClientRect();
+  const controlBounds = control.getBoundingClientRect();
+  const menuBounds = menu.getBoundingClientRect();
+  const maximumLeft = playerBounds.width - menuBounds.width - 8;
+  const expectedLeft = Math.max(
+    8,
+    Math.min(controlBounds.left - playerBounds.left, Math.max(8, maximumLeft))
+  );
+  const maximumTop = playerBounds.height - menuBounds.height - 8;
+  const preferredTop = controlBounds.top - playerBounds.top - menuBounds.height - 8;
+  const alternateTop = controlBounds.bottom - playerBounds.top + 8;
+  const preferredTopFits = preferredTop >= 8 && preferredTop <= maximumTop;
+  const alternateTopFits = alternateTop >= 8 && alternateTop <= maximumTop;
+  const expectedTop = preferredTopFits || !alternateTopFits ? preferredTop : alternateTop;
+
+  assert.equal(Number.parseFloat(menu.style.left), expectedLeft);
+  assert.equal(Number.parseFloat(menu.style.top), expectedTop);
+}
+
+async function testFloatingMenusAnchorToControlsAndStayWithinTheFullscreenPlayer() {
   const {
     audioControl,
     audioMenu,
     contextMenu,
     controls,
+    mobileMenu,
+    mobileSettings,
+    overflowControl,
     player,
-    settingsControl,
     subtitleMenu,
     subtitlesControl,
   } = createPlayer();
-  player.bounds = {left: 100, top: 50, width: 640, height: 360};
-  settingsControl.bounds = {left: 700, top: 370, width: 30, height: 30, bottom: 400};
-  audioControl.bounds = {left: 700, top: 370, width: 30, height: 30, bottom: 400};
-  subtitlesControl.bounds = {left: 700, top: 370, width: 30, height: 30, bottom: 400};
-  contextMenu.bounds = {left: 0, top: 0, width: 320, height: 200};
-  audioMenu.bounds = {left: 0, top: 0, width: 320, height: 280};
-  subtitleMenu.bounds = {left: 0, top: 0, width: 320, height: 344};
+  player.bounds = {left: 100, top: 50, width: 640, height: 600};
+  audioControl.bounds = {left: 360, top: 500, width: 30, height: 30, bottom: 530};
+  subtitlesControl.bounds = {left: 480, top: 500, width: 30, height: 30, bottom: 530};
+  overflowControl.bounds = {left: 660, top: 500, width: 30, height: 30, bottom: 530};
+  mobileSettings.bounds = {left: 520, top: 100, width: 160, height: 34, bottom: 134};
+  contextMenu.bounds = {left: 0, top: 0, width: 180, height: 200};
+  audioMenu.bounds = {left: 0, top: 0, width: 180, height: 280};
+  subtitleMenu.bounds = {left: 0, top: 0, width: 180, height: 344};
+  mobileMenu.bounds = {left: 0, top: 0, width: 220, height: 190};
   player.connectedCallback();
   await nextTick();
   await nextTick();
@@ -906,14 +1069,22 @@ async function testFloatingMenusStayWithinTheFullscreenPlayer() {
   try {
     controls.emit('click', {target: subtitlesControl});
     assert.equal(subtitleMenu.hidden, false);
+    assertPopupAnchorsToControl(subtitleMenu, subtitlesControl, player);
     assertFloatingMenuFitsPlayer(subtitleMenu, player);
 
     controls.emit('click', {target: audioControl});
     assert.equal(audioMenu.hidden, false);
+    assertPopupAnchorsToControl(audioMenu, audioControl, player);
     assertFloatingMenuFitsPlayer(audioMenu, player);
 
-    controls.emit('click', {target: settingsControl});
+    controls.emit('click', {target: overflowControl});
+    assert.equal(mobileMenu.hidden, false);
+    assertPopupAnchorsToControl(mobileMenu, overflowControl, player);
+    assertFloatingMenuFitsPlayer(mobileMenu, player);
+
+    mobileMenu.emit('click', {target: mobileSettings});
     assert.equal(contextMenu.hidden, false);
+    assertPopupAnchorsToControl(contextMenu, mobileSettings, player);
     assertFloatingMenuFitsPlayer(contextMenu, player);
   } finally {
     document.fullscreenElement = null;
@@ -1620,10 +1791,11 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testBufferedRangeMarksTheTimelineEdges();
   await testTimelinePreviewTracksHoverAndDrag();
   await testMobileOverflowKeepsSecondaryPlaybackControlsTogether();
+  await testPlayerPopupsShareToggleAndDismissalRules();
   await testTheatreModeExpandsThePlayerAndUpdatesBothControls();
   await testPlayerTooltipsFollowTheCurrentButtonState();
   await testFrameToggleUsesTheSharedPlayerControlsTimer();
-  await testFloatingMenusStayWithinTheFullscreenPlayer();
+  await testFloatingMenusAnchorToControlsAndStayWithinTheFullscreenPlayer();
   await testFullscreenFrameAlignmentPillAppearsAtOrAboveFivePercentDifference();
   await testSelectPlayStatusClearsWhenPlaybackStarts();
   await testFrameToggleMatchesVideoStateAndFrameSize();

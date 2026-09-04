@@ -821,10 +821,52 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "data-player-mobile-menu" in _element_props(element)
         ]
+        popup_controls = [
+            element
+            for element in client.elements.values()
+            if _element_props(element).get("data-player-action")
+            in {"menu", "audio", "subtitles", "overflow"}
+        ]
+        popup_panels = [
+            element
+            for element in client.elements.values()
+            if any(
+                attribute in _element_props(element)
+                for attribute in (
+                    "data-player-context-menu",
+                    "data-player-audio-menu",
+                    "data-player-subtitle-menu",
+                    "data-player-mobile-menu",
+                )
+            )
+        ]
         tooltips = [
             element
             for element in client.elements.values()
             if "data-player-tooltip-host" in _element_props(element)
+        ]
+        native_controls = [
+            element
+            for element in client.elements.values()
+            if "data-player-native-controls" in _element_props(element)
+        ]
+        volume_controls = [
+            element
+            for element in client.elements.values()
+            if any(
+                attribute in _element_props(element)
+                for attribute in ("data-player-volume", "data-player-mobile-volume")
+            )
+        ]
+        volume_value_labels = [
+            element
+            for element in client.elements.values()
+            if "data-player-volume-value" in _element_props(element)
+        ]
+        context_toggles = [
+            element
+            for element in client.elements.values()
+            if "k-player__context-toggle" in element._classes  # pyright: ignore[reportPrivateUsage]
         ]
         autoplay_next_controls = [
             element
@@ -879,9 +921,33 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     )
     assert len(timeline_previews) == 1
     assert len(mobile_menus) == 1
+    assert len(popup_controls) == 7
+    assert all(_element_props(control)["aria-expanded"] == "false" for control in popup_controls)
+    assert len(popup_panels) == 4
+    assert all(_element_props(panel)["role"] == "group" for panel in popup_panels)
+    assert {_element_props(panel)["aria-label"] for panel in popup_panels} == {
+        "Audio tracks",
+        "More playback controls",
+        "Playback settings",
+        "Subtitle tracks",
+    }
+    assert all("hidden" in _element_props(panel) for panel in popup_panels)
     assert toggle_controls[0]._props["data-player-tooltip"] == "Play"  # pyright: ignore[reportPrivateUsage]
     assert len(tooltips) == 1
     assert "hidden" in tooltips[0]._props  # pyright: ignore[reportPrivateUsage]
+    assert len(native_controls) == 1
+    assert native_controls == context_toggles
+    assert native_controls[0].tag == "input"
+    assert _element_props(native_controls[0])["type"] == "checkbox"
+    assert _element_props(native_controls[0])["role"] == "switch"
+    assert "checked" not in _element_props(native_controls[0])
+    assert len(volume_controls) == 2
+    assert all(_element_props(control)["aria-valuetext"] == "100%" for control in volume_controls)
+    assert len(volume_value_labels) == 2
+    assert all(
+        "k-player__volume-value" in label._classes  # pyright: ignore[reportPrivateUsage]
+        for label in volume_value_labels
+    )
     assert autoplay_next_controls == []
     assert fullscreen_title._text == "Example Show · Pilot"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     assert fullscreen_special_info._text == "S01 E02"  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
@@ -1016,6 +1082,8 @@ def test_browser_playback_card_renders_a_disclosed_remaining_queue() -> None:
     assert "k-player__control--next" in fullscreen_next_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
     assert len(autoplay_next_controls) == 1
     assert "checked" in _element_props(autoplay_next_controls[0])
+    assert "k-player__context-toggle" in autoplay_next_controls[0]._classes  # pyright: ignore[reportPrivateUsage]
+    assert _element_props(autoplay_next_controls[0])["role"] == "switch"
     assert queue_titles == ["Next episode", "Next episode"]
 
 

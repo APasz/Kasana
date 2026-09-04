@@ -35,6 +35,16 @@ class _PlayerControlAction(StrEnum):
     OVERFLOW = "overflow"
 
 
+_POPUP_PLAYER_CONTROL_ACTIONS: frozenset[_PlayerControlAction] = frozenset(
+    {
+        _PlayerControlAction.MENU,
+        _PlayerControlAction.SUBTITLES,
+        _PlayerControlAction.AUDIO,
+        _PlayerControlAction.OVERFLOW,
+    }
+)
+
+
 class _FullscreenFrameAlignment(StrEnum):
     """Physical placement choices for a contained fullscreen video frame."""
 
@@ -69,8 +79,8 @@ def _player_action_button(
         f'aria-label="{escaped_name}" data-player-tooltip="{escaped_name}"'
         + (' data-player-icon-state="default"' if alternate_icon is not None else "")
     )
-    if action is _PlayerControlAction.OVERFLOW:
-        button.props('aria-haspopup="true" aria-expanded="false"')
+    if action in _POPUP_PLAYER_CONTROL_ACTIONS:
+        button.props('aria-expanded="false"')
     if action is _PlayerControlAction.THEATRE:
         button.props('aria-pressed="false"')
     return button
@@ -153,6 +163,90 @@ def _mobile_player_menu_option(
             visible_label.props(f'data-player-action-label="{action.value}"')
 
 
+def _player_volume_control(control_data_attribute: str) -> None:
+    """Render a volume range with its current percentage overlaid on the track."""
+
+    with ui.element("div").classes("k-player__volume-control"):
+        ui.element("input").classes("k-player__volume").props(
+            'type="range" min="0" max="1" value="1" step="0.05" '
+            f'{control_data_attribute} aria-label="Volume" aria-valuetext="100%"'
+        )
+        ui.html("100%", tag="span").classes("k-player__bar-label k-player__volume-value").props(
+            'data-player-volume-value aria-hidden="true"'
+        )
+
+
+def _render_mobile_player_menu() -> None:
+    """Render the narrow-player overflow popup."""
+
+    with (
+        ui.element("div")
+        .classes("k-player__mobile-menu")
+        .props('data-player-mobile-menu role="group" aria-label="More playback controls" hidden')
+    ):
+        _mobile_player_menu_option(
+            IconName.ADMINISTRATION,
+            _PlayerControlAction.MENU,
+            "Playback settings",
+        )
+        _mobile_player_menu_option(
+            IconName.SUBTITLES,
+            _PlayerControlAction.SUBTITLES,
+            "Subtitle tracks",
+        )
+        _mobile_player_menu_option(
+            IconName.AUDIO,
+            _PlayerControlAction.AUDIO,
+            "Audio tracks",
+        )
+        _mobile_player_menu_option(
+            IconName.VOLUME,
+            _PlayerControlAction.MUTE,
+            "Mute",
+            alternate_icon=IconName.VOLUME_MUTED,
+            dynamic_label=True,
+        )
+        _mobile_player_menu_option(
+            IconName.THEATRE,
+            _PlayerControlAction.THEATRE,
+            "Theatre mode",
+            alternate_icon=IconName.THEATRE_EXIT,
+            dynamic_label=True,
+        )
+        _mobile_player_menu_option(
+            IconName.FULLSCREEN,
+            _PlayerControlAction.FULLSCREEN,
+            "Fullscreen",
+            alternate_icon=IconName.FULLSCREEN_EXIT,
+            dynamic_label=True,
+        )
+        with ui.element("label").classes("k-player__mobile-volume"):
+            icon_svg(IconName.VOLUME)
+            ui.label("Volume").classes("k-player__mobile-volume-label")
+            _player_volume_control("data-player-mobile-volume")
+
+
+def _player_context_toggle(
+    label: str,
+    control_data_attribute: str,
+    *,
+    checked: bool = False,
+    option_data_attribute: str | None = None,
+) -> None:
+    """Render a labelled native checkbox presented as a playback-settings switch."""
+
+    option = ui.element("label").classes("k-player__context-option")
+    if option_data_attribute is not None:
+        option.props(option_data_attribute)
+    with option:
+        ui.html(escape(label), tag="span").classes("k-player__context-option-label")
+        ui.element("input").classes("k-player__context-toggle").props(
+            'type="checkbox" role="switch" '
+            + control_data_attribute
+            + (" checked" if checked else "")
+        )
+
+
 def _queued_entries(session: PlaybackSessionResponse) -> tuple[PlaybackPlanEntry, ...]:
     """Return entries scheduled after the session's current item."""
 
@@ -232,7 +326,7 @@ def _render_track_menus(entry: PlaybackPlanEntry) -> None:
     with (
         ui.element("div")
         .classes("k-player__track-menu")
-        .props('data-player-audio-menu role="menu" hidden')
+        .props('data-player-audio-menu role="group" aria-label="Audio tracks" hidden')
     ):
         ui.label("Audio").classes("k-player__menu-heading")
         with ui.element("div").props("data-player-audio-options"):
@@ -249,7 +343,7 @@ def _render_track_menus(entry: PlaybackPlanEntry) -> None:
     with (
         ui.element("div")
         .classes("k-player__track-menu")
-        .props('data-player-subtitle-menu role="menu" hidden')
+        .props('data-player-subtitle-menu role="group" aria-label="Subtitle tracks" hidden')
     ):
         ui.label("Subtitles").classes("k-player__menu-heading")
         with ui.element("div").props("data-player-subtitle-options"):
@@ -537,10 +631,7 @@ def render_browser_playback_card(
                         "Mute",
                         alternate_icon=IconName.VOLUME_MUTED,
                     )
-                    ui.element("input").classes("k-player__volume").props(
-                        'type="range" min="0" max="1" value="1" step="0.05" '
-                        'data-player-volume aria-label="Volume"'
-                    )
+                    _player_volume_control("data-player-volume")
                     _player_control(
                         IconName.THEATRE,
                         _PlayerControlAction.THEATRE,
@@ -553,61 +644,11 @@ def render_browser_playback_card(
                         "Fullscreen",
                         alternate_icon=IconName.FULLSCREEN_EXIT,
                     )
-            with (
-                ui.element("div")
-                .classes("k-player__mobile-menu")
-                .props(
-                    'data-player-mobile-menu role="group" '
-                    'aria-label="More playback controls" hidden'
-                )
-            ):
-                _mobile_player_menu_option(
-                    IconName.ADMINISTRATION,
-                    _PlayerControlAction.MENU,
-                    "Playback settings",
-                )
-                _mobile_player_menu_option(
-                    IconName.SUBTITLES,
-                    _PlayerControlAction.SUBTITLES,
-                    "Subtitle tracks",
-                )
-                _mobile_player_menu_option(
-                    IconName.AUDIO,
-                    _PlayerControlAction.AUDIO,
-                    "Audio tracks",
-                )
-                _mobile_player_menu_option(
-                    IconName.VOLUME,
-                    _PlayerControlAction.MUTE,
-                    "Mute",
-                    alternate_icon=IconName.VOLUME_MUTED,
-                    dynamic_label=True,
-                )
-                _mobile_player_menu_option(
-                    IconName.THEATRE,
-                    _PlayerControlAction.THEATRE,
-                    "Theatre mode",
-                    alternate_icon=IconName.THEATRE_EXIT,
-                    dynamic_label=True,
-                )
-                _mobile_player_menu_option(
-                    IconName.FULLSCREEN,
-                    _PlayerControlAction.FULLSCREEN,
-                    "Fullscreen",
-                    alternate_icon=IconName.FULLSCREEN_EXIT,
-                    dynamic_label=True,
-                )
-                with ui.element("label").classes("k-player__mobile-volume"):
-                    icon_svg(IconName.VOLUME)
-                    ui.label("Volume").classes("k-player__mobile-volume-label")
-                    ui.element("input").classes("k-player__volume").props(
-                        'type="range" min="0" max="1" value="1" step="0.05" '
-                        'data-player-mobile-volume aria-label="Volume"'
-                    )
+        _render_mobile_player_menu()
         with (
             ui.element("div")
             .classes("k-player__context-menu")
-            .props('data-player-context-menu role="menu" hidden')
+            .props('data-player-context-menu role="group" aria-label="Playback settings" hidden')
         ):
             ui.label("Playback speed").classes("k-player__menu-heading")
             with ui.element("div").classes("k-player__speed-options"):
@@ -618,22 +659,17 @@ def render_browser_playback_card(
                         .props(f'type="button" data-player-rate="{rate:g}" aria-pressed="false"')
                     ):
                         ui.html(f"{rate:g}x", tag="span")
-            with ui.element("div").classes("k-player__context-option"):
-                ui.element("input").props(
-                    'type="checkbox" data-player-native-controls aria-label="Show browser controls"'
-                )
-                ui.html("Show browser controls", tag="span")
+            _player_context_toggle(
+                "Show browser controls",
+                "data-player-native-controls",
+            )
             if has_queued_item:
-                with (
-                    ui.element("label")
-                    .classes("k-player__context-option")
-                    .props("data-player-autoplay-next-option")
-                ):
-                    ui.element("input").props(
-                        'type="checkbox" data-player-autoplay-next checked '
-                        'aria-label="Autoplay next queue item"'
-                    )
-                    ui.html("Autoplay next item", tag="span")
+                _player_context_toggle(
+                    "Autoplay next item",
+                    "data-player-autoplay-next",
+                    checked=True,
+                    option_data_attribute="data-player-autoplay-next-option",
+                )
         _render_track_menus(entry)
         ui.element("span").classes("k-player__tooltip").props(
             'data-player-tooltip-host aria-hidden="true" hidden'
