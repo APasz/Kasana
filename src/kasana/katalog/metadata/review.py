@@ -264,8 +264,14 @@ def apply_unlocked_metadata(item: Zaisan, details: ProviderDetails) -> None:
     if MetadataField.RELEASE_DATE not in locks and details.release_date is not None:
         item.release_date = details.release_date
         item.release_year = details.release_date.year
-    if MetadataField.OVERVIEW not in locks and details.overview is not None:
-        item.overview = details.overview
+    apply_unlocked_overview(item, details.overview)
+
+
+def apply_unlocked_overview(item: Zaisan, overview: str | None) -> None:
+    """Apply provider text only when it is present and locally editable."""
+
+    if overview is not None and MetadataField.OVERVIEW not in locked_fields(item):
+        item.overview = overview
 
 
 def _assert_resulting_identity_available(

@@ -26,6 +26,7 @@ from kasana.katalog.metadata.refresh import (
     SeasonArtworkProvider,
     provider_for,
 )
+from kasana.katalog.metadata.review import apply_unlocked_overview
 from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
@@ -129,15 +130,24 @@ class PosterVariantBatch:
 
 @dataclass(frozen=True)
 class EpisodeArtworkTarget:
-    """A local episode that receives a still from its parent season response."""
+    """A local episode reconciled from its parent season response."""
 
     library_item_id: int
     episode_number: int
 
 
 @dataclass(frozen=True)
+class EpisodeOverviewUpdate:
+    """An episode overview identified by the local season and episode number."""
+
+    library_item_id: int
+    episode_number: int
+    overview: str
+
+
+@dataclass(frozen=True)
 class SeasonArtworkTarget:
-    """A local season and its episodes that inherit identity from a matched series."""
+    """A local season and its episodes backed by a matched series."""
 
     library_item_id: int
     provider: str
@@ -193,7 +203,7 @@ class ArtworkCache:
         item_id: int | None = None,
         include_variants: bool = False,
     ) -> tuple[ArtworkCacheView, ...]:
-        """Cache available posters, season posters, and episode stills.
+        """Cache available artwork and synchronise episode descriptions from season details.
 
         A failure from one external provider does not prevent artwork from another
         provider from being cached.
@@ -573,6 +583,24 @@ class ArtworkCache:
                     msg = f"Provider {target.provider!r} returned duplicate episode details."
                     raise ValueError(msg)
                 remote_episodes[episode.episode_number] = episode
+            overview_updates: list[EpisodeOverviewUpdate] = []
+            for episode_target in target.episodes:
+                episode = remote_episodes.get(episode_target.episode_number)
+                if episode is None or episode.overview is None:
+                    continue
+                overview_updates.append(
+                    EpisodeOverviewUpdate(
+                        library_item_id=episode_target.library_item_id,
+                        episode_number=episode_target.episode_number,
+                        overview=episode.overview,
+                    )
+                )
+            if overview_updates:
+                await run_blocking(
+                    self._apply_episode_overviews,
+                    target,
+                    tuple(overview_updates),
+                )
             for episode_target in target.episodes:
                 episode = remote_episodes.get(episode_target.episode_number)
                 still_request: ArtworkRequest | None = None
@@ -620,6 +648,51 @@ class ArtworkCache:
             return SeasonArtworkBatch(tuple(requests), tuple(refresh_targets))
 
         return tuple(await asyncio.gather(*(resolve(target) for target in targets)))
+
+    def _apply_episode_overviews(
+        self,
+        target: SeasonArtworkTarget,
+        updates: tuple[EpisodeOverviewUpdate, ...],
+    ) -> None:
+        """Persist current-provider episode descriptions without bypassing local locks."""
+
+        def apply(session: Session) -> None:
+            season = session.get(Zaisan, target.library_item_id)
+            if (
+                season is None
+                or season.item_kind is not ZaisanKind.SEASON
+                or season.parent_id is None
+                or season.season_number != target.season_number
+            ):
+                return
+            binding = session.scalar(
+                select(MetadataBinding.id).where(
+                    MetadataBinding.library_item_id == season.parent_id,
+                    MetadataBinding.provider == target.provider,
+                    MetadataBinding.provider_id == target.series_provider_id,
+                    MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                )
+            )
+            if binding is None:
+                return
+            episode_ids = tuple(update.library_item_id for update in updates)
+            episodes_by_id = {
+                episode.id: episode
+                for episode in session.scalars(select(Zaisan).where(Zaisan.id.in_(episode_ids)))
+            }
+            for update in updates:
+                episode = episodes_by_id.get(update.library_item_id)
+                if (
+                    episode is None
+                    or episode.item_kind is not ZaisanKind.EPISODE
+                    or episode.parent_id != season.id
+                    or episode.season_number != target.season_number
+                    or episode.episode_number != update.episode_number
+                ):
+                    continue
+                apply_unlocked_overview(episode, update.overview)
+
+        self.database.run_transaction(apply)
 
     async def _poster_variant_batches(
         self,

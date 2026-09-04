@@ -363,6 +363,7 @@ def _library_detail(
     episode_number: int | None = None,
     artwork: tuple[ArtworkSelection, ...] = (),
     external_ids: tuple[LibraryItemExternalIdentifier, ...] = (),
+    overview: str | None = None,
 ) -> LibraryItemDetail:
     """Build a public item detail for route and service contracts."""
 
@@ -378,6 +379,7 @@ def _library_detail(
             "tags": (),
             "artwork": artwork,
             "external_ids": external_ids,
+            "overview": overview,
             "season_number": season_number,
             "episode_number": episode_number,
             "playback_url": f"/api/v1/playback/items/{item_id}",
@@ -672,6 +674,7 @@ async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: Mo
         season_number=1,
         episode_number=1,
         artwork=(still,),
+        overview="A first contact changes everything.",
     )
     child_requests: list[int] = []
     monkeypatch.setattr(
@@ -683,6 +686,7 @@ async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: Mo
 
     assert detail.poster_url == "/kanvas/artwork/7/8"
     assert detail.artwork_shape is ArtworkShape.LANDSCAPE
+    assert detail.overview == "A first contact changes everything."
 
 
 async def test_item_detail_exposes_valid_imdb_external_links(monkeypatch: MonkeyPatch) -> None:

@@ -756,6 +756,7 @@ def _episode_details(
     episode_number: int,
     *,
     still: ArtworkReference | None,
+    overview: str | None = None,
 ) -> EpisodeDetails:
     return EpisodeDetails(
         reference=ProviderReference(provider="fake", raw_id=episode_provider_id),
@@ -763,6 +764,7 @@ def _episode_details(
         season_number=season_number,
         episode_number=episode_number,
         title=f"Episode {episode_number}",
+        overview=overview,
         still=still,
     )
 
@@ -1013,6 +1015,8 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
                 title="Episode 2",
                 season_number=1,
                 episode_number=2,
+                overview="Keep this local description.",
+                locked_metadata_fields=frozenset((MetadataField.OVERVIEW,)),
             )
             return root.id, series.id, season.id, first_episode.id, second_episode.id
 
@@ -1033,8 +1037,22 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
                 1,
                 poster=None,
                 episodes=(
-                    _episode_details("series-1", "episode-1", 1, 1, still=first_still),
-                    _episode_details("series-1", "episode-2", 1, 2, still=second_still),
+                    _episode_details(
+                        "series-1",
+                        "episode-1",
+                        1,
+                        1,
+                        still=first_still,
+                        overview="A strange signal reaches Earth.",
+                    ),
+                    _episode_details(
+                        "series-1",
+                        "episode-2",
+                        1,
+                        2,
+                        still=second_still,
+                        overview="The crew prepares for departure.",
+                    ),
                 ),
             )
         },
@@ -1050,6 +1068,19 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
     }
     assert provider.season_calls == [(ProviderReference(provider="fake", raw_id="series-1"), 1)]
     assert provider.artwork_calls == 2
+
+    def episode_overviews(session: Session) -> dict[int, str | None]:
+        return {
+            episode.id: episode.overview
+            for episode in session.scalars(
+                select(Zaisan).where(Zaisan.id.in_((first_episode_id, second_episode_id)))
+            )
+        }
+
+    assert database.run_transaction(episode_overviews) == {
+        first_episode_id: "A strange signal reaches Earth.",
+        second_episode_id: "Keep this local description.",
+    }
 
     selected = await workflow.fetch_posters(
         (provider,), item_id=first_episode_id, include_variants=True
@@ -1103,7 +1134,14 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
         1,
         poster=None,
         episodes=(
-            _episode_details("series-1", "episode-1", 1, 1, still=None),
+            _episode_details(
+                "series-1",
+                "episode-1",
+                1,
+                1,
+                still=None,
+                overview="The signal is decoded.",
+            ),
             _episode_details("series-1", "episode-2", 1, 2, still=second_still),
         ),
     )
@@ -1112,6 +1150,10 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
     cached_records = database.run_transaction(records)
     assert {(record.library_item_id, record.provider_revision) for record in cached_records} == {
         (second_episode_id, second_still.raw_path)
+    }
+    assert database.run_transaction(episode_overviews) == {
+        first_episode_id: "The signal is decoded.",
+        second_episode_id: "Keep this local description.",
     }
 
     await workflow.unmatch_item(series_id)
