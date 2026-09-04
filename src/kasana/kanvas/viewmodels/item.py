@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +48,58 @@ class ExternalLinkView(BaseModel):
     url: str = Field(pattern=r"^https://")
 
 
+class ItemTitleLinkView(BaseModel):
+    """One local item reference rendered as a linked title segment."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=1_000)
+
+
+class SeasonTitleView(BaseModel):
+    """The number and optional distinct name that identify a season."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=0)
+    name: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+
+class LinkedSeasonTitleView(SeasonTitleView):
+    """A season title segment that can navigate to its detail page."""
+
+    id: int = Field(gt=0)
+
+
+class SeasonItemTitleView(BaseModel):
+    """Hierarchy title data for a season item page."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["season"] = "season"
+    series: ItemTitleLinkView
+    season: SeasonTitleView
+
+
+class EpisodeItemTitleView(BaseModel):
+    """Hierarchy title data for an episode item page."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["episode"] = "episode"
+    series: ItemTitleLinkView
+    season: LinkedSeasonTitleView
+    episode_number: int = Field(ge=0)
+    episode_name: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+
+type ItemTitleHierarchyView = Annotated[
+    SeasonItemTitleView | EpisodeItemTitleView,
+    Field(discriminator="kind"),
+]
+
+
 class ItemDetailView(BaseModel):
     """Safe detail data for the first Kanvas item page."""
 
@@ -55,6 +107,7 @@ class ItemDetailView(BaseModel):
 
     id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=1_000)
+    title_hierarchy: ItemTitleHierarchyView | None = Field(default=None, alias="titleHierarchy")
     kind: str = Field(min_length=1, max_length=32)
     year: int | None = Field(default=None, ge=1, le=9999)
     overview: str | None = Field(default=None, max_length=20_000)

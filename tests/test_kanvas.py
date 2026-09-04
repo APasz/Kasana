@@ -148,9 +148,14 @@ from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
     DownloadOptionView,
+    EpisodeItemTitleView,
     ExternalLinkView,
     IncludedCollectionView,
     ItemDetailView,
+    ItemTitleLinkView,
+    LinkedSeasonTitleView,
+    SeasonItemTitleView,
+    SeasonTitleView,
 )
 from kasana.kanvas.viewmodels.library import (
     ArtworkShape,
@@ -361,6 +366,7 @@ def _library_detail(
     parent_id: int | None = None,
     season_number: int | None = None,
     episode_number: int | None = None,
+    series_title: str | None = None,
     artwork: tuple[ArtworkSelection, ...] = (),
     external_ids: tuple[LibraryItemExternalIdentifier, ...] = (),
     overview: str | None = None,
@@ -382,6 +388,7 @@ def _library_detail(
             "overview": overview,
             "season_number": season_number,
             "episode_number": episode_number,
+            "series_title": series_title,
             "playback_url": f"/api/v1/playback/items/{item_id}",
         }
     )
@@ -426,7 +433,11 @@ def _item_detail_client(
     child_playback: Mapping[int, PlaybackStateResponse | None] | None = None,
     partially_watched_child_ids: frozenset[int] = frozenset(),
     download_options: tuple[MediaTechnicalSummary, ...] = (),
+    related_items: Mapping[int, LibraryItemDetail] | None = None,
 ) -> type[object]:
+    items_by_id = dict(related_items or {})
+    items_by_id[item.id] = item
+
     class FakeClient:
         def __init__(self, *_arguments: object, **_keywords: object) -> None:
             pass
@@ -438,8 +449,9 @@ def _item_detail_client(
             pass
 
         async def get_library_item(self, item_id: int) -> SimpleNamespace:
-            assert item_id == item.id
-            return SimpleNamespace(item=item)
+            if item_id not in items_by_id:
+                raise AssertionError(f"Unexpected item request for item {item_id}.")
+            return SimpleNamespace(item=items_by_id[item_id])
 
         async def list_library_item_media(self, item_id: int, *, limit: int) -> SimpleNamespace:
             assert item_id == item.id
@@ -687,6 +699,104 @@ async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: Mo
     assert detail.poster_url == "/kanvas/artwork/7/8"
     assert detail.artwork_shape is ArtworkShape.LANDSCAPE
     assert detail.overview == "A first contact changes everything."
+
+
+async def test_item_detail_builds_linked_season_and_episode_title_hierarchies(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    season = _library_detail(
+        item_id=20,
+        title="Caliban's War",
+        kind=LibraryItemKind.SEASON,
+        parent_id=10,
+        season_number=2,
+        series_title="The Expanse",
+    )
+    episode = _library_detail(
+        item_id=30,
+        title="Gods of Risk",
+        kind=LibraryItemKind.EPISODE,
+        parent_id=season.id,
+        season_number=2,
+        episode_number=4,
+        series_title="The Expanse",
+    )
+    season_child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(season, {season.id: ()}, season_child_requests),
+    )
+
+    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
+        season.id
+    )
+
+    assert season_detail.title_hierarchy == SeasonItemTitleView(
+        series=ItemTitleLinkView(id=10, title="The Expanse"),
+        season=SeasonTitleView(number=2, name="Caliban's War"),
+    )
+
+    episode_child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(
+            episode,
+            {episode.id: ()},
+            episode_child_requests,
+            related_items={season.id: season},
+        ),
+    )
+
+    episode_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
+        episode.id
+    )
+
+    assert episode_detail.title_hierarchy == EpisodeItemTitleView(
+        series=ItemTitleLinkView(id=10, title="The Expanse"),
+        season=LinkedSeasonTitleView(id=20, number=2, name="Caliban's War"),
+        episode_number=4,
+        episode_name="Gods of Risk",
+    )
+
+
+async def test_item_detail_omits_generated_season_and_episode_names_from_titles(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    season = _library_detail(
+        item_id=20,
+        title="Season 02",
+        kind=LibraryItemKind.SEASON,
+        parent_id=10,
+        season_number=2,
+        series_title="The Expanse",
+    )
+    episode = _library_detail(
+        item_id=30,
+        title="Episode 4",
+        kind=LibraryItemKind.EPISODE,
+        parent_id=season.id,
+        season_number=2,
+        episode_number=4,
+        series_title="The Expanse",
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(
+            episode,
+            {episode.id: ()},
+            child_requests,
+            related_items={season.id: season},
+        ),
+    )
+
+    detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(episode.id)
+
+    assert detail.title_hierarchy == EpisodeItemTitleView(
+        series=ItemTitleLinkView(id=10, title="The Expanse"),
+        season=LinkedSeasonTitleView(id=20, number=2),
+        episode_number=4,
+    )
 
 
 async def test_item_detail_exposes_valid_imdb_external_links(monkeypatch: MonkeyPatch) -> None:
@@ -1620,6 +1730,78 @@ async def test_item_detail_keeps_multiple_series_seasons(monkeypatch: MonkeyPatc
     assert [child.title for child in detail.children] == ["Season 1", "Season 2"]
     assert [child.watched for child in detail.children] == [True, False]
     assert child_requests == [7]
+
+
+async def test_item_detail_omits_redundant_series_context_from_child_posters(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    series = _library_detail(item_id=10, title="Airwolf", kind=LibraryItemKind.SERIES)
+    season_one = _library_summary(
+        item_id=20,
+        title="Season 1",
+        kind=LibraryItemKind.SEASON,
+        parent_id=series.id,
+        season_number=1,
+        series_title=series.title,
+    )
+    season_two = _library_summary(
+        item_id=21,
+        title="Season 2",
+        kind=LibraryItemKind.SEASON,
+        parent_id=series.id,
+        season_number=2,
+        series_title=series.title,
+    )
+    child_requests: list[int] = []
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(series, {series.id: (season_one, season_two)}, child_requests),
+    )
+
+    series_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
+        series.id
+    )
+
+    assert [child.context for child in series_detail.children] == [None, None]
+
+    season = _library_detail(
+        item_id=season_one.id,
+        title=season_one.title,
+        kind=LibraryItemKind.SEASON,
+        parent_id=series.id,
+        season_number=1,
+        series_title=series.title,
+    )
+    episodes = (
+        _library_summary(
+            item_id=30,
+            title="Shadow of the Hawk",
+            kind=LibraryItemKind.EPISODE,
+            parent_id=season.id,
+            season_number=1,
+            episode_number=1,
+            series_title=series.title,
+        ),
+        _library_summary(
+            item_id=31,
+            title="Daddy's Gone Hunt'n",
+            kind=LibraryItemKind.EPISODE,
+            parent_id=season.id,
+            season_number=1,
+            episode_number=2,
+            series_title=series.title,
+        ),
+    )
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient",
+        _item_detail_client(season, {season.id: episodes}, child_requests),
+    )
+
+    season_detail = await KanvasKatalogService(Kanvas_Settings(), user_id=1).item_detail(
+        season.id
+    )
+
+    assert [child.context for child in season_detail.children] == [None, None]
 
 
 async def test_item_detail_marks_partially_watched_season_children(
@@ -4272,6 +4454,65 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         )
 
 
+def test_item_title_renders_linked_season_and_episode_hierarchies() -> None:
+    season_detail = ItemDetailView(
+        id=20,
+        title="Caliban's War",
+        kind="season",
+        titleHierarchy=SeasonItemTitleView(
+            series=ItemTitleLinkView(id=10, title="The Expanse"),
+            season=SeasonTitleView(number=2, name="Caliban's War"),
+        ),
+        posterPlaceholder=PlaceholderArtView(lines=("Caliban's War",)),
+        available=True,
+    )
+    episode_detail = ItemDetailView(
+        id=30,
+        title="Gods of Risk",
+        kind="episode",
+        titleHierarchy=EpisodeItemTitleView(
+            series=ItemTitleLinkView(id=10, title="The Expanse"),
+            season=LinkedSeasonTitleView(id=20, number=2, name="Caliban's War"),
+            episode_number=4,
+            episode_name="Gods of Risk",
+        ),
+        posterPlaceholder=PlaceholderArtView(lines=("Gods of Risk",)),
+        available=True,
+    )
+
+    with Client(page("")) as client:
+        item_route._item_title(season_detail)  # pyright: ignore[reportPrivateUsage]
+        item_route._item_title(episode_detail)  # pyright: ignore[reportPrivateUsage]
+        title_links = [
+            element
+            for element in client.elements.values()
+            if "k-item__title-link" in _element_classes(element)
+        ]
+        title_text = [
+            element.text
+            for element in client.elements.values()
+            if isinstance(element, Label) and "k-item__title-text" in _element_classes(element)
+        ]
+        episode_title_lines = [
+            element
+            for element in client.elements.values()
+            if "k-item__title-line" in _element_classes(element)
+        ]
+
+    linked_titles = [
+        (_element_text(element), _element_props(element)["href"])
+        for element in title_links
+    ]
+
+    assert linked_titles == [
+        ("The Expanse", "/item/10"),
+        ("The Expanse", "/item/10"),
+        ("Season 2 - Caliban's War", "/item/20"),
+    ]
+    assert title_text == [" - Season 2 - Caliban's War", " - ", "Episode 4 - Gods of Risk"]
+    assert len(episode_title_lines) == 2
+
+
 def test_item_page_omits_the_included_in_section_without_collection_memberships() -> None:
     item = ItemDetailView(
         id=7,
@@ -4729,6 +4970,14 @@ def _element_classes(element: Element) -> list[str]:
     """Expose NiceGUI's internal test-only rendered class list."""
 
     return element._classes  # pyright: ignore[reportPrivateUsage]
+
+
+def _element_text(element: Element) -> str:
+    """Return rendered text from a NiceGUI text element in route assertions."""
+
+    text = getattr(element, "text", None)
+    assert isinstance(text, str)
+    return text
 
 
 def _element_props(element: Element) -> dict[str, object]:

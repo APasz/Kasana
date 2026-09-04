@@ -24,6 +24,7 @@ from kasana.kanvas.services.presentation import (
     generated_row,
     group_collection_members,
     is_generic_episode_title,
+    is_generic_season_title,
     is_series_like,
     item_picker_view,
     placeholder_art_for_summary,
@@ -61,9 +62,14 @@ from kasana.kanvas.viewmodels.collections import (
 from kasana.kanvas.viewmodels.home import HomeRailKind, MediaRailView
 from kasana.kanvas.viewmodels.item import (
     CollectionChoiceView,
+    EpisodeItemTitleView,
     ExternalLinkView,
     IncludedCollectionView,
     ItemDetailView,
+    ItemTitleLinkView,
+    LinkedSeasonTitleView,
+    SeasonItemTitleView,
+    SeasonTitleView,
 )
 from kasana.kanvas.viewmodels.library import (
     LibraryFilters,
@@ -571,15 +577,17 @@ class KanvasKatalogService:
                 raise RuntimeError(msg)
             item = conditional_item.item
             if item.kind in PLAYABLE_KINDS and item.availability is Availability.AVAILABLE:
-                media_page, download_options, children_page = await gather(
+                media_page, download_options, children_page, title_hierarchy = await gather(
                     client.list_library_item_media(item_id, limit=1),
                     client.list_library_item_download_options(item_id),
                     client.list_library_item_children(item_id, limit=_DETAIL_CHILD_PAGE_SIZE),
+                    _item_title_hierarchy(client, item),
                 )
             else:
-                media_page, children_page = await gather(
+                media_page, children_page, title_hierarchy = await gather(
                     client.list_library_item_media(item_id, limit=1),
                     client.list_library_item_children(item_id, limit=_DETAIL_CHILD_PAGE_SIZE),
+                    _item_title_hierarchy(client, item),
                 )
                 download_options = ()
             collection_summaries = (
@@ -595,6 +603,7 @@ class KanvasKatalogService:
         return ItemDetailView(
             id=item.id,
             title=display_title(item),
+            titleHierarchy=title_hierarchy,
             kind=item.kind.value,
             year=item.year,
             overview=item.overview,
@@ -1328,6 +1337,70 @@ def _external_links(item: LibraryItemDetail) -> tuple[ExternalLinkView, ...]:
     return tuple(links)
 
 
+async def _item_title_hierarchy(
+    client: KatalogClient, item: LibraryItemDetail
+) -> SeasonItemTitleView | EpisodeItemTitleView | None:
+    """Resolve the linked series and season title segments for hierarchy item pages."""
+
+    if item.kind is LibraryItemKind.SEASON:
+        season = _season_title_view(item)
+        if item.parent_id is None or item.series_title is None or season is None:
+            return None
+        return SeasonItemTitleView(
+            series=ItemTitleLinkView(id=item.parent_id, title=item.series_title),
+            season=season,
+        )
+
+    if item.kind is not LibraryItemKind.EPISODE:
+        return None
+    if item.parent_id is None or item.episode_number is None:
+        return None
+
+    conditional_season = await client.get_library_item(item.parent_id)
+    season_item = conditional_season.item
+    season = _season_title_view(season_item) if season_item is not None else None
+    season_series_title = season_item.series_title if season_item is not None else None
+    series_title = item.series_title or season_series_title
+    if (
+        season_item is None
+        or season is None
+        or season_item.parent_id is None
+        or series_title is None
+    ):
+        return None
+
+    episode_title = display_title(item)
+    return EpisodeItemTitleView(
+        series=ItemTitleLinkView(id=season_item.parent_id, title=series_title),
+        season=LinkedSeasonTitleView(
+            id=season_item.id,
+            number=season.number,
+            name=season.name,
+        ),
+        episode_number=item.episode_number,
+        episode_name=(
+            None
+            if is_generic_episode_title(episode_title, item.episode_number, series_title)
+            else episode_title
+        ),
+    )
+
+
+def _season_title_view(item: LibraryItemDetail) -> SeasonTitleView | None:
+    """Return a season's display name only when it adds identity beyond its number."""
+
+    if item.kind is not LibraryItemKind.SEASON or item.season_number is None:
+        return None
+    return SeasonTitleView(
+        number=item.season_number,
+        name=(
+            None
+            if is_generic_season_title(item.title, item.season_number)
+            else item.title
+        ),
+    )
+
+
 def _is_imdb_title_id(value: str) -> bool:
     return value.startswith("tt") and value[2:].isdigit() and 7 <= len(value[2:]) <= 10
 
@@ -1403,6 +1476,7 @@ async def _child_posters(
             child,
             playback=playback_by_item_id.get(child.id),
             partially_watched=child.id in partially_watched_item_ids,
+            include_series_context=False,
         )
         for child in children
     )

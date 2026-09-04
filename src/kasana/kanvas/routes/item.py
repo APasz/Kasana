@@ -24,7 +24,13 @@ from kasana.kanvas.routes.browser_playback import render_browser_playback_card
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.services.playback import KanvasPlaybackService, OptimisticWatchedState
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.kanvas.viewmodels.item import DownloadOptionView, ItemDetailView
+from kasana.kanvas.viewmodels.item import (
+    DownloadOptionView,
+    EpisodeItemTitleView,
+    ItemDetailView,
+    SeasonItemTitleView,
+    SeasonTitleView,
+)
 from kasana.kanvas.viewmodels.library import ArtworkShape, PosterView
 from kasana.katalog.public import (
     KatalogClientError,
@@ -76,7 +82,7 @@ async def render_item(
                     poster_placeholder_art(detail.id, detail.poster_placeholder)
                 progress_indicator(detail.progress_percent)
             with ui.element("div").classes("k-item__content"):
-                ui.label(detail.title).classes("k-item__title")
+                _item_title(detail)
                 facts = " · ".join(
                     part
                     for part in (
@@ -118,6 +124,47 @@ async def render_item(
                 with ui.element("div").classes(f"k-child-grid k-child-grid--{child_layout.value}"):
                     for child in detail.children:
                         poster_card(child)
+
+
+def _item_title(detail: ItemDetailView) -> None:
+    """Render a linked series/season hierarchy title when an item has one."""
+
+    hierarchy = detail.title_hierarchy
+    if isinstance(hierarchy, SeasonItemTitleView):
+        with ui.element("div").classes("k-item__title"):
+            ui.link(hierarchy.series.title, f"/item/{hierarchy.series.id}").classes(
+                "k-item__title-link"
+            )
+            ui.label(f" - {_season_title_text(hierarchy.season)}").classes(
+                "k-item__title-text"
+            )
+        return
+    if isinstance(hierarchy, EpisodeItemTitleView):
+        with ui.element("div").classes("k-item__title"):
+            with ui.element("div").classes("k-item__title-line"):
+                ui.link(hierarchy.series.title, f"/item/{hierarchy.series.id}").classes(
+                    "k-item__title-link"
+                )
+                ui.label(" - ").classes("k-item__title-text")
+                ui.link(
+                    _season_title_text(hierarchy.season), f"/item/{hierarchy.season.id}"
+                ).classes(
+                    "k-item__title-link"
+                )
+            with ui.element("div").classes("k-item__title-line"):
+                episode_title = f"Episode {hierarchy.episode_number}"
+                if hierarchy.episode_name is not None:
+                    episode_title = f"{episode_title} - {hierarchy.episode_name}"
+                ui.label(episode_title).classes("k-item__title-text")
+        return
+    ui.label(detail.title).classes("k-item__title")
+
+
+def _season_title_text(season: SeasonTitleView) -> str:
+    """Format the shared numeric season segment with its optional distinct name."""
+
+    title = f"Season {season.number}"
+    return f"{title} - {season.name}" if season.name is not None else title
 
 
 def _child_grid_layout(children: tuple[PosterView, ...]) -> ArtworkShape:

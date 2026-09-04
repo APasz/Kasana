@@ -38,6 +38,7 @@ from kasana.katalog.public import (
 )
 
 _ARTWORK_URL = re.compile(r"^/api/v1/library/items/(?P<item_id>\d+)/artwork/(?P<artwork_id>\d+)$")
+_GENERIC_SEASON_TITLE = re.compile(r"^(?:season|s\.?)\s*(?P<number>\d+)$", re.IGNORECASE)
 _GENERIC_EPISODE_TITLE = re.compile(r"^(?:episode|ep\.?)\s*(?P<number>\d+)$", re.IGNORECASE)
 _EPISODE_IDENTIFIER_TITLE = re.compile(
     r"^s\s*\d+\s*e\s*\d+(?:\s*-\s*(?:s\s*\d+\s*)?e\s*\d+)?$",
@@ -255,11 +256,14 @@ def poster_from_summary(
     loading: bool = False,
     href: str | None = None,
     detail: str | None = None,
+    include_series_context: bool = True,
 ) -> PosterView:
     """Translate a Katalog summary to the single poster visual contract.
 
     ``href`` and ``detail`` let contextual surfaces state their safe launch
     destination and compact supporting copy before the immutable view is built.
+    ``include_series_context`` omits repeated show titles when a parent item
+    page already establishes that context.
     """
 
     title = display_title(item)
@@ -283,7 +287,11 @@ def poster_from_summary(
     return PosterView(
         id=item.id,
         title=title,
-        context=_non_redundant_poster_context(item.series_title, title),
+        context=(
+            _non_redundant_poster_context(item.series_title, title)
+            if include_series_context
+            else None
+        ),
         detail=detail if detail is not None else default_detail or None,
         href=href if href is not None else f"/item/{item.id}",
         posterUrl=poster_url,
@@ -399,6 +407,15 @@ def placeholder_title_lines(title: str) -> tuple[str, ...]:
     if separator and primary.strip() and secondary.strip():
         return (primary.strip(), secondary.strip())
     return (title.strip(),)
+
+
+def is_generic_season_title(title: str, season_number: int | None) -> bool:
+    """Return whether a season title only repeats its numeric identifier."""
+
+    if season_number is None:
+        return False
+    match = _GENERIC_SEASON_TITLE.fullmatch(title.strip())
+    return match is not None and int(match["number"]) == season_number
 
 
 def is_generic_episode_title(

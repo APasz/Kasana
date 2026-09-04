@@ -880,6 +880,19 @@ kanvas-poster-grid { overflow-anchor: none; }
 .k-item__art .k-poster__fallback-line + .k-poster__fallback-line { font-size: 0.94rem; }
 .k-item__art .k-poster__fallback-footer { min-height: 1.6rem; font-size: 0.72rem; }
 .k-item__title { margin-bottom: 6px; }
+.k-item__title-line { display: block; }
+.k-item__title-text { display: inline; }
+.k-item__title-link {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: var(--k-border-strong);
+    text-underline-offset: 3px;
+}
+.k-item__title-link:hover,
+.k-item__title-link:focus-visible {
+    color: var(--k-accent);
+    text-decoration-color: currentColor;
+}
 .k-item__facts { display: block; font-size: 0.8rem; }
 .k-item__overview { display: block; max-width: 70ch; margin: 18px 0; font-size: 0.88rem; line-height: 1.55; white-space: pre-line; }
 .k-item__external-links { display: flex; gap: 12px; margin: 12px 0; font-size: 0.86rem; }
