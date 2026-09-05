@@ -1008,6 +1008,7 @@
     'normal', 'in_progress', 'watched', 'unavailable', 'selected', 'loading', 'missing_artwork'
   ]);
   const POSTER_ARTWORK_SHAPES = new Set(['portrait', 'landscape']);
+  const POSTER_TITLE_PLACEMENTS = new Set(['metadata', 'placeholder', 'hidden']);
   const LIBRARY_GRID_LAYOUTS = new Set(['portrait', 'landscape']);
   const POSTER_ACTIONS = {
     resume: {
@@ -1476,7 +1477,12 @@
     if (poster.detail != null && typeof poster.detail !== 'string') return null;
     if (poster.artworkLabel != null && typeof poster.artworkLabel !== 'string') return null;
     if (poster.progressPercent != null && (!Number.isInteger(poster.progressPercent) || poster.progressPercent < 0 || poster.progressPercent > 100)) return null;
-    if (typeof poster.state !== 'string' || !POSTER_STATES.has(poster.state)) return null;
+    const state = poster.state;
+    if (typeof state !== 'string' || !POSTER_STATES.has(state)) return null;
+    const titlePlacement = poster.titlePlacement ?? (
+      state === 'missing_artwork' ? 'placeholder' : 'metadata'
+    );
+    if (typeof titlePlacement !== 'string' || !POSTER_TITLE_PLACEMENTS.has(titlePlacement)) return null;
     if (poster.watched != null && typeof poster.watched !== 'boolean') return null;
     if (poster.partiallyWatched != null && typeof poster.partiallyWatched !== 'boolean') return null;
     if (poster.action != null && (
@@ -1490,11 +1496,12 @@
       artworkShape,
       mosaicUrls,
       placeholder,
+      titlePlacement,
       context: poster.context?.trim() || null,
       detail: poster.detail?.trim() || null,
       artworkLabel: poster.artworkLabel?.trim().slice(0, 80) || null,
       progressPercent: poster.progressPercent ?? null,
-      state: poster.state,
+      state,
       watched: poster.watched === true,
       partiallyWatched: poster.partiallyWatched === true,
       available: poster.available,
@@ -1518,9 +1525,11 @@
   const posterMarkup = (poster) => {
     const progress = poster.progressPercent == null ? '' :
       `<span class="k-progress" aria-label="Playback progress"><span class="k-progress__value" style="--k-progress:${poster.progressPercent}%"></span></span>`;
-    const placeholderLines = poster.placeholder.lines
-      .map((line) => `<span class="k-poster__fallback-line">${escapeHtml(line)}</span>`)
-      .join('');
+    const placeholderLines = poster.titlePlacement === 'placeholder'
+      ? poster.placeholder.lines
+        .map((line) => `<span class="k-poster__fallback-line">${escapeHtml(line)}</span>`)
+        .join('')
+      : '';
     const artworkLabel = poster.artworkLabel
       ? `<span class="k-poster__artwork-label"><span class="k-poster__artwork-label-banner" aria-hidden="true"></span><span class="k-poster__artwork-label-text">${escapeHtml(poster.artworkLabel)}</span></span>`
       : '';
@@ -1534,7 +1543,13 @@
       : mosaic || `<span class="k-poster__fallback" aria-hidden="true">${placeholderLines}</span>`;
     const status = posterStatusMarkup(poster);
     const context = poster.context ? `<span class="k-poster__context">${escapeHtml(poster.context)}</span>` : '';
+    const title = poster.titlePlacement === 'metadata'
+      ? `<span class="k-poster__title">${escapeHtml(poster.title)}</span>`
+      : '';
     const detail = poster.detail ? `<span class="k-poster__detail"><span class="k-poster__detail-text">${escapeHtml(poster.detail)}</span></span>` : '';
+    const metadata = context || title || detail
+      ? `<span class="k-poster__meta">${context}${title}${detail}</span>`
+      : '';
     const actionView = poster.action ? POSTER_ACTIONS[poster.action] : null;
     const action = actionView
       ? `<span class="k-poster__action k-poster__action--${poster.action}" aria-hidden="true"><span class="k-poster__action-content">${actionView.icon}<span class="k-poster__action-label">${actionView.label}</span></span></span>`
@@ -1545,7 +1560,7 @@
     const accessibleLabel = actionView ? `${actionView.label} ${posterLabel}` : posterLabel;
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}${artworkShapeClass}${actionClass}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
       <span class="k-poster__art">${artwork}${artworkLabel}${progress}${status}${action}</span>
-      <span class="k-poster__meta">${context}<span class="k-poster__title">${escapeHtml(poster.title)}</span>${detail}</span>
+      ${metadata}
     </a>`;
   };
 
@@ -1927,11 +1942,6 @@
       return label ? 'No ' + label.toLowerCase() + ' match these filters.' : 'No items match these filters.';
     }
 
-    endStatus() {
-      const label = this.resultLabel();
-      return label ? 'End of ' + label.toLowerCase() + '.' : 'End of library.';
-    }
-
     maximumMountedPosters() {
       const requested = Number(this.getAttribute('max-mounted'));
       if (!Number.isSafeInteger(requested) || requested < 1) return MAX_MOUNTED_POSTERS;
@@ -2197,15 +2207,13 @@
         this.nextStatus.textContent = this.emptyStatus();
         return;
       }
-      this.nextStatus.textContent = this.pageStatus(this.edgeCursor(LibraryPageDirection.NEXT));
+      this.nextStatus.textContent = this.invalidPosterStatus();
     }
 
-    pageStatus(nextCursor) {
-      const invalid = this.invalidPosterCount
+    invalidPosterStatus() {
+      return this.invalidPosterCount
         ? String(this.invalidPosterCount) + ' item' + (this.invalidPosterCount === 1 ? '' : 's') + ' could not be displayed.'
         : '';
-      if (nextCursor !== null) return invalid;
-      return invalid ? invalid + ' ' + this.endStatus() : this.endStatus();
     }
 
     showFailure(direction, failure) {
@@ -2672,7 +2680,7 @@
         } else {
           this.grid.insertAdjacentHTML('beforeend', collections.map(collectionMarkup).join(''));
           this.trimMountedCollections();
-          this.status.textContent = payload.nextCursor ? '' : 'End of collections.';
+          this.status.textContent = '';
         }
         this.cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
         this.done = this.cursor === null;

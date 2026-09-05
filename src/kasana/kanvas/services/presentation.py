@@ -16,6 +16,7 @@ from kasana.kanvas.viewmodels.library import (
     ArtworkShape,
     PlaceholderArtView,
     PosterState,
+    PosterTitlePlacement,
     PosterView,
 )
 from kasana.katalog.public import (
@@ -268,9 +269,11 @@ def poster_from_summary(
 
     title = display_title(item)
     poster_url = primary_artwork_url(item)
+    has_artwork = poster_url is not None
+    artwork_label = item.context_label if item.show_artwork_label else None
     state = poster_state(
         available=item.availability is Availability.AVAILABLE,
-        has_artwork=poster_url is not None,
+        has_artwork=has_artwork,
         playback=playback,
         selected=selected,
         loading=loading,
@@ -287,6 +290,9 @@ def poster_from_summary(
     return PosterView(
         id=item.id,
         title=title,
+        titlePlacement=_poster_title_placement(
+            item, title, has_artwork=has_artwork, artwork_label=artwork_label
+        ),
         context=(
             _non_redundant_poster_context(item.series_title, title)
             if include_series_context
@@ -296,7 +302,7 @@ def poster_from_summary(
         href=href if href is not None else f"/item/{item.id}",
         posterUrl=poster_url,
         artworkShape=artwork_shape_for_summary(item),
-        artworkLabel=item.context_label if item.show_artwork_label else None,
+        artworkLabel=artwork_label,
         placeholder=placeholder,
         progressPercent=progress,
         state=state,
@@ -314,6 +320,22 @@ def _non_redundant_poster_context(context: str | None, title: str) -> str | None
     normalised_context = " ".join(context.split()).casefold()
     normalised_title = " ".join(title.split()).casefold()
     return None if normalised_context == normalised_title else context
+
+
+def _poster_title_placement(
+    item: LibraryItemSummary, title: str, *, has_artwork: bool, artwork_label: str | None
+) -> PosterTitlePlacement:
+    """Place titles without repeating generated episode identifiers."""
+
+    if item.kind is not LibraryItemKind.EPISODE:
+        return PosterTitlePlacement.METADATA if has_artwork else PosterTitlePlacement.PLACEHOLDER
+    if not is_generic_episode_title(title, item.episode_number, item.series_title):
+        return PosterTitlePlacement.METADATA
+    if not has_artwork:
+        return PosterTitlePlacement.PLACEHOLDER
+    if artwork_label is not None:
+        return PosterTitlePlacement.HIDDEN
+    return PosterTitlePlacement.METADATA
 
 
 def poster_state(

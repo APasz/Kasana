@@ -691,7 +691,7 @@ async function testValidPageRetainsAvailable() {
   assert.equal(instance.pages[0].items[0].available, true);
   assert.equal(instance.grid.children.length, 1);
   assert.equal(instance.requestId, 'request-123');
-  assert.equal(instance.nextStatus.textContent, 'End of library.');
+  assert.equal(instance.nextStatus.textContent, '');
 }
 
 function testPosterArtworkLabelNormalisation() {
@@ -727,6 +727,50 @@ function testPosterArtworkLabelMarkup() {
   );
   assert.match(markup, /aria-label="Bad Boys — Remastered"/);
   assert.equal((markup.match(/class="k-poster__artwork-label"/g) || []).length, 1);
+}
+
+function testPosterTitlePlacementMarkup() {
+  const namedWithoutArtwork = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(14),
+    title: 'Iliad',
+    posterUrl: null,
+    state: 'missing_artwork',
+    titlePlacement: 'metadata'
+  });
+  const genericWithoutArtwork = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(15),
+    title: 'S02E10',
+    posterUrl: null,
+    state: 'missing_artwork',
+    placeholder: {lines: ['Episode 10']},
+    titlePlacement: 'placeholder'
+  });
+  const genericWithArtwork = globalThis.__libraryTest.normalisePoster({
+    ...validPoster(16),
+    title: 'S02E10',
+    artworkLabel: 'S02 E10',
+    titlePlacement: 'hidden'
+  });
+
+  assert.equal(globalThis.__libraryTest.normalisePoster(validPoster(17)).titlePlacement, 'metadata');
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({
+      ...validPoster(18), posterUrl: null, state: 'missing_artwork'
+    }).titlePlacement,
+    'placeholder'
+  );
+  assert.match(globalThis.__libraryTest.posterMarkup(namedWithoutArtwork), /class="k-poster__title">Iliad/);
+  assert.doesNotMatch(globalThis.__libraryTest.posterMarkup(namedWithoutArtwork), /k-poster__fallback-line/);
+  assert.doesNotMatch(globalThis.__libraryTest.posterMarkup(genericWithoutArtwork), /class="k-poster__title"/);
+  assert.match(globalThis.__libraryTest.posterMarkup(genericWithoutArtwork), /k-poster__fallback-line">Episode 10/);
+  assert.doesNotMatch(globalThis.__libraryTest.posterMarkup(genericWithArtwork), /class="k-poster__title"/);
+  assert.match(globalThis.__libraryTest.posterMarkup(genericWithArtwork), /aria-label="S02E10 — S02 E10"/);
+  const stylesheet = fs.readFileSync('src/kasana/kanvas/static/kanvas.css', 'utf8');
+  assert.doesNotMatch(stylesheet, /\.k-poster--missing_artwork \.k-poster__title \{ display: none; \}/);
+  assert.equal(
+    globalThis.__libraryTest.normalisePoster({...validPoster(19), titlePlacement: 'overlay'}),
+    null
+  );
 }
 
 function testPosterPartialWatchNormalisation() {
@@ -2281,6 +2325,7 @@ async function main() {
   await testValidPageRetainsAvailable();
   testPosterArtworkLabelNormalisation();
   testPosterArtworkLabelMarkup();
+  testPosterTitlePlacementMarkup();
   testPosterPartialWatchNormalisation();
   testLandscapePosterMarkup();
   testLibraryFilterUrlKeepsOnlyActiveUrlState();

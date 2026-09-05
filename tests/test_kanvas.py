@@ -176,6 +176,7 @@ from kasana.kanvas.viewmodels.library import (
     PlaceholderArtView,
     PosterAction,
     PosterState,
+    PosterTitlePlacement,
     PosterView,
 )
 from kasana.katalog.public import (
@@ -686,6 +687,65 @@ def test_poster_artwork_label_can_be_hidden_per_item() -> None:
         ).footer
         is None
     )
+
+
+def test_episode_poster_title_placement_avoids_repeated_identifiers() -> None:
+    still = ArtworkSelection(
+        id=8,
+        kind=ArtworkKind.STILL,
+        url="/api/v1/library/items/9/artwork/8",
+        content_type="image/jpeg",
+        size_bytes=4,
+    )
+    named_without_artwork = poster_from_summary(
+        _summary_with_title(
+            "Iliad",
+            kind=LibraryItemKind.EPISODE,
+            season_number=1,
+            episode_number=1,
+            series_title="Star Trek: Odyssey",
+            context_label="S01 E01",
+        )
+    )
+    generic_with_artwork = poster_from_summary(
+        _summary_with_title(
+            "S02E10",
+            kind=LibraryItemKind.EPISODE,
+            season_number=2,
+            episode_number=10,
+            series_title="The Last Ship",
+            context_label="S02 E10",
+            artwork=(still,),
+        )
+    )
+    generic_without_artwork = poster_from_summary(
+        _summary_with_title(
+            "S02E10",
+            kind=LibraryItemKind.EPISODE,
+            season_number=2,
+            episode_number=10,
+            series_title="The Last Ship",
+            context_label="S02 E10",
+        )
+    )
+    generic_without_label = poster_from_summary(
+        _summary_with_title(
+            "S02E10",
+            kind=LibraryItemKind.EPISODE,
+            season_number=2,
+            episode_number=10,
+            series_title="The Last Ship",
+            context_label="S02 E10",
+            show_artwork_label=False,
+            artwork=(still,),
+        )
+    )
+
+    assert named_without_artwork.title_placement is PosterTitlePlacement.METADATA
+    assert generic_with_artwork.title_placement is PosterTitlePlacement.HIDDEN
+    assert generic_without_artwork.title_placement is PosterTitlePlacement.PLACEHOLDER
+    assert generic_without_artwork.placeholder.lines == ("Episode 10",)
+    assert generic_without_label.title_placement is PosterTitlePlacement.METADATA
 
 
 async def test_item_detail_uses_a_landscape_still_for_an_episode(monkeypatch: MonkeyPatch) -> None:

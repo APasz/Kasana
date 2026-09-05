@@ -56,6 +56,14 @@ class PosterState(StrEnum):
     MISSING_ARTWORK = "missing_artwork"
 
 
+class PosterTitlePlacement(StrEnum):
+    """Choose how a poster title is visually presented."""
+
+    METADATA = "metadata"
+    PLACEHOLDER = "placeholder"
+    HIDDEN = "hidden"
+
+
 class PosterAction(StrEnum):
     """Explicit launch intents available on contextual Home posters."""
 
@@ -77,6 +85,9 @@ class PosterView(BaseModel):
 
     id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=1_000)
+    title_placement: PosterTitlePlacement = Field(
+        default=PosterTitlePlacement.METADATA, alias="titlePlacement"
+    )
     context: str | None = Field(default=None, max_length=200)
     detail: str | None = Field(default=None, max_length=200)
     href: str = Field(pattern=_POSTER_HREF_PATTERN)

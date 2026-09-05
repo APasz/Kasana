@@ -591,8 +591,6 @@ kanvas-poster:has(.k-poster--landscape) { width: clamp(190px, 22vw, 320px); }
 .k-poster--unavailable .k-poster__fallback,
 .k-poster--unavailable .k-poster__artwork-label { filter: grayscale(1); opacity: 0.48; }
 .k-poster--unavailable .k-poster__meta { opacity: 0.56; }
-.k-poster--missing_artwork .k-poster__title { display: none; }
-.k-poster--missing_artwork .k-poster__meta:has(.k-poster__title:only-child) { display: none; }
 .k-poster--selected .k-poster__art { border-color: var(--k-accent); }
 .k-poster--loading .k-poster__art { background: linear-gradient(110deg, var(--k-surface-1), var(--k-surface-active), var(--k-surface-1)); }
 
@@ -854,7 +852,7 @@ kanvas-poster:has(.k-poster--landscape) { width: clamp(190px, 22vw, 320px); }
 
 .k-grid-status--tail { margin-top: 14px; }
 .k-grid-status--head { min-height: 0; padding: 0; }
-.k-grid-status--head:empty { display: none; }
+.k-grid-status:empty { display: none; }
 
 kanvas-poster-grid,
 .k-library-results-section { display: block; min-width: 0; }
