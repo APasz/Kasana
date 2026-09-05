@@ -854,6 +854,11 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
             for element in client.elements.values()
             if "data-player-native-controls" in _element_props(element)
         ]
+        volume_boost_controls = [
+            element
+            for element in client.elements.values()
+            if "data-player-volume-boost" in _element_props(element)
+        ]
         volume_controls = [
             element
             for element in client.elements.values()
@@ -940,12 +945,18 @@ def test_browser_playback_card_contains_a_source_less_compatibility_player() -> 
     assert len(tooltips) == 1
     assert "hidden" in tooltips[0]._props  # pyright: ignore[reportPrivateUsage]
     assert len(native_controls) == 1
-    assert native_controls == context_toggles
+    assert len(volume_boost_controls) == 1
+    assert context_toggles == [native_controls[0], volume_boost_controls[0]]
     assert native_controls[0].tag == "input"
     assert _element_props(native_controls[0])["type"] == "checkbox"
     assert _element_props(native_controls[0])["role"] == "switch"
     assert "checked" not in _element_props(native_controls[0])
+    assert volume_boost_controls[0].tag == "input"
+    assert _element_props(volume_boost_controls[0])["type"] == "checkbox"
+    assert _element_props(volume_boost_controls[0])["role"] == "switch"
+    assert "checked" not in _element_props(volume_boost_controls[0])
     assert len(volume_controls) == 2
+    assert all(_element_props(control)["max"] == "1" for control in volume_controls)
     assert all(_element_props(control)["aria-valuetext"] == "100%" for control in volume_controls)
     assert len(volume_value_labels) == 2
     assert all(

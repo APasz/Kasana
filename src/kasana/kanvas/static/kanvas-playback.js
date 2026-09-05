@@ -23,6 +23,7 @@
       const subtitleFontScaleLabel = subtitleMenu?.querySelector('[data-player-subtitle-font-scale-label]');
       const subtitleAppearance = subtitleMenu?.querySelector('[data-player-subtitle-appearance]');
       const nativeControls = this.querySelector('[data-player-native-controls]');
+      const volumeBoostControl = this.querySelector('[data-player-volume-boost]');
       const autoplayNextControl = this.querySelector('[data-player-autoplay-next]');
       const autoplayNextOption = this.querySelector('[data-player-autoplay-next-option]');
       const mobileVolume = this.querySelector('[data-player-mobile-volume]');
@@ -54,7 +55,7 @@
       let subtitleBackground = this.getAttribute('subtitle-background') === 'true';
       let subtitleShadow = this.getAttribute('subtitle-shadow') === 'true';
       let subtitleVerticalPosition = this.getAttribute('subtitle-vertical-position') || 'author';
-      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !fullscreenFrameAlignment || !frameToggle || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
+      if (!video || !status || !controls || !timeline || !timelinePreview || !bufferedIndicator || !currentTime || !remainingTime || !volume || !contextMenu || !audioMenu || !subtitleMenu || !mobileMenu || !playerTooltip || !subtitleTimingLabel || !subtitleFontScaleLabel || !subtitleAppearance || !nativeControls || !volumeBoostControl || !mobileVolume || !fullscreenTitle || !fullscreenSpecialInfo || !fullscreenTime || !fullscreenFrameAlignment || !frameToggle || !sessionId || !Number.isSafeInteger(entryPosition) || entryPosition < 0 || !Number.isFinite(resumePosition) || !Number.isSafeInteger(subtitleTimingOffsetMilliseconds) || Math.abs(subtitleTimingOffsetMilliseconds) > 30000 || !Number.isSafeInteger(subtitleFontScalePercent) || subtitleFontScalePercent < 75 || subtitleFontScalePercent > 200 || subtitleFontScalePercent % 25 !== 0 || !['author', 'top', 'middle', 'bottom'].includes(subtitleVerticalPosition)) return;
       const frameAlignmentOptions = Array.from(
         fullscreenFrameAlignment.querySelectorAll('[data-player-frame-alignment-option]')
       ).filter((option) => option instanceof Element);
@@ -112,6 +113,7 @@
       let activeFullscreenFrameAxis = null;
       let hasQueuedNextItem = autoplayNextControl instanceof HTMLInputElement;
       let autoplayNext = hasQueuedNextItem && autoplayNextControl.checked;
+      let volumeBoostEnabled = volumeBoostControl.checked === true;
       let selectedAudioStream = Number(audioMenu.querySelector('[data-player-audio-stream][aria-pressed="true"]')?.getAttribute('data-player-audio-stream') || '0');
       let selectedSubtitleTrack = subtitleMenu.querySelector('[data-player-subtitle-track][aria-pressed="true"]')?.getAttribute('data-player-subtitle-track') || null;
       const profileSubtitlePreference = typeof document.querySelector === 'function'
@@ -872,20 +874,93 @@
         return duration * ratio;
       };
       const volumeControls = [volume, mobileVolume];
-      let lastAudibleVolume = video.volume > 0 ? video.volume : 1;
+      const minimumPlayerVolume = 0;
+      const standardMaximumPlayerVolume = 1;
+      const boostedMaximumPlayerVolume = 2;
+      const playerVolumeComparisonTolerance = 0.0001;
+      const maximumPlayerVolume = () => (
+        volumeBoostEnabled ? boostedMaximumPlayerVolume : standardMaximumPlayerVolume
+      );
+      const clampPlayerVolume = (value, maximum = maximumPlayerVolume()) => (
+        Math.min(Math.max(value, minimumPlayerVolume), maximum)
+      );
+      // A media element can only be routed through one Web Audio source, so keep
+      // its graph for the lifetime of the element rather than recreating it on reconnect.
+      let volumeAudio = this._volumeAudio ?? null;
+      const disposeVolumeAudio = () => {
+        if (volumeAudio === null) return;
+        const audio = volumeAudio;
+        volumeAudio = null;
+        if (this._volumeAudio === audio) this._volumeAudio = null;
+        audio.source.disconnect();
+        audio.gain.disconnect();
+        if (audio.context.state !== 'closed') void audio.context.close().catch(() => {});
+      };
+      if (volumeAudio?.video !== video) disposeVolumeAudio();
+      const initialPlayerVolume = volumeAudio?.video === video
+        && volumeAudio.gain.gain.value > standardMaximumPlayerVolume
+        ? volumeAudio.gain.gain.value
+        : video.volume;
+      let playerVolume = clampPlayerVolume(initialPlayerVolume);
+      let lastAudibleVolume = playerVolume > minimumPlayerVolume
+        ? playerVolume
+        : standardMaximumPlayerVolume;
+      const resumeVolumeAudio = () => {
+        if (
+          volumeAudio === null
+          || volumeAudio.context.state === 'running'
+          || volumeAudio.context.state === 'closed'
+        ) return;
+        void volumeAudio.context.resume().catch(() => {});
+      };
+      const applyVolumeGain = () => {
+        if (volumeAudio === null) return;
+        volumeAudio.gain.gain.value = Math.max(playerVolume, standardMaximumPlayerVolume);
+      };
+      const initialiseVolumeBoost = () => {
+        if (volumeAudio !== null) {
+          if (volumeAudio.context.state === 'closed') return false;
+          resumeVolumeAudio();
+          return true;
+        }
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (typeof AudioContextConstructor !== 'function') return false;
+        let audioContext = null;
+        let audioSource = null;
+        let gainNode = null;
+        try {
+          audioContext = new AudioContextConstructor();
+          audioSource = audioContext.createMediaElementSource(video);
+          gainNode = audioContext.createGain();
+          audioSource.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+          volumeAudio = {context: audioContext, gain: gainNode, source: audioSource, video};
+          this._volumeAudio = volumeAudio;
+          applyVolumeGain();
+          resumeVolumeAudio();
+          return true;
+        } catch (_) {
+          audioSource?.disconnect();
+          gainNode?.disconnect();
+          if (audioContext !== null) void audioContext.close().catch(() => {});
+          return false;
+        }
+      };
       const setPlayerVolume = (value) => {
-        const volumeLevel = Math.min(Math.max(value, 0), 1);
-        video.volume = volumeLevel;
-        if (volumeLevel > 0) lastAudibleVolume = volumeLevel;
-        video.muted = volumeLevel === 0;
+        playerVolume = clampPlayerVolume(value);
+        video.volume = Math.min(playerVolume, standardMaximumPlayerVolume);
+        applyVolumeGain();
+        resumeVolumeAudio();
+        if (playerVolume > minimumPlayerVolume) lastAudibleVolume = playerVolume;
+        video.muted = playerVolume === minimumPlayerVolume;
       };
       const togglePlayerMute = () => {
-        if (video.muted || video.volume === 0) {
-          if (video.volume === 0) video.volume = lastAudibleVolume;
+        if (video.muted || playerVolume === minimumPlayerVolume) {
+          if (playerVolume === minimumPlayerVolume) setPlayerVolume(lastAudibleVolume);
           video.muted = false;
           return;
         }
-        lastAudibleVolume = video.volume;
+        lastAudibleVolume = playerVolume;
         video.muted = true;
       };
       const isTheatreMode = () => this.hasAttribute('data-player-theatre-mode');
@@ -902,8 +977,8 @@
         currentTime.textContent = formatTime(position);
         remainingTime.textContent = `-${formatTime(Math.max(duration - position, 0))}`;
         updateActionPresentation('toggle', video.paused ? 'Play' : 'Pause', !video.paused);
-        if (!video.muted && video.volume > 0) lastAudibleVolume = video.volume;
-        const muted = video.muted || video.volume === 0;
+        if (!video.muted && playerVolume > minimumPlayerVolume) lastAudibleVolume = playerVolume;
+        const muted = video.muted || playerVolume === minimumPlayerVolume;
         updateActionPresentation('mute', muted ? 'Unmute' : 'Mute', muted);
         const theatreMode = isTheatreMode();
         updateActionPresentation(
@@ -918,11 +993,13 @@
           const rate = Number(option.getAttribute('data-player-rate'));
           option.setAttribute('aria-pressed', String(Math.abs(rate - video.playbackRate) < 0.01));
         });
-        const volumeLevel = muted ? 0 : video.volume;
-        const volumePercent = volumeLevel * 100;
+        const volumeLevel = muted ? minimumPlayerVolume : playerVolume;
+        const volumeMaximum = maximumPlayerVolume();
+        const volumePercent = (volumeLevel / volumeMaximum) * 100;
         const volumePercentage = Math.round(volumeLevel * 100);
         const volumeText = `${volumePercentage}%`;
         volumeControls.forEach((volumeControl) => {
+          volumeControl.max = String(volumeMaximum);
           volumeControl.value = String(volumeLevel);
           volumeControl.setAttribute('aria-valuetext', volumeText);
           volumeControl.style.setProperty('--volume-percent', `${volumePercent}%`);
@@ -1501,15 +1578,50 @@
         const position = Number(timeline.value);
         if (Number.isFinite(position)) void restartGeneratedStream(position);
       });
-      volumeControls.forEach((volumeControl) => {
-        volumeControl.addEventListener('input', () => {
-          showPlayerControls();
-          const nextVolume = Number(volumeControl.value);
-          if (!Number.isFinite(nextVolume)) return;
-          setPlayerVolume(nextVolume);
-          updateControls();
-        });
+      const onVolumeInput = (volumeControl) => {
+        showPlayerControls();
+        const nextVolume = Number(volumeControl.value);
+        if (!Number.isFinite(nextVolume)) return;
+        setPlayerVolume(nextVolume);
+        updateControls();
+      };
+      const volumeInputHandlers = volumeControls.map((volumeControl) => {
+        const handler = () => { onVolumeInput(volumeControl); };
+        volumeControl.addEventListener('input', handler);
+        return [volumeControl, handler];
       });
+      const setVolumeBoostEnabled = (enabled) => {
+        volumeBoostEnabled = enabled;
+        if (!volumeBoostEnabled && playerVolume > standardMaximumPlayerVolume) {
+          setPlayerVolume(standardMaximumPlayerVolume);
+        } else {
+          applyVolumeGain();
+        }
+        resumeVolumeAudio();
+        updateControls();
+      };
+      const onVolumeBoostChange = () => {
+        const shouldEnableVolumeBoost = volumeBoostControl.checked;
+        if (shouldEnableVolumeBoost && !initialiseVolumeBoost()) {
+          volumeBoostControl.checked = false;
+          setVolumeBoostEnabled(false);
+          status.textContent = 'Volume boost is unavailable in this browser.';
+        } else {
+          setVolumeBoostEnabled(shouldEnableVolumeBoost);
+        }
+        dismissPlayerPopups(true);
+      };
+      volumeBoostControl.addEventListener('change', onVolumeBoostChange);
+      const onVideoVolumeChange = () => {
+        const nativeVolume = clampPlayerVolume(video.volume, standardMaximumPlayerVolume);
+        const expectedNativeVolume = Math.min(playerVolume, standardMaximumPlayerVolume);
+        if (Math.abs(nativeVolume - expectedNativeVolume) > playerVolumeComparisonTolerance) {
+          playerVolume = nativeVolume;
+          applyVolumeGain();
+        }
+        updateControls();
+      };
+      video.addEventListener('volumechange', onVideoVolumeChange);
       nativeControls.addEventListener('change', () => {
         video.controls = nativeControls.checked;
         dismissPlayerPopups(true);
@@ -1606,7 +1718,12 @@
         mobileMenu.removeEventListener('click', onPlayerControlClick);
         frameToggle.removeEventListener('click', onPlayerControlClick);
         fullscreenFrameAlignment.removeEventListener('click', onFullscreenFrameAlignmentClick);
+        volumeInputHandlers.forEach(([volumeControl, handler]) => {
+          volumeControl.removeEventListener('input', handler);
+        });
+        volumeBoostControl.removeEventListener('change', onVolumeBoostChange);
         frameToggleResizeObserver?.disconnect();
+        video.removeEventListener('volumechange', onVideoVolumeChange);
         video.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen);
         video.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen);
         video.removeEventListener('resize', synchroniseFullscreenFrameAlignment);
@@ -1644,6 +1761,7 @@
       });
       video.addEventListener('play', () => {
         clearSelectPlayStatus();
+        resumeVolumeAudio();
         updateControls();
         showPlayerControls();
       });
@@ -1653,7 +1771,6 @@
         showPlayerControls();
       });
       video.addEventListener('ratechange', updateControls);
-      video.addEventListener('volumechange', updateControls);
       const onFullscreenChange = () => {
         const playerFullscreen = isPlayerFullscreen();
         updateControls();
@@ -1776,7 +1893,13 @@
         }
       });
       window.addEventListener('pagehide', flushProgressOnPageHide);
-      updateControls();
+      if (volumeBoostEnabled && !initialiseVolumeBoost()) {
+        volumeBoostControl.checked = false;
+        setVolumeBoostEnabled(false);
+        status.textContent = 'Volume boost is unavailable in this browser.';
+      } else {
+        setVolumeBoostEnabled(volumeBoostEnabled);
+      }
       showPlayerControls();
       updateFrameToggleSize();
       synchroniseFullscreenFrameAlignment();

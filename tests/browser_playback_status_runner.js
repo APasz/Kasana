@@ -195,6 +195,59 @@ class FakeTimeRanges {
   }
 }
 
+class FakeAudioNode {
+  constructor() {
+    this.connections = [];
+  }
+
+  connect(destination) {
+    this.connections.push(destination);
+    return destination;
+  }
+
+  disconnect() {
+    this.connections = [];
+  }
+}
+
+const audioContexts = [];
+const connectedMediaElements = new WeakSet();
+
+class FakeAudioContext {
+  constructor() {
+    this.destination = new FakeAudioNode();
+    this.gainNode = null;
+    this.state = 'running';
+    audioContexts.push(this);
+  }
+
+  close() {
+    this.state = 'closed';
+    return Promise.resolve();
+  }
+
+  createGain() {
+    this.gainNode = new FakeAudioNode();
+    this.gainNode.gain = {value: 1};
+    return this.gainNode;
+  }
+
+  createMediaElementSource(mediaElement) {
+    if (connectedMediaElements.has(mediaElement)) {
+      throw new Error('Media element is already connected to an audio source.');
+    }
+    connectedMediaElements.add(mediaElement);
+    const source = new FakeAudioNode();
+    source.mediaElement = mediaElement;
+    return source;
+  }
+
+  resume() {
+    this.state = 'running';
+    return Promise.resolve();
+  }
+}
+
 global.Element = FakeElement;
 global.HTMLElement = FakeElement;
 global.HTMLAnchorElement = FakeElement;
@@ -247,6 +300,7 @@ let nextIntervalId = 1;
 const assignedLocations = [];
 const replacedLocations = [];
 global.window = {
+  AudioContext: FakeAudioContext,
   addEventListener(name, listener) {
     const listeners = windowListeners.get(name) || [];
     listeners.push(listener);
@@ -478,6 +532,8 @@ function createPlayer({
   const subtitleFontScaleLabel = new FakeElement();
   const subtitleAppearance = new FakeElement();
   const nativeControls = new FakeElement();
+  const volumeBoostControl = new FakeElement();
+  volumeBoostControl.checked = false;
   const autoplayNextOption = hasQueuedItem ? new FakeElement() : null;
   const autoplayNextControl = hasQueuedItem ? new FakeElement() : null;
   if (autoplayNextOption) autoplayNextOption.hidden = false;
@@ -522,6 +578,7 @@ function createPlayer({
     ['[data-player-mobile-menu]', mobileMenu],
     ['[data-player-tooltip-host]', playerTooltip],
     ['[data-player-native-controls]', nativeControls],
+    ['[data-player-volume-boost]', volumeBoostControl],
     ['[data-player-autoplay-next]', autoplayNextControl],
     ['[data-player-autoplay-next-option]', autoplayNextOption],
     ['[data-player-fullscreen-title]', fullscreenTitle],
@@ -655,6 +712,8 @@ function createPlayer({
     timingEarlier,
     theatreControl,
     toggleControl,
+    volume,
+    volumeBoostControl,
     volumeValue,
     video
   };
@@ -773,6 +832,103 @@ async function testMobileOverflowKeepsSecondaryPlaybackControlsTogether() {
   document.emit('pointerdown', {target: new FakeElement()});
   assert.equal(mobileMenu.hidden, true);
   assert.equal(overflowControl.getAttribute('aria-expanded'), 'false');
+}
+
+async function testVolumeBoostExtendsTheRangeAndClampsWhenDisabled() {
+  audioContexts.length = 0;
+  const {
+    mobileVolume,
+    mobileVolumeValue,
+    player,
+    video,
+    volume,
+    volumeBoostControl,
+    volumeValue,
+  } = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(volumeBoostControl.checked, false);
+  assert.equal(volume.max, '1');
+  assert.equal(mobileVolume.max, '1');
+
+  volume.value = '0.4';
+  volume.emit('input');
+  assert.equal(video.volume, 0.4);
+
+  volumeBoostControl.checked = true;
+  volumeBoostControl.emit('change');
+  assert.equal(video.volume, 0.4);
+  assert.equal(volume.value, '0.4');
+  assert.equal(mobileVolume.value, '0.4');
+  assert.equal(volume.max, '2');
+  assert.equal(mobileVolume.max, '2');
+  assert.equal(audioContexts.length, 1);
+  assert.equal(audioContexts[0].gainNode.gain.value, 1);
+
+  volume.value = '1.5';
+  volume.emit('input');
+  assert.equal(video.volume, 1);
+  assert.equal(audioContexts[0].gainNode.gain.value, 1.5);
+  assert.equal(volumeValue.textContent, '150%');
+  assert.equal(mobileVolumeValue.textContent, '150%');
+
+  volumeBoostControl.checked = false;
+  volumeBoostControl.emit('change');
+  assert.equal(video.volume, 1);
+  assert.equal(audioContexts[0].gainNode.gain.value, 1);
+  assert.equal(volume.value, '1');
+  assert.equal(mobileVolume.value, '1');
+  assert.equal(volume.max, '1');
+  assert.equal(mobileVolume.max, '1');
+  assert.equal(volumeValue.textContent, '100%');
+  assert.equal(mobileVolumeValue.textContent, '100%');
+}
+
+async function testVolumeBoostSurvivesAPlayerReconnect() {
+  audioContexts.length = 0;
+  const {player, video, volume, volumeBoostControl, volumeValue} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  volumeBoostControl.checked = true;
+  volumeBoostControl.emit('change');
+  volume.value = '1.5';
+  volume.emit('input');
+  const audioContext = audioContexts[0];
+
+  player.disconnectedCallback();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(audioContexts.length, 1);
+  assert.equal(audioContext.state, 'running');
+  assert.equal(video.volume, 1);
+  assert.equal(volume.max, '2');
+  assert.equal(volumeValue.textContent, '150%');
+  assert.equal(volume.listeners.get('input').length, 1);
+  assert.equal(volumeBoostControl.listeners.get('change').length, 1);
+  assert.equal(video.listeners.get('volumechange').length, 1);
+
+  audioContext.state = 'suspended';
+  volume.value = '2';
+  volume.emit('input');
+  assert.equal(audioContext.gainNode.gain.value, 2);
+  assert.equal(audioContext.state, 'running');
+
+  player.disconnectedCallback();
+  await nextTick();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(audioContexts.length, 1);
+  assert.equal(audioContext.state, 'running');
+  assert.equal(audioContext.gainNode.gain.value, 2);
+  assert.equal(volumeValue.textContent, '200%');
 }
 
 async function testPlayerPopupsShareToggleAndDismissalRules() {
@@ -1793,6 +1949,8 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testBufferedRangeMarksTheTimelineEdges();
   await testTimelinePreviewTracksHoverAndDrag();
   await testMobileOverflowKeepsSecondaryPlaybackControlsTogether();
+  await testVolumeBoostExtendsTheRangeAndClampsWhenDisabled();
+  await testVolumeBoostSurvivesAPlayerReconnect();
   await testPlayerPopupsShareToggleAndDismissalRules();
   await testTheatreModeExpandsThePlayerAndUpdatesBothControls();
   await testPlayerTooltipsFollowTheCurrentButtonState();

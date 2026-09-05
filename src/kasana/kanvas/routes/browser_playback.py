@@ -650,7 +650,7 @@ def render_browser_playback_card(
             .classes("k-player__context-menu")
             .props('data-player-context-menu role="group" aria-label="Playback settings" hidden')
         ):
-            ui.label("Playback speed").classes("k-player__menu-heading")
+            ui.label("Playback").classes("k-player__menu-heading")
             with ui.element("div").classes("k-player__speed-options"):
                 for rate in _PLAYBACK_RATES:
                     with (
@@ -662,6 +662,10 @@ def render_browser_playback_card(
             _player_context_toggle(
                 "Show browser controls",
                 "data-player-native-controls",
+            )
+            _player_context_toggle(
+                "Increase max volume",
+                "data-player-volume-boost",
             )
             if has_queued_item:
                 _player_context_toggle(
