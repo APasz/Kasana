@@ -139,7 +139,7 @@ def test_item_discovery_commands_emit_playback_ids(tmp_path: Path) -> None:
     assert items.exit_code == 0, items.output
     assert json.loads(items.output) == [
         {
-            "availability": "available",
+            "availability": "unavailable",
             "id": movie_id,
             "kind": "movie",
             "title": "CLI Film",

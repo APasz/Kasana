@@ -30,6 +30,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine.result import Result
 from sqlalchemy.engine.row import Row
 from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from kasana.katalog.api.contracts import (
     ArtworkKind,
@@ -208,6 +209,8 @@ from kasana.katalog.services import (
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
     clear_playback_items,
+    effective_item_availabilities,
+    effective_item_availability,
     mark_playback_items_watched,
     normalise_library_item_tags,
     record_playback_progress,
@@ -1150,7 +1153,7 @@ class KatalogQueryService:
             rows: tuple[Zaisan, ...] = tuple[Zaisan, ...](
                 session.scalars(
                     select(Zaisan)
-                    .where(Zaisan.availability == AvailabilityState.AVAILABLE)
+                    .where(_effective_availability_condition(AvailabilityState.AVAILABLE))
                     .order_by(Zaisan.added_at.desc(), Zaisan.id.desc())
                 ).all()
             )
@@ -1371,9 +1374,8 @@ class KatalogQueryService:
                 or item.availability is not AvailabilityState.AVAILABLE
             ):
                 return ()
-            return tuple(
-                _media_summary(media_file)
-                for media_file in session.scalars(
+            media_files = tuple(
+                session.scalars(
                     select(MediaFile)
                     .where(
                         MediaFile.library_item_id == item.id,
@@ -1382,6 +1384,16 @@ class KatalogQueryService:
                     .order_by(MediaFile.id)
                 )
             )
+            if (
+                effective_item_availability(
+                    item.item_kind,
+                    item.availability,
+                    has_available_media=bool(media_files),
+                )
+                is not AvailabilityState.AVAILABLE
+            ):
+                return ()
+            return tuple(_media_summary(media_file) for media_file in media_files)
 
         return self._database.run_transaction(load)
 
@@ -4215,7 +4227,14 @@ def _planned_entry_from_media_files(
 ) -> _PlannedPlaybackEntry:
     if item.item_kind not in PLAYABLE_ITEM_KINDS:
         raise CatalogueValidationError(f"{item.item_kind.value} items are not playable.")
-    if item.availability is not AvailabilityState.AVAILABLE:
+    if (
+        effective_item_availability(
+            item.item_kind,
+            item.availability,
+            has_available_media=bool(media_files),
+        )
+        is not AvailabilityState.AVAILABLE
+    ):
         raise CatalogueValidationError(f"Library item {item.id} is unavailable.")
     for media_file in media_files:
         if Path(media_file.absolute_path).is_file():
@@ -4230,7 +4249,14 @@ def _planned_entry_from_media_files(
 def _watch_order_entry_is_unavailable(item: Zaisan, media_files: tuple[MediaFile, ...]) -> bool:
     """Identify entries a user may explicitly skip without masking invalid ordering."""
 
-    if item.availability is not AvailabilityState.AVAILABLE:
+    if (
+        effective_item_availability(
+            item.item_kind,
+            item.availability,
+            has_available_media=bool(media_files),
+        )
+        is not AvailabilityState.AVAILABLE
+    ):
         return True
     if item.item_kind not in PLAYABLE_ITEM_KINDS:
         return False
@@ -4477,6 +4503,40 @@ def _edit_audit(event: LibraryItemEditEvent) -> LibraryItemEditAudit:
     )
 
 
+def _effective_availability_condition(availability: AvailabilityState) -> ColumnElement[bool]:
+    """Build the SQL counterpart to :func:`effective_item_availability`."""
+
+    available_media_exists = (
+        select(MediaFile.id)
+        .where(
+            MediaFile.library_item_id == Zaisan.id,
+            MediaFile.availability == AvailabilityState.AVAILABLE,
+        )
+        .exists()
+    )
+    match availability:
+        case AvailabilityState.AVAILABLE:
+            return and_(
+                Zaisan.availability == AvailabilityState.AVAILABLE,
+                or_(
+                    Zaisan.item_kind.not_in(tuple(PLAYABLE_ITEM_KINDS)),
+                    available_media_exists,
+                ),
+            )
+        case AvailabilityState.UNAVAILABLE:
+            return or_(
+                Zaisan.availability == AvailabilityState.UNAVAILABLE,
+                and_(
+                    Zaisan.availability == AvailabilityState.AVAILABLE,
+                    Zaisan.item_kind.in_(tuple(PLAYABLE_ITEM_KINDS)),
+                    ~available_media_exists,
+                ),
+            )
+        case AvailabilityState.MISSING:
+            return Zaisan.availability == AvailabilityState.MISSING
+    raise AssertionError(f"Unsupported availability state: {availability!r}")
+
+
 def _apply_item_filters(
     statement: Select[tuple[Zaisan]], filters: LibraryItemFilters
 ) -> Select[tuple[Zaisan]]:
@@ -4488,7 +4548,7 @@ def _apply_item_filters(
         statement = statement.where(Zaisan.release_year == filters.year)
     if filters.availability is not None:
         statement = statement.where(
-            Zaisan.availability == AvailabilityState(filters.availability.value)
+            _effective_availability_condition(AvailabilityState(filters.availability.value))
         )
     if filters.collection_id is not None:
         statement = statement.join(CollectionKin).where(
@@ -4636,7 +4696,12 @@ def _child_cursor_values(item: Zaisan) -> dict[str, str | int | float]:
     }
 
 
-def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, LibraryItemSummary]:
+def _summaries_for(
+    session: Session,
+    items: tuple[Zaisan, ...],
+    *,
+    availability_by_item_id: Mapping[int, AvailabilityState] | None = None,
+) -> dict[int, LibraryItemSummary]:
     if not items:
         return {}
     item_ids = tuple(item.id for item in items)
@@ -4645,6 +4710,11 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
         root.id: _root_effective_tags(root)
         for root in session.scalars(select(Kura).where(Kura.id.in_(root_ids)))
     }
+    effective_availability_by_item_id = (
+        effective_item_availabilities(session, items)
+        if availability_by_item_id is None
+        else availability_by_item_id
+    )
     first_media_paths = _first_media_paths_for(session, item_ids)
     parent_items, grandparent_items = _summary_ancestors(session, items)
     artworks: dict[int, list[ArtworkSelection]] = {item_id: [] for item_id in item_ids}
@@ -4686,7 +4756,7 @@ def _summaries_for(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Lib
             series_title=_series_title_for_summary(item, parent_items, grandparent_items),
             context_label=_context_label_for_summary(item, first_media_paths.get(item.id)),
             show_artwork_label=item.show_artwork_label,
-            availability=Availability(item.availability.value),
+            availability=Availability(effective_availability_by_item_id[item.id].value),
             tags=tuple(sorted(root_tags[item.library_root_id] | frozenset(item.tags))),
             artwork=tuple(artworks[item.id][:MAX_ARTWORK_PER_ITEM]),
         )
@@ -5428,12 +5498,23 @@ def _watch_order_progress(session: Session, watch_order: Keiro, user_id: int) ->
     )
     completed_entry_count = len(rows) - len(incomplete)
     next_item = incomplete[0] if incomplete else None
-    summaries = _summaries_for(session, (next_item,)) if next_item is not None else {}
+    availability_by_item_id = effective_item_availabilities(
+        session, tuple(item for _, item in rows)
+    )
+    summaries = (
+        _summaries_for(
+            session,
+            (next_item,),
+            availability_by_item_id=availability_by_item_id,
+        )
+        if next_item is not None
+        else {}
+    )
     return WatchOrderProgress(
         completed_entry_count=completed_entry_count,
         progress_percent=(round(completed_entry_count / len(rows) * 100) if rows else 0),
         unavailable_entry_count=sum(
-            item.availability is not AvailabilityState.AVAILABLE for _, item in rows
+            availability_by_item_id[item.id] is not AvailabilityState.AVAILABLE for _, item in rows
         ),
         next_item=summaries.get(next_item.id) if next_item is not None else None,
     )
@@ -5643,8 +5724,11 @@ def _generated_watch_order_items(
     undated = [item for item in unique if _generation_date(item, mode) is None]
     dated.sort(key=lambda item: (_generation_date(item, mode), item.sort_title.casefold(), item.id))
     undated.sort(key=lambda item: (item.sort_title.casefold(), item.id))
+    availability_by_item_id = effective_item_availabilities(session, tuple(unique))
     unavailable = tuple(
-        item for item in unique if item.availability is not AvailabilityState.AVAILABLE
+        item
+        for item in unique
+        if availability_by_item_id[item.id] is not AvailabilityState.AVAILABLE
     )
     return _GeneratedWatchOrderItems(
         items=tuple(dated + undated),

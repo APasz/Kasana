@@ -36,7 +36,7 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.services import create_library_item, create_library_root
+from kasana.katalog.services import attach_media_file, create_library_item, create_library_root
 
 
 def _queries(database: KatalogDatabase, tmp_path: Path) -> KatalogQueryService:
@@ -109,6 +109,19 @@ def _library(database: KatalogDatabase, tmp_path: Path) -> dict[str, int]:
             title="Season 2",
             season_number=2,
         )
+        for item, filename in (
+            (movie, "movie.mkv"),
+            (first_episode, "episode-one.mkv"),
+            (second_episode, "episode-two.mkv"),
+        ):
+            attach_media_file(
+                session,
+                library_item_id=item.id,
+                absolute_path=tmp_path / filename,
+                size_bytes=1,
+                mtime_ns=0,
+                container="matroska",
+            )
         return {
             "movie": movie.id,
             "series": series.id,

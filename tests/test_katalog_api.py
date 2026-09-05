@@ -43,6 +43,7 @@ from kasana.katalog.models import (
     KeiroKind,
     MaintenanceJob,
     MaintenanceJobStatus,
+    MediaFile,
     MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
@@ -379,6 +380,69 @@ async def test_library_pagination_is_stable_and_filters_are_server_side(
     ] == ["Alpha", "Beta", "Gamma"]
     recently_added = await api_fixture.client.get("/api/v1/library/recently-added")
     assert "previous_cursor" not in recently_added.json()
+
+
+async def test_item_availability_is_derived_from_available_media_versions(
+    api_fixture: ApiFixture,
+) -> None:
+    alternative_path = api_fixture.settings.database_path.parent / "alpha-alternative.mkv"
+    alternative_path.write_bytes(b"alternative media")
+    alternative_stat = alternative_path.stat()
+    with api_fixture.database.transaction() as session:
+        item = session.get(Zaisan, 1)
+        primary = session.scalar(select(MediaFile).where(MediaFile.library_item_id == 1))
+        assert item is not None and primary is not None
+        primary.availability = AvailabilityState.UNAVAILABLE
+        alternative = attach_media_file(
+            session,
+            library_item_id=item.id,
+            absolute_path=alternative_path,
+            size_bytes=alternative_stat.st_size,
+            mtime_ns=alternative_stat.st_mtime_ns,
+            container="matroska",
+        )
+        alternative_id = alternative.id
+
+    with_one_available_version = await api_fixture.client.get("/api/v1/library/items/1")
+    assert with_one_available_version.status_code == 200
+    assert with_one_available_version.json()["availability"] == "available"
+
+    with api_fixture.database.transaction() as session:
+        item = session.get(Zaisan, 1)
+        alternative = session.get(MediaFile, alternative_id)
+        assert item is not None and alternative is not None
+        assert item.availability is AvailabilityState.AVAILABLE
+        alternative.availability = AvailabilityState.UNAVAILABLE
+
+    unavailable_detail = await api_fixture.client.get("/api/v1/library/items/1")
+    unavailable_items = await api_fixture.client.get(
+        "/api/v1/library/items", params={"availability": "unavailable"}
+    )
+    available_items = await api_fixture.client.get(
+        "/api/v1/library/items", params={"availability": "available"}
+    )
+    download_options = await api_fixture.client.get("/api/v1/library/items/1/download-options")
+    collection = await api_fixture.client.get("/api/v1/collections/1", params={"user_id": 1})
+
+    assert unavailable_detail.status_code == 200
+    assert unavailable_detail.json()["availability"] == "unavailable"
+    assert 1 in {item["id"] for item in unavailable_items.json()["items"]}
+    assert 1 not in {item["id"] for item in available_items.json()["items"]}
+    assert download_options.json() == []
+    assert collection.json()["watch_orders"][0]["progress"]["unavailable_entry_count"] == 2
+
+    with api_fixture.database.transaction() as session:
+        alternative = session.get(MediaFile, alternative_id)
+        assert alternative is not None
+        alternative.availability = AvailabilityState.AVAILABLE
+
+    restored_detail = await api_fixture.client.get("/api/v1/library/items/1")
+    restored_collection = await api_fixture.client.get(
+        "/api/v1/collections/1", params={"user_id": 1}
+    )
+    assert restored_detail.status_code == 200
+    assert restored_detail.json()["availability"] == "available"
+    assert restored_collection.json()["watch_orders"][0]["progress"]["unavailable_entry_count"] == 1
 
 
 async def test_typed_client_keeps_the_single_kind_filter_shorthand(
@@ -882,12 +946,7 @@ async def test_recently_added_coalesces_new_series_activity_and_excludes_unavail
 
     assert response.status_code == 200
     payload = response.json()
-    assert [item["title"] for item in payload["items"]] == [
-        "New Series",
-        "New Movie",
-        "Beta",
-        "Alpha",
-    ]
+    assert [item["title"] for item in payload["items"]] == ["New Series", "Alpha"]
     assert payload["next_cursor"] is None
     assert len([item for item in payload["items"] if item["title"] == "New Series"]) == 1
 
@@ -1855,10 +1914,7 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             ]
             assert [
                 item.title for item in (await client.recently_added_catalogue_items()).items
-            ] == [
-                "Beta",
-                "Alpha",
-            ]
+            ] == ["Alpha"]
             assert (await client.hierarchy_repair_preview()).actions == ()
             pin_profile = await client.create_user(UserCreate(username="client-pin", pin="2468"))
             await client.update_user(pin_profile.id, UserUpdate(display_name="Client PIN"))

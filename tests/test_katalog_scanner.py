@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from kasana.katalog.api.service import KatalogQueryService
 from kasana.katalog.cli import app as katalog_cli
 from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
@@ -167,6 +168,8 @@ def test_incremental_scan_detects_add_change_move_and_missing(
     assert item.title == "Stargate"
     assert media_file.container == "matroska"
     assert media_file.subtitle_streams[0]["default"] is True
+    queries = KatalogQueryService(database, artwork_cache_path=tmp_path / "artwork")
+    assert queries.get_item(item.id).availability.value == "available"
 
     unchanged = scanner.scan()
     assert unchanged.totals.unchanged == 1
@@ -193,6 +196,7 @@ def test_incremental_scan_detects_add_change_move_and_missing(
         return persisted_file.availability
 
     assert database.run_transaction(read_availability) is AvailabilityState.UNAVAILABLE
+    assert queries.get_item(item.id).availability.value == "unavailable"
 
 
 def test_scan_uses_the_configured_kind_for_nonstandard_root_names(

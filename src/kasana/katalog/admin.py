@@ -26,7 +26,11 @@ from kasana.katalog.models import (
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.services import create_library_root, create_user
+from kasana.katalog.services import (
+    create_library_root,
+    create_user,
+    effective_item_availabilities,
+)
 from kasana.katalog.user_configuration import (
     UserConfiguration,
     UserConfigurationState,
@@ -311,7 +315,7 @@ class KatalogAdmin:
                 statement = statement.where(Zaisan.item_kind == kind)
             candidates = tuple(session.scalars(statement))
             ranked = sorted(candidates, key=lambda item: _item_search_key(item, needle))
-            return tuple(_item_view(item) for item in ranked[:limit])
+            return _item_views(session, tuple(ranked[:limit]))
 
         return self.database.run_transaction(load)
 
@@ -320,7 +324,7 @@ class KatalogAdmin:
             item = session.get(Zaisan, item_id)
             if item is None:
                 raise AdminError(f"Library item {item_id} does not exist.")
-            return _item_view(item)
+            return _item_views(session, (item,))[0]
 
         return self.database.run_transaction(load)
 
@@ -456,12 +460,21 @@ def _root_view(root: Kura) -> KuraView:
     )
 
 
-def _item_view(item: Zaisan) -> ItemView:
+def _item_views(session: Session, items: tuple[Zaisan, ...]) -> tuple[ItemView, ...]:
+    """Map item views using the same scan-state availability as the public API."""
+
+    if not items:
+        return ()
+    availability_by_item_id = effective_item_availabilities(session, items)
+    return tuple(_item_view(item, availability=availability_by_item_id[item.id]) for item in items)
+
+
+def _item_view(item: Zaisan, *, availability: AvailabilityState) -> ItemView:
     return ItemView(
         id=item.id,
         title=item.title,
         kind=item.item_kind,
-        availability=item.availability,
+        availability=availability,
         year=item.release_year,
     )
 

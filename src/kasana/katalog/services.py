@@ -55,6 +55,69 @@ _SERIES_COMPLETION_CHILD_KINDS: frozenset[ZaisanKind] = frozenset[ZaisanKind](
 )
 
 
+def effective_item_availability(
+    item_kind: ZaisanKind,
+    persisted_availability: AvailabilityState,
+    *,
+    has_available_media: bool,
+) -> AvailabilityState:
+    """Resolve an item's usable state without overwriting its persisted state.
+
+    A playable item cannot be available when none of its scanned media versions
+    are available. Structural items have no directly playable media, so their
+    persisted state remains authoritative.
+    """
+
+    if (
+        persisted_availability is not AvailabilityState.AVAILABLE
+        or item_kind not in PLAYABLE_ITEM_KINDS
+    ):
+        return persisted_availability
+    return AvailabilityState.AVAILABLE if has_available_media else AvailabilityState.UNAVAILABLE
+
+
+def effective_item_availabilities(
+    session: Session, items: AbstractCollection[Zaisan]
+) -> dict[int, AvailabilityState]:
+    """Resolve effective availability for persisted items with batched media lookups."""
+
+    candidate_item_ids = tuple(
+        item.id
+        for item in items
+        if item.item_kind in PLAYABLE_ITEM_KINDS
+        and item.availability is AvailabilityState.AVAILABLE
+    )
+    available_media_item_ids = _available_media_item_ids(session, candidate_item_ids)
+    return {
+        item.id: effective_item_availability(
+            item.item_kind,
+            item.availability,
+            has_available_media=item.id in available_media_item_ids,
+        )
+        for item in items
+    }
+
+
+def _available_media_item_ids(
+    session: Session, item_ids: AbstractCollection[int]
+) -> frozenset[int]:
+    """Return distinct item IDs that retain at least one scan-available media version."""
+
+    unique_item_ids = tuple(dict.fromkeys(item_ids))
+    return frozenset(
+        item_id
+        for item_id_batch in _item_id_batches(unique_item_ids)
+        for item_id in session.scalars(
+            select(MediaFile.library_item_id)
+            .where(
+                MediaFile.library_item_id.in_(item_id_batch),
+                MediaFile.availability == AvailabilityState.AVAILABLE,
+            )
+            .distinct()
+        )
+    )
+
+
 def create_library_root(
     session: Session,
     *,
