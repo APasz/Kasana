@@ -132,9 +132,17 @@ const storage = new Map();
 const consoleErrors = [];
 const railElements = [];
 const documentListeners = new Map();
+const documentQueries = [];
 const windowListeners = new Map();
 const timerDelays = [];
+const loadedComponentScripts = [];
+const lazyComponent = new FakeElement('kanvas-lazy-component-test');
+lazyComponent.localName = 'kanvas-lazy-component-test';
 let throwPosterCreation = false;
+
+const dispatchDocumentEvent = (name, event) => {
+  for (const listener of documentListeners.get(name) || []) listener(event);
+};
 
 global.Element = FakeElement;
 global.HTMLElement = FakeHTMLElement;
@@ -178,6 +186,8 @@ global.customElements = {
 };
 global.document = {
   scripts: [{src: 'http://kanvas.test/_kanvas/kanvas.js?v=test-asset'}],
+  head: {append: (script) => loadedComponentScripts.push(script)},
+  readyState: 'interactive',
   activeElement: null,
   visibilityState: 'visible',
   addEventListener(name, listener) {
@@ -189,6 +199,8 @@ global.document = {
     return null;
   },
   querySelectorAll(selector) {
+    documentQueries.push(selector);
+    if (selector.split(',').includes('kanvas-lazy-component-test')) return [lazyComponent];
     return selector === '.k-rail' ? railElements : [];
   },
   createElement(name) {
@@ -202,6 +214,10 @@ global.document = {
   }
 };
 global.window = {
+  kanvasComponentScripts: {
+    invalidcomponent: '/_kanvas/invalidcomponent.js?v=test-asset',
+    'kanvas-lazy-component-test': '/_kanvas/kanvas-lazy-component-test.js?v=test-asset'
+  },
   location: {origin: 'http://kanvas.test', pathname: '/library'},
   innerHeight: 800,
   scrollY: 42,
@@ -251,7 +267,8 @@ console.error = (...values) => consoleErrors.push(values);
 
 const source = [
   fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8'),
-  fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8')
+  fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8'),
+  fs.readFileSync('src/kasana/kanvas/static/kanvas-item-editor.js', 'utf8')
 ].join('\n');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-toasts')) {\n    customElements.define('kanvas-toasts', KanvasToasts);\n  }",
@@ -273,6 +290,13 @@ const exposed = source.replace(
   "globalThis.__itemEditorTest = {KanvasItemEditor};\n  if (!customElements.get('kanvas-item-editor')) customElements.define('kanvas-item-editor', KanvasItemEditor);"
 );
 vm.runInThisContext(exposed, {filename: 'kanvas.js'});
+dispatchDocumentEvent('DOMContentLoaded');
+assert.deepEqual(
+  loadedComponentScripts.map((script) => ({async: script.async, src: script.src})),
+  [{async: false, src: '/_kanvas/kanvas-lazy-component-test.js?v=test-asset'}]
+);
+assert.ok(documentQueries.includes('kanvas-lazy-component-test'));
+assert.ok(!documentQueries.some((selector) => selector.includes('invalidcomponent')));
 
 const validPoster = (id = 7) => ({
   id,
@@ -658,10 +682,6 @@ async function testToastsIgnoreConsumptionAfterDisconnection() {
     global.fetch = originalFetch;
   }
 }
-
-const dispatchDocumentEvent = (name, event) => {
-  for (const listener of documentListeners.get(name) || []) listener(event);
-};
 
 async function testValidPageRetainsAvailable() {
   const instance = grid();
@@ -1437,7 +1457,9 @@ async function testAdministrationConfirmationFlowUsesReusableDialog() {
 
   assert.equal(operations.length, 1);
   assert.doesNotMatch(
-    `${fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8')}\n${fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8')}`,
+    ['kanvas.js', 'kanvas-administration.js', 'kanvas-item-editor.js', 'kanvas-playback.js']
+      .map((filename) => fs.readFileSync(`src/kasana/kanvas/static/${filename}`, 'utf8'))
+      .join('\n'),
     /window\.confirm/
   );
 }

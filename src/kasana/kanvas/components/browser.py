@@ -11,13 +11,14 @@ from nicegui.element import Element
 
 
 class BrowserComponent(StrEnum):
-    """Custom elements implemented by the shared Kanvas browser bundle."""
+    """Custom elements implemented by Kanvas browser scripts."""
 
     ADMINISTRATION = "kanvas-administration"
     COLLECTION_GRID = "kanvas-collection-grid"
     ITEM_EDITOR = "kanvas-item-editor"
     ONBOARDING = "kanvas-onboarding"
     ITEM_PICKER = "kanvas-item-picker"
+    PLAYBACK_PLAYER = "kanvas-playback-player"
     POSTER_GRID = "kanvas-poster-grid"
     SYSTEM_ALERTS = "kanvas-system-alerts"
     TOASTS = "kanvas-toasts"

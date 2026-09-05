@@ -434,7 +434,7 @@ def test_subtitle_request_helpers_reject_invalid_offsets_and_track_ids() -> None
 
 
 def test_next_episode_preserves_fullscreen_then_transitions_its_item_page() -> None:
-    script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
+    script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
         encoding="utf-8"
     )
 
@@ -455,7 +455,9 @@ def test_next_episode_preserves_fullscreen_then_transitions_its_item_page() -> N
 
 def test_browser_player_bundles_libass_and_keeps_track_switches_at_absolute_time() -> None:
     repository_root = Path(__file__).parents[1]
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    script = (repository_root / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
+        encoding="utf-8"
+    )
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )

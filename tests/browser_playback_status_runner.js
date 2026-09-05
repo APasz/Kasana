@@ -346,9 +346,11 @@ global.fetch = (url, options = {}) => {
   return Promise.resolve(response);
 };
 
-vm.runInThisContext(fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8'), {
-  filename: 'kanvas.js'
-});
+for (const filename of ['kanvas.js', 'kanvas-playback.js']) {
+  vm.runInThisContext(fs.readFileSync(`src/kasana/kanvas/static/${filename}`, 'utf8'), {
+    filename
+  });
+}
 
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
 

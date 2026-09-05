@@ -6,6 +6,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+from json import dumps
 from pathlib import Path
 
 from nicegui import ui
@@ -18,12 +19,14 @@ from kasana.kanvas.settings import Kanvas_Settings
 
 @dataclass(frozen=True)
 class KanvasAssetVersions:
-    """Short content versions for the static assets included by every Kanvas page."""
+    """Short content versions for the static assets used by Kanvas pages."""
 
     css: str
     javascript: str
     administration_javascript: str
+    item_editor_javascript: str
     libass_javascript: str
+    playback_javascript: str
 
 
 def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
@@ -33,7 +36,9 @@ def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
         css=_asset_version(static_directory / "kanvas.css"),
         javascript=_asset_version(static_directory / "kanvas.js"),
         administration_javascript=_asset_version(static_directory / "kanvas-administration.js"),
+        item_editor_javascript=_asset_version(static_directory / "kanvas-item-editor.js"),
         libass_javascript=_asset_version(static_directory / "libass" / "subtitles-octopus.js"),
+        playback_javascript=_asset_version(static_directory / "kanvas-playback.js"),
     )
 
 
@@ -44,9 +49,20 @@ def _asset_version(asset_path: Path) -> str:
 def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
     """Build the static document head with content-addressed local asset URLs."""
 
-    administration_script = (
-        f"/_kanvas/kanvas-administration.js?v={asset_versions.administration_javascript}"
-    )
+    component_scripts = dumps(
+        {
+            BrowserComponent.ADMINISTRATION.value: (
+                f"/_kanvas/kanvas-administration.js?v={asset_versions.administration_javascript}"
+            ),
+            BrowserComponent.ITEM_EDITOR.value: (
+                f"/_kanvas/kanvas-item-editor.js?v={asset_versions.item_editor_javascript}"
+            ),
+            BrowserComponent.PLAYBACK_PLAYER.value: (
+                f"/_kanvas/kanvas-playback.js?v={asset_versions.playback_javascript}"
+            ),
+        },
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
     libass_script = f"/_kanvas/libass/subtitles-octopus.js?v={asset_versions.libass_javascript}"
     return f"""
         <meta name="color-scheme" content="dark">
@@ -57,9 +73,9 @@ def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
                        script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self';">
         <link rel="stylesheet" href="/_kanvas/kanvas.css?v={asset_versions.css}">
         <link rel="stylesheet" href="/_kanvas/theme.css">
+        <script>window.kanvasComponentScripts = {component_scripts};</script>
         <script defer src="{libass_script}"></script>
         <script defer src="/_kanvas/kanvas.js?v={asset_versions.javascript}"></script>
-        <script defer src="{administration_script}"></script>
         """
 
 

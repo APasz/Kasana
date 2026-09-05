@@ -1028,7 +1028,7 @@ def test_playback_plan_request_and_one_use_uri_do_not_contain_media_locations() 
 
 
 def test_browser_playback_script_uses_same_origin_media_and_never_a_custom_uri() -> None:
-    script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.js").read_text(
+    script = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
         encoding="utf-8"
     )
     card = (Path(__file__).parents[1] / "src/kasana/kanvas/routes/browser_playback.py").read_text(
@@ -1155,7 +1155,9 @@ def test_fullscreen_player_shows_the_local_time_with_seconds() -> None:
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    script = (repository_root / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
+        encoding="utf-8"
+    )
     stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
         encoding="utf-8"
     )
@@ -1190,7 +1192,9 @@ def test_fullscreen_player_can_align_a_contained_video_frame() -> None:
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    script = (repository_root / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
+        encoding="utf-8"
+    )
     stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
         encoding="utf-8"
     )
@@ -1218,7 +1222,9 @@ def test_theatre_player_mode_expands_the_playback_card() -> None:
     player = (repository_root / "src/kasana/kanvas/routes/browser_playback.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    script = (repository_root / "src/kasana/kanvas/static/kanvas-playback.js").read_text(
+        encoding="utf-8"
+    )
     stylesheet = (repository_root / "src/kasana/kanvas/static/kanvas.css").read_text(
         encoding="utf-8"
     )
@@ -5239,12 +5245,16 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     css_path = tmp_path / "kanvas.css"
     javascript_path = tmp_path / "kanvas.js"
     administration_javascript_path = tmp_path / "kanvas-administration.js"
+    item_editor_javascript_path = tmp_path / "kanvas-item-editor.js"
     libass_path = tmp_path / "libass" / "subtitles-octopus.js"
+    playback_javascript_path = tmp_path / "kanvas-playback.js"
     css_path.write_text(".k-app { color: white; }", encoding="utf-8")
     javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
     administration_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
+    item_editor_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
     libass_path.parent.mkdir()
     libass_path.write_text("window.SubtitlesOctopus = () => {};", encoding="utf-8")
+    playback_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
 
     initial_versions = kanvas_asset_versions(tmp_path)
     head = kanvas_head_html(initial_versions)
@@ -5253,9 +5263,19 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     assert "/_kanvas/theme.css" in head
     assert f"/_kanvas/kanvas.js?v={initial_versions.javascript}" in head
     assert f"/_kanvas/libass/subtitles-octopus.js?v={initial_versions.libass_javascript}" in head
-    assert (
-        f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}" in head
-    )
+    component_scripts = re.search(r"window\.kanvasComponentScripts = ({.*});", head)
+    assert component_scripts is not None
+    assert json.loads(component_scripts.group(1)) == {
+        BrowserComponent.ADMINISTRATION.value: (
+            f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}"
+        ),
+        BrowserComponent.ITEM_EDITOR.value: (
+            f"/_kanvas/kanvas-item-editor.js?v={initial_versions.item_editor_javascript}"
+        ),
+        BrowserComponent.PLAYBACK_PLAYER.value: (
+            f"/_kanvas/kanvas-playback.js?v={initial_versions.playback_javascript}"
+        ),
+    }
 
     css_path.write_text(".k-app { color: black; }", encoding="utf-8")
 
@@ -5264,6 +5284,13 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     assert (
         kanvas_asset_versions(tmp_path).administration_javascript
         == initial_versions.administration_javascript
+    )
+    assert (
+        kanvas_asset_versions(tmp_path).item_editor_javascript
+        == initial_versions.item_editor_javascript
+    )
+    assert (
+        kanvas_asset_versions(tmp_path).playback_javascript == initial_versions.playback_javascript
     )
 
 
@@ -5527,6 +5554,8 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
         (
             (static_root / "kanvas.js").read_text(),
             (static_root / "kanvas-administration.js").read_text(),
+            (static_root / "kanvas-item-editor.js").read_text(),
+            (static_root / "kanvas-playback.js").read_text(),
         )
     )
     assert "prefers-reduced-motion: reduce" in css
