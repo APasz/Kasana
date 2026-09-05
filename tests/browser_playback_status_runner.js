@@ -106,6 +106,7 @@ class FakeVideo extends FakeElement {
     this.duration = 120;
     this.muted = false;
     this.paused = true;
+    this.seeking = false;
     this.playbackRate = 1;
     this.videoHeight = 1080;
     this.videoWidth = 1920;
@@ -340,6 +341,7 @@ let completionPayload = null;
 let compatibilityPayload = {mode: 'direct', mediaUrl: '/media/video.mp4'};
 let recordedProgressPosition = 0;
 let rejectBackwardsProgress = false;
+let rejectNextProgress = false;
 let delayNextProgress = false;
 let resolveDelayedProgress = null;
 let delayNextTrackSave = false;
@@ -348,9 +350,11 @@ let delayNextCompatibility = false;
 let resolveDelayedCompatibility = null;
 const progressResponse = (options) => {
   const payload = JSON.parse(String(options.body));
-  const accepted = !rejectBackwardsProgress
+  const rejected = rejectNextProgress;
+  rejectNextProgress = false;
+  const accepted = !rejected && (!rejectBackwardsProgress
     || payload.seek
-    || payload.positionSeconds >= recordedProgressPosition;
+    || payload.positionSeconds >= recordedProgressPosition);
   if (accepted) recordedProgressPosition = payload.positionSeconds;
   return {ok: accepted, json: async () => ({})};
 };
@@ -1461,6 +1465,61 @@ async function testBackwardSeekSavesAsASeekWhenPaused() {
   rejectBackwardsProgress = false;
 }
 
+async function testBackwardSeekUsesTheNativeSeekingState() {
+  const {player, status, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+  video.emit('loadedmetadata');
+
+  const start = fetchCalls.length;
+  recordedProgressPosition = 0;
+  rejectBackwardsProgress = true;
+  video.currentTime = 50;
+  video.emit('timeupdate');
+  await nextTick();
+  await nextTick();
+
+  video.currentTime = 10;
+  video.seeking = true;
+  video.emit('pause');
+  video.emit('seeking');
+  video.seeking = false;
+  video.emit('seeked');
+  await nextTick();
+  await nextTick();
+  await nextTick();
+
+  const updates = progressCallsSince(start).map((call) => JSON.parse(call.options.body));
+  assert.deepEqual(updates, [
+    {positionSeconds: 50, seek: false, entryPosition: 0},
+    {positionSeconds: 10, seek: true, entryPosition: 0},
+  ]);
+  assert.notEqual(status.textContent, 'Playback progress could not be saved.');
+  rejectBackwardsProgress = false;
+}
+
+async function testProgressSaveFailureClearsAfterRecovery() {
+  const {player, status, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+  video.emit('loadedmetadata');
+
+  rejectNextProgress = true;
+  video.currentTime = 10;
+  video.emit('timeupdate');
+  await nextTick();
+  await nextTick();
+  assert.equal(status.textContent, 'Playback progress could not be saved.');
+
+  video.currentTime = 20;
+  video.emit('timeupdate');
+  await nextTick();
+  await nextTick();
+  assert.equal(status.textContent, '');
+}
+
 async function testBackwardSeekIsQueuedUntilTheActiveSaveFinishes() {
   const {player, status, video} = createPlayer();
   player.connectedCallback();
@@ -1553,6 +1612,27 @@ async function testPageHideDoesNotSaveBeforeTheResumeSeekIsApplied() {
   await nextTick();
 
   assert.equal(progressCallsSince(start).length, 0);
+}
+
+async function testPageHideUsesTheNativeSeekingState() {
+  windowListeners.clear();
+  const {player, video} = createPlayer();
+  player.connectedCallback();
+  await nextTick();
+  await nextTick();
+  video.emit('loadedmetadata');
+
+  const start = fetchCalls.length;
+  video.currentTime = 10;
+  video.seeking = true;
+  window.emit('pagehide');
+  await nextTick();
+
+  const updates = progressCallsSince(start).map((call) => JSON.parse(call.options.body));
+  assert.deepEqual(updates, [
+    {positionSeconds: 10, seek: true, entryPosition: 0},
+  ]);
+  player.disconnectedCallback();
 }
 
 async function testQueueTransitionDoesNotSaveThePreviousEntryPosition() {
@@ -1963,10 +2043,13 @@ async function testQueueAdvanceNavigatesToTheNextItemOutsideFullscreen() {
   await testWebVttSettingsApplyWithoutReloadingTheTrack();
   await testSubtitleSettingsSavesCollapseToTheLatestState();
   await testBackwardSeekSavesAsASeekWhenPaused();
+  await testBackwardSeekUsesTheNativeSeekingState();
+  await testProgressSaveFailureClearsAfterRecovery();
   await testBackwardSeekIsQueuedUntilTheActiveSaveFinishes();
   await testProgressUsesTheAuthoritativeCatalogueDuration();
   await testGeneratedResumeKeepsTheFullEpisodeTimeline();
   await testPageHideDoesNotSaveBeforeTheResumeSeekIsApplied();
+  await testPageHideUsesTheNativeSeekingState();
   await testQueueTransitionDoesNotSaveThePreviousEntryPosition();
   await testProfileSubtitlePreferenceDisablesTheInitialTrack();
   await testPlaybackErrorReconnectsInsteadOfClaimingTheFormatIsUnsupported();

@@ -2729,8 +2729,9 @@ class KatalogQueryService:
                 and update.position_seconds < existing_state.position_seconds
                 and existing_state.position_seconds <= duration
             ):
-                raise CatalogueValidationError(
-                    "Playback progress must be monotonic unless seek is true."
+                # Out-of-order samples are stale; retain the newer saved position.
+                return PlaybackProgressResult(
+                    session=self._playback_session_response(session, playback_session, now)
                 )
             completed = _is_within_session_progress_completion_grace_period(
                 update.position_seconds, media_file.duration_seconds

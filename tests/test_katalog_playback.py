@@ -1751,7 +1751,17 @@ async def test_progress_seek_completion_expiry_and_unavailable_items(
     progressed = await playback_fixture.client.put(progress_path, json={"position_seconds": 40})
     assert progressed.status_code == 200
     non_monotonic = await playback_fixture.client.put(progress_path, json={"position_seconds": 35})
-    assert non_monotonic.status_code == 422
+    assert non_monotonic.status_code == 200
+    assert non_monotonic.json()["event"] is None
+    with playback_fixture.database.transaction() as database_session:
+        state = database_session.scalar(
+            select(PlaybackState).where(
+                PlaybackState.user_id == playback_fixture.ids["user"],
+                PlaybackState.library_item_id == playback_fixture.ids["movie"],
+            )
+        )
+        assert state is not None
+        assert state.position_seconds == 40
     seek = await playback_fixture.client.put(
         progress_path, json={"position_seconds": 35, "seek": True}
     )

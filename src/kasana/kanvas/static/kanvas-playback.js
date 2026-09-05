@@ -125,6 +125,8 @@
       const minSubtitleFontScalePercent = 75;
       const maxSubtitleFontScalePercent = 200;
       const selectPlayStatus = 'Select Play to start this video.';
+      const progressSaveFailureStatus = 'Playback progress could not be saved.';
+      const isSeekInProgress = () => seeking || video.seeking === true;
       const invalidatePlaybackAttempts = () => {
         playbackAttemptVersion += 1;
       };
@@ -1150,10 +1152,13 @@
             }),
           });
           if (!response.ok) throw new Error('Progress failed');
-          if (report.entryPosition === entryPosition) lastReportedPosition = report.position;
+          if (report.entryPosition === entryPosition) {
+            lastReportedPosition = report.position;
+            if (status.textContent === progressSaveFailureStatus) status.textContent = '';
+          }
         } catch (_) {
           if (report.entryPosition === entryPosition) {
-            status.textContent = 'Playback progress could not be saved.';
+            status.textContent = progressSaveFailureStatus;
           }
         }
       };
@@ -1216,7 +1221,7 @@
           keepalive: true,
           body: JSON.stringify({
             positionSeconds: position,
-            seek: seeking || generatedStreamSeekPending,
+            seek: isSeekInProgress() || generatedStreamSeekPending,
             entryPosition,
           })
         });
@@ -1800,15 +1805,15 @@
       video.addEventListener('resize', updateFrameToggleSize);
       video.addEventListener('timeupdate', () => {
         updateControls();
-        void reportProgress(false, false);
+        if (!isSeekInProgress()) void reportProgress(false, false);
       });
       video.addEventListener('progress', updateControls);
       video.addEventListener('seeking', () => { seeking = true; });
       video.addEventListener('seeked', () => {
-        void reportProgress(true, seeking);
+        void reportProgress(true, true);
         seeking = false;
       });
-      video.addEventListener('pause', () => { void reportProgress(true, seeking); });
+      video.addEventListener('pause', () => { void reportProgress(true, isSeekInProgress()); });
       video.addEventListener('error', () => {
         if (activeStreamRecoveryId !== null) return;
         invalidatePlaybackAttempts();
