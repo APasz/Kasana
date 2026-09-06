@@ -20,6 +20,8 @@ from kasana.katalog.public import (
     LibraryConsistencyRequest,
     LibraryRootCreate,
     LibraryRootUpdate,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
     ScanRequest,
 )
 
@@ -209,6 +211,30 @@ async def administration_duplicates_data(request: Request) -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.post("/kanvas/data/administration/manual-item-merge-preview", include_in_schema=False)
+async def administration_manual_item_merge_preview_data(request: Request) -> JSONResponse:
+    """Build a revalidated, administrator-only comparison for two entered item IDs."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := administration_forbidden(profile):
+        return forbidden
+    payload = await json_object(request)
+    try:
+        preview = await KanvasKatalogService(runtime.settings).manual_item_merge_preview(
+            ManualItemMergePreviewRequest(
+                source_item_id=integer(payload, "sourceItemId"),
+                target_item_id=integer(payload, "targetItemId"),
+            )
+        )
+    except KatalogClientError as error:
+        return katalog_data_error(error, "Katalog could not prepare this item merge.")
+    except (ValueError, TypeError) as error:
+        return invalid_action(str(error))
+    return JSONResponse(preview.model_dump(mode="json"))
+
+
 @app.post("/kanvas/actions/administration", include_in_schema=False)
 async def administration_action(request: Request) -> JSONResponse:
     """Apply explicit administration intents through the typed Kanvas service boundary."""
@@ -269,6 +295,21 @@ async def administration_action(request: Request) -> JSONResponse:
             job = await service.submit_duplicate_resolution_batch(
                 DuplicateResolutionBatchRequest.model_validate(
                     {"resolutions": payload.get("resolutions"), "confirmed": True}
+                )
+            )
+            return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})
+        if operation == "manual-item-merge":
+            if payload.get("confirmed") is not True:
+                return invalid_action("Merging catalogue items requires explicit confirmation.")
+            job = await service.submit_manual_item_merge(
+                ManualItemMergeRequest.model_validate(
+                    {
+                        "source_item_id": integer(payload, "sourceItemId"),
+                        "target_item_id": integer(payload, "targetItemId"),
+                        "preview_token": string(payload, "previewToken", maximum_length=64),
+                        "field_choices": payload.get("fieldChoices"),
+                        "confirmed": True,
+                    }
                 )
             )
             return JSONResponse({"job": job.model_dump(by_alias=True, mode="json")})

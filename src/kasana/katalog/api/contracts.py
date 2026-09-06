@@ -522,6 +522,18 @@ class LibraryItemUpdate(APIModel):
         return self
 
 
+class LibraryItemDeletion(APIModel):
+    """An explicit acknowledgement that a catalogue record is being removed."""
+
+    confirm: bool = False
+
+    @model_validator(mode="after")
+    def require_confirmation(self) -> Self:
+        if not self.confirm:
+            raise ValueError("Deleting a catalogue item requires confirm=true.")
+        return self
+
+
 class LibraryItemEditAudit(APIModel):
     """A safe, append-only summary of one local item edit."""
 
@@ -1419,6 +1431,96 @@ class DuplicateResolutionCandidate(APIModel):
 
 class DuplicateResolutionPreview(APIModel):
     candidates: tuple[DuplicateResolutionCandidate, ...]
+
+
+class ManualItemMergeField(StrEnum):
+    """A top-level scalar field whose conflicting value needs an explicit choice."""
+
+    TITLE = "title"
+    SORT_TITLE = "sort_title"
+    RELEASE_YEAR = "release_year"
+    RELEASE_DATE = "release_date"
+    AIR_DATE = "air_date"
+    OVERVIEW = "overview"
+    SHOW_ARTWORK_LABEL = "show_artwork_label"
+
+
+class ManualItemMergeSide(StrEnum):
+    """The record supplying one selected scalar value during a manual merge."""
+
+    SOURCE = "source"
+    TARGET = "target"
+
+
+class ManualItemMergeFieldChoice(APIModel):
+    field: ManualItemMergeField
+    keep: ManualItemMergeSide
+
+
+class ManualItemMergePreviewRequest(APIModel):
+    """Identify the duplicate record to remove and the record to keep."""
+
+    source_item_id: int = Field(gt=0)
+    target_item_id: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def require_distinct_items(self) -> Self:
+        if self.source_item_id == self.target_item_id:
+            raise ValueError("The removed and kept items must be different.")
+        return self
+
+
+class ManualItemMergeRequest(ManualItemMergePreviewRequest):
+    """A preview-validated manual merge with one choice for every current conflict."""
+
+    preview_token: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    field_choices: tuple[ManualItemMergeFieldChoice, ...] = Field(
+        default=(), max_length=len(ManualItemMergeField)
+    )
+    confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_choices_and_confirmation(self) -> Self:
+        if not self.confirmed:
+            raise ValueError("Manual item merges require confirmed=true.")
+        fields = tuple(choice.field for choice in self.field_choices)
+        if len(set(fields)) != len(fields):
+            raise ValueError("Each manual merge field can be selected only once.")
+        return self
+
+
+class ManualItemMergeConflict(APIModel):
+    """A safe presentation of one top-level field whose values differ."""
+
+    field: ManualItemMergeField
+    label: str = Field(min_length=1, max_length=100)
+    source_value: str = Field(min_length=1, max_length=2_000)
+    target_value: str = Field(min_length=1, max_length=2_000)
+
+
+class ManualItemMergeItem(APIModel):
+    """A path-free summary used to make a manual merge decision."""
+
+    id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=1_000)
+    kind: LibraryItemKind
+    release_year: int | None = Field(default=None, ge=1, le=9999)
+    media_file_count: int = Field(ge=0)
+    descendant_count: int = Field(ge=0)
+
+
+class ManualItemMergePreview(APIModel):
+    """The current merge plan; callers must refresh it if applying fails validation."""
+
+    preview_token: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    source: ManualItemMergeItem
+    target: ManualItemMergeItem
+    conflicts: tuple[ManualItemMergeConflict, ...] = Field(
+        default=(), max_length=len(ManualItemMergeField)
+    )
+    matched_descendant_count: int = Field(ge=0)
+    transferred_descendant_count: int = Field(ge=0)
+    impact: HierarchyRepairImpact
 
 
 class DuplicateEpisodeIssue(APIModel):

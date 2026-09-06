@@ -1704,6 +1704,24 @@ kanvas-administration { display: block; width: 100%; max-width: 1440px; }
 .k-admin-issue-panel__content > details > summary { padding: 9px; color: var(--k-text-muted); font-size: 0.75rem; cursor: pointer; }
 .k-admin-impact { padding: 0 9px 9px; color: var(--k-text-faint); font-size: 0.7rem; }
 .k-admin-file-issues { display: grid; gap: 8px; }
+.k-manual-item-merge { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--k-border-subtle); background: var(--k-bg); }
+.k-manual-item-merge > div:first-child { display: grid; gap: 4px; }
+.k-manual-item-merge > div:first-child p { margin: 0; }
+.k-manual-item-merge__form { display: flex; flex-wrap: wrap; align-items: end; gap: 7px; }
+.k-manual-item-merge__form .k-item-editor__match-input { flex: 1 1 150px; }
+.k-manual-item-merge__comparison { display: grid; gap: 9px; padding-top: 10px; border-top: 1px solid var(--k-border-subtle); }
+.k-manual-item-merge__comparison > p { margin: 0; }
+.k-manual-item-merge__records { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.k-manual-item-merge__records > div { min-width: 0; padding: 8px; border: 1px solid var(--k-border-subtle); background: var(--k-surface-1); }
+.k-manual-item-merge__records strong, .k-manual-item-merge__records small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-manual-item-merge__records small { margin-top: 3px; color: var(--k-text-faint); font-size: 0.69rem; }
+.k-manual-item-merge__table-wrap { overflow-x: auto; border: 1px solid var(--k-border-subtle); }
+.k-manual-item-merge__table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 0.73rem; }
+.k-manual-item-merge__table th, .k-manual-item-merge__table td { min-width: 160px; padding: 8px; border: 1px solid var(--k-border-subtle); vertical-align: top; text-align: left; }
+.k-manual-item-merge__table thead { background: var(--k-surface-2); color: var(--k-text-muted); }
+.k-manual-item-merge__table tbody th { width: 130px; color: var(--k-text); font-weight: 650; }
+.k-manual-item-merge__choice { display: flex; align-items: start; gap: 6px; overflow-wrap: anywhere; cursor: pointer; }
+.k-manual-item-merge__choice input { flex: 0 0 auto; margin-top: 2px; }
 .k-admin-action-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; background: var(--k-surface-1); }
 .k-admin-action-row > div { display: grid; gap: 3px; }
 .k-admin-action-row strong { color: var(--k-text); font-size: 0.8rem; }
@@ -1954,6 +1972,7 @@ kanvas-profile-menu { position: relative; display: block; width: 100%; min-heigh
     .k-admin-action-row { align-items: flex-start; flex-direction: column; }
     .k-admin-issue-panel > summary { align-items: flex-start; flex-direction: column; }
     .k-admin-manual-search { align-items: stretch; flex-direction: column; }
+    .k-manual-item-merge__records { grid-template-columns: 1fr; }
     .k-metadata-review { grid-template-areas: "local" "candidates" "actions"; grid-template-columns: 1fr; grid-template-rows: auto; min-height: 0; }
     .k-metadata-actions { grid-template-columns: 1fr; }
     .k-metadata-navigation { grid-column: auto; }

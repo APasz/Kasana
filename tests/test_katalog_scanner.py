@@ -227,6 +227,199 @@ def test_scan_uses_the_configured_kind_for_nonstandard_root_names(
     }
 
 
+def test_scan_adds_episodes_to_a_matched_series_directory_alias(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    shows = tmp_path / "Series"
+    directory_title = "LOTR; The Rings of Power"
+    first_episode_path = shows / directory_title / "Season 01" / "S01E01.mkv"
+    second_episode_path = shows / directory_title / "Season 01" / "S01E02.mkv"
+    first_episode_path.parent.mkdir(parents=True)
+    first_episode_path.write_bytes(b"first")
+    _register_root(database, shows, ZaisanKind.SERIES)
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = session.scalar(select(Kura).where(Kura.path == str(shows)))
+        assert root is not None
+        series = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="The Lord of the Rings: The Rings of Power",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        first_episode = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=season.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="A Shadow of the Past",
+            season_number=1,
+            episode_number=1,
+        )
+        first_stat = first_episode_path.stat()
+        attach_media_file(
+            session,
+            library_item_id=first_episode.id,
+            absolute_path=first_episode_path,
+            size_bytes=first_stat.st_size,
+            mtime_ns=first_stat.st_mtime_ns,
+            container="matroska",
+            filesystem_device=first_stat.st_dev,
+            filesystem_inode=first_stat.st_ino,
+        )
+        session.add(
+            MetadataBinding(
+                library_item_id=series.id,
+                provider="tmdb",
+                provider_id="84773",
+                provider_media_kind=ZaisanKind.SERIES,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        return series.id, season.id
+
+    series_id, season_id = database.run_transaction(seed)
+    second_episode_path.write_bytes(b"second")
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+
+    result = _run_scan(database, fake_client).scan()
+
+    assert result.totals.added == 1
+
+    def hierarchy(session: Session) -> tuple[int, int, int]:
+        second_episode = session.scalar(
+            select(Zaisan).where(
+                Zaisan.item_kind == ZaisanKind.EPISODE,
+                Zaisan.episode_number == 2,
+            )
+        )
+        assert second_episode is not None
+        return (
+            second_episode.parent_id or 0,
+            len(
+                session.scalars(
+                    select(Zaisan).where(
+                        Zaisan.item_kind == ZaisanKind.SERIES,
+                    )
+                ).all()
+            ),
+            series_id,
+        )
+
+    parent_id, series_count, retained_series_id = database.run_transaction(hierarchy)
+    assert parent_id == season_id
+    assert series_count == 1
+    assert retained_series_id == series_id
+
+
+def test_scan_uses_a_moved_series_directory_as_the_current_alias(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    shows = tmp_path / "Series"
+    previous_directory_title = "LOTR; The Rings of Power"
+    current_directory_title = "Rings of Power"
+    first_episode_path = shows / previous_directory_title / "Season 01" / "S01E01.mkv"
+    current_first_episode_path = (
+        shows / current_directory_title / "Season 01" / "S01E01.mkv"
+    )
+    second_episode_path = shows / current_directory_title / "Season 01" / "S01E02.mkv"
+    first_episode_path.parent.mkdir(parents=True)
+    first_episode_path.write_bytes(b"first")
+    _register_root(database, shows, ZaisanKind.SERIES)
+
+    def seed(session: Session) -> tuple[int, int]:
+        root = session.scalar(select(Kura).where(Kura.path == str(shows)))
+        assert root is not None
+        series = create_library_item(
+            session,
+            library_root_id=root.id,
+            item_kind=ZaisanKind.SERIES,
+            title="The Lord of the Rings: The Rings of Power",
+        )
+        season = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SEASON,
+            title="Season 1",
+            season_number=1,
+        )
+        first_episode = create_library_item(
+            session,
+            library_root_id=root.id,
+            parent_id=season.id,
+            item_kind=ZaisanKind.EPISODE,
+            title="A Shadow of the Past",
+            season_number=1,
+            episode_number=1,
+        )
+        first_stat = first_episode_path.stat()
+        attach_media_file(
+            session,
+            library_item_id=first_episode.id,
+            absolute_path=first_episode_path,
+            size_bytes=first_stat.st_size,
+            mtime_ns=first_stat.st_mtime_ns,
+            container="matroska",
+            filesystem_device=first_stat.st_dev,
+            filesystem_inode=first_stat.st_ino,
+        )
+        session.add(
+            MetadataBinding(
+                library_item_id=series.id,
+                provider="tmdb",
+                provider_id="84773",
+                provider_media_kind=ZaisanKind.SERIES,
+                status=MetadataMatchStatus.MATCHED,
+                scoring_explanation=[],
+                provider_external_ids=[],
+            )
+        )
+        return series.id, season.id
+
+    series_id, season_id = database.run_transaction(seed)
+    current_first_episode_path.parent.mkdir(parents=True)
+    first_episode_path.rename(current_first_episode_path)
+    second_episode_path.write_bytes(b"second")
+
+    result = _run_scan(database, _scanner(database, fake_ffprobe, _probe_result())).scan()
+
+    assert result.totals.moved == 1
+    assert result.totals.added == 1
+
+    def hierarchy(session: Session) -> tuple[int, int]:
+        second_episode = session.scalar(
+            select(Zaisan).where(
+                Zaisan.item_kind == ZaisanKind.EPISODE,
+                Zaisan.episode_number == 2,
+            )
+        )
+        assert second_episode is not None
+        return (
+            second_episode.parent_id or 0,
+            len(
+                session.scalars(
+                    select(Zaisan).where(Zaisan.item_kind == ZaisanKind.SERIES)
+                ).all()
+            ),
+        )
+
+    parent_id, series_count = database.run_transaction(hierarchy)
+    assert parent_id == season_id
+    assert series_count == 1
+    assert database.run_transaction(lambda session: session.get(Zaisan, series_id)) is not None
+
+
 def test_scan_applies_local_metadata_sidecars_and_refreshes_them_without_reprobing(
     database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
 ) -> None:

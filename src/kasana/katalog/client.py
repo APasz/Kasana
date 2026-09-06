@@ -51,6 +51,9 @@ from kasana.katalog.api.contracts import (
     LibraryRootCreate,
     LibraryRootSummary,
     LibraryRootUpdate,
+    ManualItemMergePreview,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
     MediaTechnicalSummary,
     MetadataBindingReference,
     MetadataMatchRequest,
@@ -435,6 +438,13 @@ class KatalogClient:
             request,
             LibraryItemMutationResult,
             exclude_unset=True,
+        )
+
+    async def delete_library_item(self, item_id: int, *, confirm: bool = False) -> None:
+        await self._request(
+            "DELETE",
+            f"/api/v1/library/items/{item_id}",
+            json={"confirm": confirm},
         )
 
     async def list_library_item_edit_audit(
@@ -1098,6 +1108,24 @@ class KatalogClient:
     async def duplicate_resolution_preview(self) -> DuplicateResolutionPreview:
         return await self._get_model(
             "/api/v1/repairs/duplicates/preview", DuplicateResolutionPreview
+        )
+
+    async def manual_item_merge_preview(
+        self, request: ManualItemMergePreviewRequest
+    ) -> ManualItemMergePreview:
+        return await self._send_model(
+            "POST",
+            "/api/v1/repairs/manual-item-merge/preview",
+            request,
+            ManualItemMergePreview,
+        )
+
+    async def submit_manual_item_merge(self, request: ManualItemMergeRequest) -> JobSubmission:
+        return await self._send_model(
+            "POST",
+            "/api/v1/repairs/manual-item-merge",
+            request,
+            JobSubmission,
         )
 
     async def submit_duplicate_resolution(

@@ -218,6 +218,9 @@
       this.bindArtworkFetchControl(content);
       this.bindCollectionControls(content);
       this.bindPlaybackForceControls(content);
+      content.querySelector('[data-item-delete]')?.addEventListener('click', () => {
+        void this.deleteItem();
+      });
       this.addVisibleFieldLabels(content);
       this.isDirty = false;
     }
@@ -244,7 +247,7 @@
     }
 
     renderDetailsTab(kind, item) {
-      return `<section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section>`;
+      return `<section class="k-item-editor__section"><label class="k-control-shell k-input-shell"><input class="k-input" name="title" value="${escapeHtml(item.title || '')}" aria-label="Title" required></label><label class="k-control-shell k-input-shell"><input class="k-input" name="sortTitle" value="${escapeHtml(item.sort_title || '')}" aria-label="Sort title" required></label><label class="k-control-shell k-textarea-shell"><textarea class="k-textarea" name="overview" aria-label="Overview">${escapeHtml(item.overview || '')}</textarea></label></section><section class="k-item-editor__section"><div class="k-item-editor__grid"><label class="k-control-shell k-input-shell"><input class="k-input" type="date" name="releaseDate" value="${escapeHtml(item.release_date || '')}" aria-label="Release date"></label><label class="k-control-shell k-input-shell--year"><input class="k-input" type="number" min="1" max="9999" name="releaseYear" value="${item.year || ''}" placeholder="Year" aria-label="Release year"></label></div><label class="k-control-shell k-input-shell"><input class="k-input" name="tags" value="${escapeHtml((item.tags || []).join(', '))}" aria-label="Tags" placeholder="Tags, comma separated"></label></section><section class="k-item-editor__section" data-item-editor-kind-fields>${this.renderKindFields(kind, item)}</section><section class="k-danger-zone"><h3 class="k-item-editor__section-heading">Danger zone</h3><p class="k-item-editor__muted">Remove this catalogue record and any child records. Media files remain on disk and a future scan can catalogue them again.</p><button type="button" class="k-button k-button--danger" data-item-delete>Remove catalogue record</button></section>`;
     }
 
     renderMatchTab(kind, locks, binding, defaultQuery) {
@@ -825,6 +828,43 @@
         else locks.delete(input.value);
       });
       return locks;
+    }
+
+    async deleteItem() {
+      if (this.isSaving || !(await this.confirmDiscard())) return;
+      const confirmed = await this.requestConfirmation({
+        title: 'Remove catalogue record?',
+        message: 'This removes this catalogue record, its child records, and their recorded state. Media files remain on disk and a future scan can catalogue them again.',
+        confirmLabel: 'Remove record',
+        destructive: true,
+      });
+      if (!confirmed) return;
+      const source = this.getAttribute('delete-source');
+      if (!source || !this.status) return;
+      this.isSaving = true;
+      this.status.textContent = 'Removing catalogue record…';
+      try {
+        const response = await fetch(source, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          credentials: 'same-origin',
+          body: JSON.stringify({confirmed: true})
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(typeof result.error === 'string' ? result.error : 'Catalogue record could not be removed.');
+        }
+        window.location.assign('/library');
+      } catch (error) {
+        const message = error?.message || 'Catalogue record could not be removed.';
+        this.status.textContent = message;
+        this.isSaving = false;
+        publishKanvasToast({
+          severity: 'error',
+          title: 'Catalogue record could not be removed',
+          detail: message,
+        });
+      }
     }
 
     async submit(event) {

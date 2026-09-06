@@ -823,6 +823,80 @@ async def test_library_item_edit_is_audited_and_never_changes_media_files(
     assert hierarchy_item["parent_id"] == 1
 
 
+async def test_library_item_deletion_requires_confirmation_and_leaves_media_on_disk(
+    api_fixture: ApiFixture,
+) -> None:
+    def media_path() -> Path:
+        def load(session: Session) -> Path:
+            item = session.get(Zaisan, 1)
+            assert item is not None
+            assert item.media_files
+            return Path(item.media_files[0].absolute_path)
+
+        return api_fixture.database.run_transaction(load)
+
+    path = media_path()
+    rejected = await api_fixture.client.request(
+        "DELETE",
+        "/api/v1/library/items/1", json={"confirm": False}
+    )
+
+    assert rejected.status_code == 422
+    assert (await api_fixture.client.get("/api/v1/library/items/1")).status_code == 200
+
+    deleted = await api_fixture.client.request(
+        "DELETE",
+        "/api/v1/library/items/1", json={"confirm": True}
+    )
+
+    assert deleted.status_code == 204
+    assert (await api_fixture.client.get("/api/v1/library/items/1")).status_code == 404
+    assert path.is_file()
+
+
+async def test_manual_item_merge_preview_and_job_are_revalidated_through_the_api(
+    api_fixture: ApiFixture,
+) -> None:
+    preview = await api_fixture.client.post(
+        "/api/v1/repairs/manual-item-merge/preview",
+        json={"source_item_id": 1, "target_item_id": 2},
+    )
+
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert (preview_payload["source"]["id"], preview_payload["target"]["id"]) == (1, 2)
+    assert {conflict["field"] for conflict in preview_payload["conflicts"]} >= {
+        "title",
+        "sort_title",
+        "release_year",
+    }
+
+    merged = await api_fixture.client.post(
+        "/api/v1/repairs/manual-item-merge",
+        json={
+            "source_item_id": 1,
+            "target_item_id": 2,
+            "preview_token": preview_payload["preview_token"],
+            "field_choices": [
+                {"field": conflict["field"], "keep": "target"}
+                for conflict in preview_payload["conflicts"]
+            ],
+            "confirmed": True,
+        },
+    )
+    job_id = merged.json()["job"]["id"]
+    await api_fixture.runtime.jobs._tasks[job_id]  # pyright: ignore[reportPrivateUsage]
+    completed = await api_fixture.runtime.jobs.get(job_id)
+
+    assert merged.status_code == 202
+    assert completed.status is JobStatus.COMPLETED
+    assert completed.kind == "manual-item-merge"
+    assert (await api_fixture.client.get("/api/v1/library/items/1")).status_code == 404
+    target = await api_fixture.client.get("/api/v1/library/items/2")
+    assert target.status_code == 200
+    assert target.json()["title"] == "Beta"
+
+
 async def test_library_item_parent_choices_are_type_and_cycle_aware(
     api_fixture: ApiFixture,
 ) -> None:

@@ -306,6 +306,7 @@ def _item_editor_button(
         "metadata-search-source": f"/kanvas/data/items/{item_id}/metadata-search",
         "metadata-match-source": f"/kanvas/actions/items/{item_id}/metadata-match",
         "artwork-fetch-source": f"/kanvas/actions/items/{item_id}/artwork-fetch",
+        "delete-source": f"/kanvas/actions/items/{item_id}/delete",
         "action-source": f"/kanvas/actions/items/{item_id}",
     }
     if initial_tab is not None:

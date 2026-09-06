@@ -251,6 +251,27 @@ async def item_artwork_fetch_action(item_id: int, request: Request) -> JSONRespo
     return JSONResponse({"artwork": [entry.model_dump(mode="json") for entry in artwork]})
 
 
+@app.post("/kanvas/actions/items/{item_id}/delete", include_in_schema=False)
+async def item_delete_action(item_id: int, request: Request) -> JSONResponse:
+    """Remove a catalogue record after an explicit UI confirmation; media stays on disk."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    require_administrator(profile)
+    payload = await json_object(request)
+    if payload.get("confirmed") is not True:
+        return invalid_action("Deleting a catalogue item requires explicit confirmation.")
+    try:
+        await KanvasKatalogService(runtime.settings, profile.user.id).delete_item(
+            item_id, confirm=True
+        )
+    except KatalogClientError as error:
+        return item_edit_error(error)
+    queue_success_toast(request, "Catalogue item removed")
+    return JSONResponse({"itemId": item_id, "action": "deleted"})
+
+
 @app.post("/kanvas/actions/items/{item_id}", include_in_schema=False)
 async def item_edit_action(item_id: int, request: Request) -> JSONResponse:
     """Apply an audited metadata edit without exposing any media-file operation."""

@@ -30,6 +30,7 @@
     'duplicate-resolve': 'Duplicate merge',
     'duplicate-resolve-batch': 'Duplicate merge',
     'duplicate-resolution': 'Duplicate merge',
+    'manual-item-merge': 'Manual item merge',
     'root-create': 'Library root saved',
     'root-update': 'Library root saved',
     'root-delete': 'Library root removed',
@@ -71,6 +72,7 @@
     'hierarchy-repair': Object.freeze(['hierarchy', 'duplicates']),
     'duplicate-resolve': Object.freeze(['hierarchy', 'duplicates']),
     'duplicate-resolve-batch': Object.freeze(['hierarchy', 'duplicates']),
+    'manual-item-merge': Object.freeze(['hierarchy', 'duplicates']),
     'root-update': Object.freeze(['hierarchy']),
     'root-delete': Object.freeze(['hierarchy', 'duplicates']),
   });
@@ -110,6 +112,14 @@
       this.manualSearchStatus = '';
       this.manualSelection = null;
       this.manualReferenceValue = '';
+      this.manualItemMergePreview = null;
+      this.manualItemMergeSourceId = '';
+      this.manualItemMergeTargetId = '';
+      this.manualItemMergeStatus = '';
+      this.manualItemMergeError = false;
+      this.manualItemMergeFieldChoices = new Map();
+      this.manualItemMergeAbort = null;
+      this.manualItemMergeRequest = null;
       this.inFlight = false;
       this.reloadPending = false;
       this.timer = null;
@@ -139,6 +149,7 @@
       this.reloadPending = false;
       this.manualAbort?.abort();
       this.manualAbort = null;
+      this.cancelManualItemMergePreview();
     }
 
     source(name) { return this.getAttribute(name); }
@@ -159,12 +170,13 @@
       return payload;
     }
 
-    async postJson(source, payload) {
+    async postJson(source, payload, signal) {
       const response = await fetch(source, {
         method: 'POST',
         headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
         credentials: 'same-origin',
         body: JSON.stringify(payload),
+        signal,
       });
       const responsePayload = await response.json();
       if (!response.ok) {
@@ -592,11 +604,46 @@
       </details>`;
     }
 
+    renderManualItemMergeSection() {
+      const sourceId = escapeHtml(this.manualItemMergeSourceId);
+      const targetId = escapeHtml(this.manualItemMergeTargetId);
+      const comparing = this.manualItemMergeRequest !== null;
+      const disabled = comparing ? ' disabled' : '';
+      const status = this.manualItemMergeStatus
+        ? `<div class="k-admin-status${this.manualItemMergeError ? ' k-admin-status--error' : ''}" aria-live="polite">${escapeHtml(this.manualItemMergeStatus)}</div>`
+        : '';
+      const preview = this.manualItemMergePreview;
+      let comparison = '';
+      if (preview && typeof preview === 'object' && preview.source && preview.target) {
+        const source = preview.source;
+        const target = preview.target;
+        const conflicts = Array.isArray(preview.conflicts) ? preview.conflicts : [];
+        const sourceLabel = `${source.title || `Item ${source.id}`}${source.release_year ? ` (${source.release_year})` : ''}`;
+        const targetLabel = `${target.title || `Item ${target.id}`}${target.release_year ? ` (${target.release_year})` : ''}`;
+        const sourceFacts = `${source.kind || 'item'} · ${plural(Number(source.media_file_count || 0), 'media file')} · ${plural(Number(source.descendant_count || 0), 'child record')}`;
+        const targetFacts = `${target.kind || 'item'} · ${plural(Number(target.media_file_count || 0), 'media file')} · ${plural(Number(target.descendant_count || 0), 'child record')}`;
+        const rows = conflicts.map((conflict) => {
+          const field = String(conflict.field || '');
+          if (!field) return '';
+          const label = escapeHtml(String(conflict.label || field));
+          const sourceValue = escapeHtml(String(conflict.source_value || '—'));
+          const targetValue = escapeHtml(String(conflict.target_value || '—'));
+          const selected = this.manualItemMergeFieldChoices.get(field) || 'target';
+          return `<tr><th scope="row">${label}</th><td><label class="k-manual-item-merge__choice"><input type="radio" name="manual-item-merge-${escapeHtml(field)}" value="source" data-admin-manual-item-merge-choice="${escapeHtml(field)}"${selected === 'source' ? ' checked' : ''}> <span>${sourceValue}</span></label></td><td><label class="k-manual-item-merge__choice"><input type="radio" name="manual-item-merge-${escapeHtml(field)}" value="target" data-admin-manual-item-merge-choice="${escapeHtml(field)}"${selected === 'target' ? ' checked' : ''}> <span>${targetValue}</span></label></td></tr>`;
+        }).join('');
+        const impact = preview.impact || {};
+        const matched = Number(preview.matched_descendant_count || 0);
+        const transferred = Number(preview.transferred_descendant_count || 0);
+        comparison = `<section class="k-manual-item-merge__comparison" data-admin-manual-item-merge-preview><div class="k-manual-item-merge__records"><div><span class="k-admin-row__eyebrow">Remove</span><strong><a href="/item/${Number(source.id)}">${escapeHtml(sourceLabel)}</a></strong><small>${escapeHtml(sourceFacts)}</small></div><div><span class="k-admin-row__eyebrow">Keep</span><strong><a href="/item/${Number(target.id)}">${escapeHtml(targetLabel)}</a></strong><small>${escapeHtml(targetFacts)}</small></div></div>${conflicts.length ? `<div class="k-manual-item-merge__table-wrap"><table class="k-manual-item-merge__table"><thead><tr><th>Field</th><th>Remove #${Number(source.id)}</th><th>Keep #${Number(target.id)}</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="k-item-editor__muted">No top-level scalar fields conflict; linked state is retained automatically.</p>'}<p class="k-item-editor__muted">${plural(matched, 'matching child record')} will be merged; ${plural(transferred, 'source-only child record')} will be retained under the kept item. Tags, protected fields, external IDs, collections, watch-order entries, playback state, media files, and cached artwork are retained where compatible.</p><p class="k-item-editor__muted">Affected state: ${Number(impact.playback_states || 0)} playback · ${Number(impact.metadata_bindings || 0)} metadata · ${Number(impact.collection_memberships || 0)} collections · ${Number(impact.watch_order_entries || 0)} watch-order entries.</p><div class="k-action-row"><button type="button" class="k-button k-button--danger" data-admin-manual-item-merge-apply>Merge into item ${Number(target.id)}</button></div></section>`;
+      }
+      return `<section class="k-manual-item-merge"><div><h3 class="k-item-editor__section-heading">Merge two catalogue records</h3><p class="k-item-editor__muted">Enter the duplicate record to remove and the record to keep. The comparison is revalidated before it runs and Katalog creates a database backup first.</p></div><form class="k-manual-item-merge__form" data-admin-manual-item-merge-form${comparing ? ' aria-busy="true"' : ''}><label class="k-item-editor__match-input"><span>Remove item ID</span><input class="k-input" name="sourceItemId" value="${sourceId}" inputmode="numeric" pattern="[0-9]*" required${disabled}></label><label class="k-item-editor__match-input"><span>Keep item ID</span><input class="k-input" name="targetItemId" value="${targetId}" inputmode="numeric" pattern="[0-9]*" required${disabled}></label><button type="submit" class="k-button"${disabled}>${comparing ? 'Comparing records…' : 'Compare records'}</button></form>${status}${comparison}</section>`;
+    }
+
     renderDuplicatesSection(open) {
       if (!this.duplicates || typeof this.duplicates !== 'object') {
         return `<details class="k-admin-issue-panel" data-admin-library-duplicates id="library-duplicates"${open ? ' open' : ''}>
           <summary><span>Duplicate issues</span><small>Load on open</small></summary>
-          <div class="k-admin-issue-panel__content">${this.renderLibraryIssuePlaceholder('duplicates', 'Duplicate issues')}</div>
+          <div class="k-admin-issue-panel__content">${this.renderManualItemMergeSection()}${this.renderLibraryIssuePlaceholder('duplicates', 'Duplicate issues')}</div>
         </details>`;
       }
       const candidates = Array.isArray(this.duplicates?.candidates) ? this.duplicates.candidates : [];
@@ -620,6 +667,7 @@
       return `<details class="k-admin-issue-panel" data-admin-library-duplicates id="library-duplicates"${open ? ' open' : ''}>
         <summary><span>Duplicate issues</span><small>${summary}</small></summary>
         <div class="k-admin-issue-panel__content">
+          ${this.renderManualItemMergeSection()}
           ${this.sectionHeader('Duplicate records', candidates.length ? 'Merge only the reviewed record pairs' : 'No record duplicates are ready to merge', mergeSelected)}
           <section class="k-admin-list">${rows || '<div class="k-admin-status">No record duplicates need action.</div>'}</section>
           <section class="k-admin-file-issues">
@@ -753,6 +801,142 @@
       this.renderJobs();
     }
 
+    manualItemMergeId(value) {
+      const text = String(value || '').trim();
+      if (!/^\d+$/.test(text)) return null;
+      const id = Number(text);
+      return Number.isSafeInteger(id) && id > 0 ? id : null;
+    }
+
+    cancelManualItemMergePreview() {
+      this.manualItemMergeAbort?.abort();
+      this.manualItemMergeAbort = null;
+      this.manualItemMergeRequest = null;
+    }
+
+    async previewManualItemMerge(sourceValue, targetValue) {
+      this.cancelManualItemMergePreview();
+      this.manualItemMergeSourceId = String(sourceValue || '').trim();
+      this.manualItemMergeTargetId = String(targetValue || '').trim();
+      const sourceItemId = this.manualItemMergeId(this.manualItemMergeSourceId);
+      const targetItemId = this.manualItemMergeId(this.manualItemMergeTargetId);
+      this.manualItemMergePreview = null;
+      this.manualItemMergeFieldChoices.clear();
+      if (sourceItemId === null || targetItemId === null) {
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = 'Enter two positive whole-number item IDs.';
+        this.renderLibraries();
+        return;
+      }
+      if (sourceItemId === targetItemId) {
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = 'The record to remove and the record to keep must be different.';
+        this.renderLibraries();
+        return;
+      }
+      const source = this.source('manual-merge-preview-source');
+      if (!source) {
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = 'Manual merge preview is unavailable.';
+        this.renderLibraries();
+        return;
+      }
+      const controller = new AbortController();
+      const request = this.postJson(
+        source,
+        {sourceItemId, targetItemId},
+        controller.signal,
+      );
+      this.manualItemMergeAbort = controller;
+      this.manualItemMergeRequest = request;
+      this.manualItemMergeError = false;
+      this.manualItemMergeStatus = 'Comparing catalogue records…';
+      this.renderLibraries();
+      try {
+        const preview = await request;
+        if (!this.isConnected || this.manualItemMergeRequest !== request) return;
+        this.manualItemMergePreview = preview;
+        this.manualItemMergeError = false;
+        this.manualItemMergeStatus = Array.isArray(preview?.conflicts) && preview.conflicts.length
+          ? 'Choose the value to keep for each conflicting field.'
+          : 'These records have no top-level scalar conflicts.';
+      } catch (error) {
+        if (!this.isConnected || this.manualItemMergeRequest !== request || error?.name === 'AbortError') return;
+        this.manualItemMergePreview = null;
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = error?.message || 'The catalogue records could not be compared.';
+      } finally {
+        if (this.manualItemMergeRequest === request) {
+          this.manualItemMergeRequest = null;
+          if (this.manualItemMergeAbort === controller) this.manualItemMergeAbort = null;
+          if (this.isConnected) this.renderLibraries();
+        }
+      }
+    }
+
+    manualItemMergeChoices(preview) {
+      const conflicts = Array.isArray(preview?.conflicts) ? preview.conflicts : [];
+      const choices = [];
+      for (const conflict of conflicts) {
+        const field = typeof conflict?.field === 'string' ? conflict.field : '';
+        const selected = field
+          ? this.querySelector(`[data-admin-manual-item-merge-choice="${field}"]:checked`)
+          : null;
+        if (!field || !(selected instanceof HTMLInputElement) || !['source', 'target'].includes(selected.value)) {
+          return null;
+        }
+        choices.push({field, keep: selected.value});
+      }
+      return choices;
+    }
+
+    async applyManualItemMerge() {
+      if (this.manualItemMergeRequest !== null) return;
+      const preview = this.manualItemMergePreview;
+      const sourceItemId = this.manualItemMergeId(this.manualItemMergeSourceId);
+      const targetItemId = this.manualItemMergeId(this.manualItemMergeTargetId);
+      const form = this.querySelector('[data-admin-manual-item-merge-form]');
+      const values = form instanceof HTMLFormElement ? new FormData(form) : null;
+      if (
+        !preview
+        || sourceItemId === null
+        || targetItemId === null
+        || this.manualItemMergeId(values?.get('sourceItemId')) !== sourceItemId
+        || this.manualItemMergeId(values?.get('targetItemId')) !== targetItemId
+      ) {
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = 'Compare the current item IDs before merging.';
+        this.renderLibraries();
+        return;
+      }
+      const fieldChoices = this.manualItemMergeChoices(preview);
+      if (fieldChoices === null) {
+        this.manualItemMergeError = true;
+        this.manualItemMergeStatus = 'Choose a value for every conflicting field.';
+        this.renderLibraries();
+        return;
+      }
+      const completed = await this.confirmOperation('manual-item-merge', {
+        sourceItemId,
+        targetItemId,
+        previewToken: preview.preview_token,
+        fieldChoices,
+        confirmed: true,
+      }, {
+        title: `Merge item ${sourceItemId} into item ${targetItemId}?`,
+        message: 'The removed record’s catalogue state and media associations move to the kept record. Media files stay on disk. Katalog creates a database backup first.',
+        confirmLabel: 'Merge records',
+        destructive: true,
+      });
+      if (!completed) return;
+      this.manualItemMergePreview = null;
+      this.manualItemMergeSourceId = '';
+      this.manualItemMergeTargetId = '';
+      this.manualItemMergeStatus = '';
+      this.manualItemMergeError = false;
+      this.manualItemMergeFieldChoices.clear();
+    }
+
     requestConfirmation(confirmation) {
       return requestKanvasConfirmation(
         this.querySelector('[data-admin-confirmation]'), confirmation
@@ -775,6 +959,19 @@
       });
       this.querySelectorAll('[data-admin-library-issue-retry]').forEach((button) => button.addEventListener('click', () => {
         this.retryLibraryIssue(button.dataset.adminLibraryIssueRetry);
+      }));
+      this.querySelector('[data-admin-manual-item-merge-form]')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const values = new FormData(event.currentTarget);
+        void this.previewManualItemMerge(values.get('sourceItemId'), values.get('targetItemId'));
+      });
+      this.querySelector('[data-admin-manual-item-merge-apply]')?.addEventListener('click', () => {
+        void this.applyManualItemMerge();
+      });
+      this.querySelectorAll('[data-admin-manual-item-merge-choice]').forEach((input) => input.addEventListener('change', () => {
+        const field = input.dataset.adminManualItemMergeChoice;
+        if (!field || !['source', 'target'].includes(input.value)) return;
+        this.manualItemMergeFieldChoices.set(field, input.value);
       }));
       this.querySelectorAll('[data-admin-operation]').forEach((button) => button.addEventListener('click', () => {
         const extra = {rootId: button.dataset.rootId ? Number(button.dataset.rootId) : null};

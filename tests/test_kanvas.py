@@ -60,6 +60,7 @@ from kasana.kanvas.dashboard import (
     administration_libraries_duplicates_page,
     administration_libraries_hierarchy_page,
     administration_libraries_page,
+    administration_manual_item_merge_preview_data,
     administration_metadata_artwork_page,
     administration_metadata_data,
     administration_metadata_page,
@@ -79,6 +80,7 @@ from kasana.kanvas.dashboard import (
     delete_watch_order_action,
     design_page,
     item_artwork_fetch_action,
+    item_delete_action,
     item_edit_action,
     item_edit_data,
     item_metadata_match_action,
@@ -195,6 +197,7 @@ from kasana.katalog.public import (
     DownloadGrantResponse,
     DuplicateEpisodeIssue,
     DuplicateResolutionPreview,
+    HierarchyRepairImpact,
     JobProgress,
     JobStatus,
     KatalogClientError,
@@ -212,6 +215,13 @@ from kasana.katalog.public import (
     LibraryRootKind,
     LibraryRootSummary,
     LibraryRootUpdate,
+    ManualItemMergeConflict,
+    ManualItemMergeField,
+    ManualItemMergeItem,
+    ManualItemMergePreview,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
+    ManualItemMergeSide,
     MediaStreamSummary,
     MediaTechnicalSummary,
     MetadataBindingReference,
@@ -3154,6 +3164,41 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
             ),
         ),
     )
+    manual_merge_preview = ManualItemMergePreview(
+        preview_token="0" * 64,
+        source=ManualItemMergeItem(
+            id=7,
+            title="Duplicate Rings of Power",
+            kind=LibraryItemKind.SERIES,
+            release_year=2022,
+            media_file_count=1,
+            descendant_count=2,
+        ),
+        target=ManualItemMergeItem(
+            id=8,
+            title="The Lord of the Rings: The Rings of Power",
+            kind=LibraryItemKind.SERIES,
+            release_year=2022,
+            media_file_count=8,
+            descendant_count=10,
+        ),
+        conflicts=(
+            ManualItemMergeConflict(
+                field=ManualItemMergeField.TITLE,
+                label="Title",
+                source_value="Duplicate Rings of Power",
+                target_value="The Lord of the Rings: The Rings of Power",
+            ),
+        ),
+        matched_descendant_count=2,
+        transferred_descendant_count=0,
+        impact=HierarchyRepairImpact(
+            playback_states=0,
+            metadata_bindings=1,
+            collection_memberships=0,
+            watch_order_entries=0,
+        ),
+    )
 
     class AdminCatalogue:
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
@@ -3200,6 +3245,13 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
                 ),
             )
 
+        async def manual_item_merge_preview(
+            self, request: ManualItemMergePreviewRequest
+        ) -> ManualItemMergePreview:
+            assert request.source_item_id == 7
+            assert request.target_item_id == 8
+            return manual_merge_preview
+
         async def submit_scan(self, _request: object) -> JobView:
             calls.append("scan")
             return _admin_job()
@@ -3213,6 +3265,15 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
 
         async def submit_artwork_fetch(self, _request: object) -> JobView:
             calls.append("artwork")
+            return _admin_job()
+
+        async def submit_manual_item_merge(self, request: ManualItemMergeRequest) -> JobView:
+            assert request.source_item_id == 7
+            assert request.target_item_id == 8
+            choices = request.field_choices
+            assert choices[0].field is ManualItemMergeField.TITLE
+            assert choices[0].keep is ManualItemMergeSide.TARGET
+            calls.append("manual-merge")
             return _admin_job()
 
         async def cancel_job(self, _job_id: str) -> JobView:
@@ -3281,10 +3342,21 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         Request({"type": "http", "query_string": b"", "headers": []})
     )
     duplicates_response = await administration_duplicates_data(request)
+    manual_merge_response = await administration_manual_item_merge_preview_data(
+        cast(Request, JsonRequest({"sourceItemId": 7, "targetItemId": 8}))
+    )
     payloads: tuple[dict[str, object], ...] = (
         {"operation": "scan", "rootId": 1, "dryRun": True},
         {"operation": "library-consistency", "rootId": 1, "includeUnavailable": True},
         {"operation": "artwork-fetch"},
+        {
+            "operation": "manual-item-merge",
+            "sourceItemId": 7,
+            "targetItemId": 8,
+            "previewToken": "0" * 64,
+            "fieldChoices": [{"field": "title", "keep": "target"}],
+            "confirmed": True,
+        },
         {"operation": "cancel-job", "jobId": "job-1"},
         {"operation": "clear-job", "jobId": "job-1", "confirmed": True},
         {"operation": "match", "itemId": 7, "provider": "tmdb", "providerId": "42"},
@@ -3306,11 +3378,13 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
     assert json.loads(bytes(directories_response.body))["entries"][0]["path"] == "/media/Movies"
     assert json.loads(bytes(metadata_response.body))["items"][0]["itemId"] == 7
     assert json.loads(bytes(duplicates_response.body))["fileIssues"][0]["id"] == 3
+    assert json.loads(bytes(manual_merge_response.body))["target"]["id"] == 8
     assert all(response.status_code == 200 for response in actions)
     assert calls == [
         "scan",
         "consistency",
         "artwork",
+        "manual-merge",
         "cancel",
         "clear",
         "match",
@@ -3741,6 +3815,7 @@ async def test_item_edit_endpoints_report_data_and_validation(
         ),
     )
     reassigned: list[tuple[int, str, str]] = []
+    deleted: list[tuple[int, bool]] = []
 
     class EditingCatalogue:
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
@@ -3807,6 +3882,9 @@ async def test_item_edit_endpoints_report_data_and_validation(
             assert request.force_default_subtitle_font_scale is True
             return LibraryItemMutationResult(item=item, audit=audit)
 
+        async def delete_item(self, item_id: int, *, confirm: bool) -> None:
+            deleted.append((item_id, confirm))
+
     class JsonRequest:
         def __init__(self, payload: dict[str, object]) -> None:
             self._payload = payload
@@ -3859,6 +3937,10 @@ async def test_item_edit_endpoints_report_data_and_validation(
     invalid_action_response = await item_edit_action(
         7, cast(Request, JsonRequest({"tags": "anime"}))
     )
+    delete_response = await item_delete_action(
+        7, cast(Request, JsonRequest({"confirmed": True}))
+    )
+    unconfirmed_delete_response = await item_delete_action(7, cast(Request, JsonRequest({})))
     artwork_fetch_response = await item_artwork_fetch_action(
         7, Request({"type": "http", "query_string": b"", "headers": []})
     )
@@ -3912,12 +3994,15 @@ async def test_item_edit_endpoints_report_data_and_validation(
     ]
     assert json.loads(bytes(action_response.body))["audit"]["changed_fields"] == ["title", "tags"]
     assert invalid_action_response.status_code == 422
+    assert json.loads(bytes(delete_response.body)) == {"itemId": 7, "action": "deleted"}
+    assert unconfirmed_delete_response.status_code == 422
     assert json.loads(bytes(artwork_fetch_response.body)) == {
         "artwork": [fetched_artwork[0].model_dump(mode="json")]
     }
     assert json.loads(bytes(metadata_match_response.body)) == {"itemId": 7, "action": "reassigned"}
     assert unconfirmed_match_response.status_code == 422
     assert reassigned == [(7, "tmdb", "315")]
+    assert deleted == [(7, True)]
 
 
 async def test_metadata_match_action_preserves_katalog_conflict_guidance(
@@ -4548,6 +4633,7 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
         assert _element_props(item_editors[0])["artwork-fetch-source"] == (
             "/kanvas/actions/items/7/artwork-fetch"
         )
+        assert _element_props(item_editors[0])["delete-source"] == "/kanvas/actions/items/7/delete"
 
 
 def test_item_title_renders_linked_season_and_episode_hierarchies() -> None:
@@ -5675,6 +5761,8 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert "Save local edits does not change the metadata association." in javascript
     assert "parent-choices-source" in javascript
     assert "confirmDiscard" in javascript
+    assert "Remove catalogue record" in javascript
+    assert "manual-merge-preview-source" in javascript
     assert 'data-profile-language="audio"' in javascript
     assert 'data-profile-language="subtitles"' in javascript
     assert 'name="autoplayOnResume"' in javascript

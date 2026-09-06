@@ -6,11 +6,13 @@ Anything with competing interpretations remains a durable manual-review item.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,14 +22,16 @@ from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
 from kasana.katalog.limits import MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS
-from kasana.katalog.metadata.scoring import normalise_title
 from kasana.katalog.models import (
     AuditIssue,
+    Collection,
     CollectionKin,
     HierarchyRepairRun,
     JSONObject,
+    Keiro,
     KeiroEntry,
     Kura,
+    LibraryItemEditEvent,
     MediaFile,
     MetadataBinding,
     MetadataCandidate,
@@ -44,11 +48,12 @@ from kasana.katalog.parsing import (
     ParsedMedia,
     ParsedMediaKind,
     ParseFailure,
-    infer_library_layout,
     is_decade_directory,
     parse_media_path,
+    resolve_library_layout,
 )
 from kasana.katalog.scanning.audit import structural_findings
+from kasana.katalog.series_paths import accepted_series_path_aliases, series_title_identity
 from kasana.katalog.services import bump_playback_state_revision
 from kasana.shared.metadata import ExternalIdentifier
 
@@ -156,6 +161,107 @@ class DuplicateResolutionError(ValueError):
     """A requested duplicate resolution is no longer safe to apply."""
 
 
+class ManualItemMergeError(ValueError):
+    """A requested manual merge is no longer structurally safe to apply."""
+
+
+class ManualItemMergeField(StrEnum):
+    """A top-level scalar field that may need a source or target decision."""
+
+    TITLE = "title"
+    SORT_TITLE = "sort_title"
+    RELEASE_YEAR = "release_year"
+    RELEASE_DATE = "release_date"
+    AIR_DATE = "air_date"
+    OVERVIEW = "overview"
+    SHOW_ARTWORK_LABEL = "show_artwork_label"
+
+
+class ManualItemMergeSide(StrEnum):
+    """The duplicate record that supplies one selected scalar value."""
+
+    SOURCE = "source"
+    TARGET = "target"
+
+
+@dataclass(frozen=True)
+class ManualItemMergeFieldChoice:
+    """One explicit resolution of a current top-level field conflict."""
+
+    field: ManualItemMergeField
+    keep: ManualItemMergeSide
+
+
+@dataclass(frozen=True)
+class ManualItemMergeConflict:
+    """A presentation-safe description of a scalar conflict."""
+
+    field: ManualItemMergeField
+    label: str
+    source_value: str
+    target_value: str
+
+
+@dataclass(frozen=True)
+class ManualItemMergeItem:
+    """The small, path-free record identity used by a merge preview."""
+
+    id: int
+    title: str
+    kind: ZaisanKind
+    release_year: int | None
+    media_file_count: int
+    descendant_count: int
+
+
+@dataclass(frozen=True)
+class ManualItemMergePreview:
+    """A fully validated manual merge proposal for two catalogue records."""
+
+    preview_token: str
+    source: ManualItemMergeItem
+    target: ManualItemMergeItem
+    conflicts: tuple[ManualItemMergeConflict, ...]
+    matched_descendant_count: int
+    transferred_descendant_count: int
+    impact: RepairImpact
+
+
+@dataclass(frozen=True)
+class _ManualItemMergeFieldDefinition:
+    field: ManualItemMergeField
+    label: str
+    attribute: str
+
+
+_MANUAL_ITEM_MERGE_FIELDS: tuple[_ManualItemMergeFieldDefinition, ...] = (
+    _ManualItemMergeFieldDefinition(ManualItemMergeField.TITLE, "Title", "title"),
+    _ManualItemMergeFieldDefinition(ManualItemMergeField.SORT_TITLE, "Sort title", "sort_title"),
+    _ManualItemMergeFieldDefinition(
+        ManualItemMergeField.RELEASE_YEAR, "Release year", "release_year"
+    ),
+    _ManualItemMergeFieldDefinition(
+        ManualItemMergeField.RELEASE_DATE, "Release date", "release_date"
+    ),
+    _ManualItemMergeFieldDefinition(ManualItemMergeField.AIR_DATE, "Air date", "air_date"),
+    _ManualItemMergeFieldDefinition(ManualItemMergeField.OVERVIEW, "Overview", "overview"),
+    _ManualItemMergeFieldDefinition(
+        ManualItemMergeField.SHOW_ARTWORK_LABEL,
+        "Artwork label",
+        "show_artwork_label",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class _ManualItemMergePlan:
+    source_item_id: int
+    target_item_id: int
+    pairs: tuple[tuple[int, int], ...]
+    transferred_children: tuple[tuple[int, int], ...]
+    preview: ManualItemMergePreview
+
+
 @dataclass(frozen=True)
 class HierarchyRepairFilters:
     root_id: int | None = None
@@ -167,14 +273,8 @@ _DEFAULT_REPAIR_FILTERS = HierarchyRepairFilters()
 
 
 def _hierarchy_title_key(kind: ZaisanKind, title: str) -> tuple[ZaisanKind, str]:
-    identity = _series_title_identity(title) if kind is ZaisanKind.SERIES else title.casefold()
+    identity = series_title_identity(title) if kind is ZaisanKind.SERIES else title.casefold()
     return kind, identity
-
-
-def _series_title_identity(title: str) -> str:
-    """Compare local folder aliases with canonical series titles without punctuation or ``The``."""
-
-    return "".join(normalise_title(title).split()).removeprefix("the")
 
 
 @dataclass(frozen=True)
@@ -187,9 +287,15 @@ class _HierarchyIndex:
     seasons_by_series_and_number: dict[tuple[int, int], tuple[Zaisan, ...]]
     episodes_by_identity: dict[tuple[str, int, int], tuple[Zaisan, ...]]
     specials_by_identity: dict[tuple[str, str], tuple[Zaisan, ...]]
+    series_path_aliases: dict[str, Zaisan]
 
     @classmethod
-    def from_items(cls, items: Sequence[Zaisan]) -> _HierarchyIndex:
+    def from_items(
+        cls,
+        items: Sequence[Zaisan],
+        *,
+        series_path_aliases: Mapping[str, Zaisan] | None = None,
+    ) -> _HierarchyIndex:
         items_by_id = {item.id: item for item in items}
         children: defaultdict[int, list[Zaisan]] = defaultdict(list)
         top_level: defaultdict[tuple[ZaisanKind, str], list[Zaisan]] = defaultdict(list)
@@ -219,7 +325,7 @@ class _HierarchyIndex:
                 if series is not None and series.item_kind is ZaisanKind.SERIES:
                     episodes[
                         (
-                            _series_title_identity(series.sort_title),
+                            series_title_identity(series.sort_title),
                             item.season_number,
                             item.episode_number,
                         )
@@ -229,7 +335,7 @@ class _HierarchyIndex:
                 and parent is not None
                 and parent.item_kind is ZaisanKind.SERIES
             ):
-                specials[(_series_title_identity(parent.sort_title), item.title.casefold())].append(
+                specials[(series_title_identity(parent.sort_title), item.title.casefold())].append(
                     item
                 )
         return cls(
@@ -249,6 +355,7 @@ class _HierarchyIndex:
             specials_by_identity={
                 identity: tuple(entries) for identity, entries in specials.items()
             },
+            series_path_aliases=dict(series_path_aliases or {}),
         )
 
     def top_level_item(
@@ -279,17 +386,45 @@ class _HierarchyIndex:
             None,
         )
 
+    def series_item(self, title: str) -> Zaisan | None:
+        """Resolve an exact series title or a trusted physical-directory alias."""
+
+        alias = self.series_path_aliases.get(series_title_identity(title))
+        if alias is not None:
+            return alias
+        return self.top_level_item(ZaisanKind.SERIES, title)
+
+    def resolved_series_title(self, path_title: str) -> str:
+        """Return the canonical target title for a physical series path title."""
+
+        series = self.series_item(path_title)
+        return series.sort_title if series is not None else path_title
+
+    def matches_series_path(self, series: Zaisan, path_title: str) -> bool:
+        """Whether a series is the established target for one parsed path title."""
+
+        alias = self.series_path_aliases.get(series_title_identity(path_title))
+        if alias is not None:
+            return alias.id == series.id
+        return series_title_identity(series.sort_title) == series_title_identity(path_title)
+
     def season_item(self, series_id: int, number: int) -> Zaisan | None:
         return next(iter(self.seasons_by_series_and_number.get((series_id, number), ())), None)
 
     def episode_item(
         self, series_title: str, season_number: int, episode_number: int, *, exclude_id: int
     ) -> Zaisan | None:
+        series = self.series_item(series_title)
+        identity = (
+            series_title_identity(series.sort_title)
+            if series is not None
+            else series_title_identity(series_title)
+        )
         return next(
             (
                 item
                 for item in self.episodes_by_identity.get(
-                    (_series_title_identity(series_title), season_number, episode_number), ()
+                    (identity, season_number, episode_number), ()
                 )
                 if item.id != exclude_id
             ),
@@ -297,11 +432,17 @@ class _HierarchyIndex:
         )
 
     def special_item(self, series_title: str, title: str, *, exclude_id: int) -> Zaisan | None:
+        series = self.series_item(series_title)
+        identity = (
+            series_title_identity(series.sort_title)
+            if series is not None
+            else series_title_identity(series_title)
+        )
         return next(
             (
                 item
                 for item in self.specials_by_identity.get(
-                    (_series_title_identity(series_title), title.casefold()), ()
+                    (identity, title.casefold()), ()
                 )
                 if item.id != exclude_id
             ),
@@ -352,7 +493,7 @@ class HierarchyRepairService:
             session.flush()
             return _record_result(session, plan, filters, applied=True, backup_path=backup_path)
 
-        return self._database.run_transaction(operation)
+        return self._database.run_transaction(operation, immediate=True)
 
 
 class DuplicateResolutionService:
@@ -397,21 +538,84 @@ class DuplicateResolutionService:
             for source_item_id, target_item_id in resolutions:
                 _merge_duplicate_item(session, source_item_id, target_item_id)
 
-        self._database.run_transaction(resolve)
+        self._database.run_transaction(resolve, immediate=True)
+
+
+class ManualItemMergeService:
+    """Merges administrator-selected duplicate records after a fresh safety preview."""
+
+    def __init__(self, database: KatalogDatabase) -> None:
+        self._database = database
+
+    def preview(self, *, source_item_id: int, target_item_id: int) -> ManualItemMergePreview:
+        """Return the currently valid merge plan without changing the catalogue."""
+
+        return self._database.run_transaction(
+            lambda session: _manual_item_merge_plan(
+                session,
+                source_item_id=source_item_id,
+                target_item_id=target_item_id,
+            ).preview
+        )
+
+    def apply(
+        self,
+        *,
+        source_item_id: int,
+        target_item_id: int,
+        preview_token: str,
+        field_choices: Sequence[ManualItemMergeFieldChoice],
+        backup_path: Path,
+    ) -> None:
+        """Apply a revalidated merge after the caller has made a database backup."""
+
+        if not backup_path.is_absolute():
+            msg = "Manual item merge requires an absolute SQLite backup path."
+            raise ValueError(msg)
+        if not backup_path.is_file():
+            msg = "Manual item merge requires a completed SQLite backup."
+            raise ManualItemMergeError(msg)
+
+        def merge(session: Session) -> None:
+            plan = _manual_item_merge_plan(
+                session,
+                source_item_id=source_item_id,
+                target_item_id=target_item_id,
+            )
+            if plan.preview.preview_token != preview_token:
+                msg = "The merge preview is stale. Reload it before applying the merge."
+                raise ManualItemMergeError(msg)
+            choices = _validated_manual_item_merge_choices(plan, field_choices)
+            _apply_manual_item_merge(session, plan, choices)
+
+        self._database.run_transaction(merge, immediate=True)
 
 
 def repair_backup_path(database_path: Path, now: datetime | None = None) -> Path:
     """Return a sibling backup location whose name identifies one repair attempt."""
 
     timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-    return database_path.with_name(f"{database_path.name}.hierarchy-repair-{timestamp}.bak")
+    return database_path.with_name(
+        f"{database_path.name}.hierarchy-repair-{timestamp}-{uuid4().hex}.bak"
+    )
 
 
 def duplicate_resolution_backup_path(database_path: Path, now: datetime | None = None) -> Path:
     """Return the backup path created before deleting a duplicate catalogue record."""
 
     timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-    return database_path.with_name(f"{database_path.name}.duplicate-resolution-{timestamp}.bak")
+    return database_path.with_name(
+        f"{database_path.name}.duplicate-resolution-{timestamp}-{uuid4().hex}.bak"
+    )
+
+
+def manual_item_merge_backup_path(database_path: Path, now: datetime | None = None) -> Path:
+    """Return the backup path created before an administrator-directed item merge."""
+
+    timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+    return database_path.with_name(
+        f"{database_path.name}.manual-item-merge-{timestamp}-{uuid4().hex}.bak"
+    )
 
 
 def _duplicate_resolution_candidates(
@@ -530,6 +734,399 @@ def _matching_hierarchy_pairs(
     return tuple(pairs)
 
 
+def _manual_item_merge_plan(
+    session: Session, *, source_item_id: int, target_item_id: int
+) -> _ManualItemMergePlan:
+    """Build one safe, administrator-directed merge plan from current database state."""
+
+    if source_item_id == target_item_id:
+        msg = "The removed and kept items must be different."
+        raise ManualItemMergeError(msg)
+    try:
+        source = _require_item(session, source_item_id)
+        target = _require_item(session, target_item_id)
+    except LookupError as error:
+        raise ManualItemMergeError(str(error)) from error
+    if source.library_root_id != target.library_root_id:
+        msg = "Manual item merge requires both records to be in the same library root."
+        raise ManualItemMergeError(msg)
+    if source.item_kind is not target.item_kind:
+        msg = "Manual item merge requires both records to have the same item type."
+        raise ManualItemMergeError(msg)
+    if source.parent_id != target.parent_id:
+        msg = "Manual item merge requires both records to have the same parent."
+        raise ManualItemMergeError(msg)
+    if not _manual_item_merge_direct_hierarchy_is_compatible(source, target):
+        msg = "Manual item merge requires matching season or episode identifiers."
+        raise ManualItemMergeError(msg)
+
+    items = tuple(
+        session.scalars(
+            select(Zaisan).where(Zaisan.library_root_id == source.library_root_id)
+        ).all()
+    )
+    items_by_id = {item.id: item for item in items}
+    children_by_parent = _children_by_parent(items)
+    pairs, transferred_children = _manual_matching_hierarchy_plan(
+        source,
+        target,
+        children_by_parent,
+    )
+    for source_item, target_item in pairs:
+        if not _metadata_bindings_are_compatible(source_item, target_item):
+            msg = (
+                "Manual item merge cannot choose between conflicting provider identities. "
+                "Resolve the metadata match first."
+            )
+            raise ManualItemMergeError(msg)
+
+    source_item_ids = _subtree_item_ids(source.id, children_by_parent)
+    target_item_ids = _subtree_item_ids(target.id, children_by_parent)
+    preview_item_ids = source_item_ids | target_item_ids
+    files_by_item = _files_by_item(
+        tuple(
+            session.scalars(
+                select(MediaFile).where(MediaFile.library_item_id.in_(preview_item_ids))
+            ).all()
+        )
+    )
+    transferred_item_ids: set[int] = set()
+    for child_id, _ in transferred_children:
+        transferred_item_ids.update(_subtree_item_ids(child_id, children_by_parent))
+    preview = ManualItemMergePreview(
+        preview_token=_manual_item_merge_preview_token(
+            source=source,
+            target=target,
+            source_item_ids=source_item_ids,
+            target_item_ids=target_item_ids,
+            items_by_id=items_by_id,
+            pairs=pairs,
+            transferred_children=transferred_children,
+        ),
+        source=_manual_item_merge_item(source, source_item_ids, files_by_item),
+        target=_manual_item_merge_item(target, target_item_ids, files_by_item),
+        conflicts=_manual_item_merge_conflicts(source, target),
+        matched_descendant_count=len(pairs) - 1,
+        transferred_descendant_count=len(transferred_item_ids),
+        impact=_repair_impact(session, source_item_ids),
+    )
+    return _ManualItemMergePlan(
+        source_item_id=source.id,
+        target_item_id=target.id,
+        pairs=tuple((source_item.id, target_item.id) for source_item, target_item in pairs),
+        transferred_children=transferred_children,
+        preview=preview,
+    )
+
+
+def _manual_item_merge_preview_token(
+    *,
+    source: Zaisan,
+    target: Zaisan,
+    source_item_ids: set[int],
+    target_item_ids: set[int],
+    items_by_id: dict[int, Zaisan],
+    pairs: Sequence[tuple[Zaisan, Zaisan]],
+    transferred_children: Sequence[tuple[int, int]],
+) -> str:
+    """Fingerprint every direct item value that a merge could otherwise overwrite.
+
+    Playback and other graph state is deliberately not part of this token: it is
+    retained automatically and may legitimately change while an administrator is
+    deciding.  Direct catalogue values, hierarchy membership, and the planned
+    pairings must still match the comparison the administrator reviewed.
+    """
+
+    payload = {
+        "source": _manual_item_merge_token_item(source),
+        "target": _manual_item_merge_token_item(target),
+        "sourceSubtree": [
+            _manual_item_merge_token_item(items_by_id[item_id])
+            for item_id in sorted(source_item_ids)
+        ],
+        "targetSubtree": [
+            _manual_item_merge_token_item(items_by_id[item_id])
+            for item_id in sorted(target_item_ids)
+        ],
+        "pairs": [(source_item.id, target_item.id) for source_item, target_item in pairs],
+        "transfers": list(transferred_children),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(encoded.encode()).hexdigest()
+
+
+def _manual_item_merge_token_item(item: Zaisan) -> dict[str, object]:
+    """Return the direct scalar catalogue state relevant to one manual merge."""
+
+    return {
+        "id": item.id,
+        "libraryRootId": item.library_root_id,
+        "parentId": item.parent_id,
+        "kind": item.item_kind.value,
+        "title": item.title,
+        "sortTitle": item.sort_title,
+        "releaseYear": item.release_year,
+        "releaseDate": _manual_item_merge_token_date(item.release_date),
+        "airDate": _manual_item_merge_token_date(item.air_date),
+        "seasonNumber": item.season_number,
+        "episodeNumber": item.episode_number,
+        "episodeEndSeasonNumber": item.episode_end_season_number,
+        "episodeEndNumber": item.episode_end_number,
+        "overview": item.overview,
+        "showArtworkLabel": item.show_artwork_label,
+    }
+
+
+def _manual_item_merge_token_date(value: date | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _manual_matching_hierarchy_plan(
+    source: Zaisan,
+    target: Zaisan,
+    children_by_parent: dict[int, tuple[Zaisan, ...]],
+) -> tuple[tuple[tuple[Zaisan, Zaisan], ...], tuple[tuple[int, int], ...]]:
+    """Pair duplicate descendants and retain source-only branches under the kept item."""
+
+    pairs: list[tuple[Zaisan, Zaisan]] = [(source, target)]
+    transferred_children: list[tuple[int, int]] = []
+    pending = [(source, target)]
+    while pending:
+        source_parent, target_parent = pending.pop()
+        source_children = children_by_parent.get(source_parent.id, ())
+        source_child_keys = tuple(
+            _manual_hierarchy_child_key(source_child) for source_child in source_children
+        )
+        if len(set(source_child_keys)) != len(source_child_keys):
+            msg = "The removed item's hierarchy has ambiguous duplicate child records."
+            raise ManualItemMergeError(msg)
+        target_children: defaultdict[tuple[object, ...], list[Zaisan]] = defaultdict(list)
+        for target_child in children_by_parent.get(target_parent.id, ()):
+            target_children[_manual_hierarchy_child_key(target_child)].append(target_child)
+        for source_child in source_children:
+            matching_children = target_children[_manual_hierarchy_child_key(source_child)]
+            if len(matching_children) > 1:
+                msg = "The kept item's hierarchy has ambiguous duplicate child records."
+                raise ManualItemMergeError(msg)
+            if not matching_children:
+                storage_identity = _manual_child_storage_identity(source_child)
+                if storage_identity is not None and any(
+                    storage_identity == _manual_child_storage_identity(target_child)
+                    for target_child in children_by_parent.get(target_parent.id, ())
+                ):
+                    msg = "A source-only child would conflict with a kept child record."
+                    raise ManualItemMergeError(msg)
+                transferred_children.append((source_child.id, target_parent.id))
+                continue
+            target_child = matching_children[0]
+            pairs.append((source_child, target_child))
+            pending.append((source_child, target_child))
+    return tuple(pairs), tuple(transferred_children)
+
+
+def _manual_item_merge_direct_hierarchy_is_compatible(source: Zaisan, target: Zaisan) -> bool:
+    """Keep an explicit child merge from silently changing its structural identity."""
+
+    if source.item_kind is ZaisanKind.SEASON:
+        return source.season_number == target.season_number
+    if source.item_kind is ZaisanKind.EPISODE:
+        return (
+            source.season_number,
+            source.episode_number,
+            source.episode_end_season_number,
+            source.episode_end_number,
+        ) == (
+            target.season_number,
+            target.episode_number,
+            target.episode_end_season_number,
+            target.episode_end_number,
+        )
+    return True
+
+
+def _manual_hierarchy_child_key(item: Zaisan) -> tuple[object, ...]:
+    """Pair manual-merge descendants using the identifiers that make reparenting safe."""
+
+    if item.item_kind is ZaisanKind.SEASON:
+        return item.item_kind, item.season_number
+    if item.item_kind is ZaisanKind.EPISODE:
+        return (
+            item.item_kind,
+            item.season_number,
+            item.episode_number,
+            item.episode_end_season_number,
+            item.episode_end_number,
+        )
+    return item.item_kind, item.sort_title.casefold()
+
+
+def _manual_child_storage_identity(item: Zaisan) -> tuple[object, ...] | None:
+    """Mirror the database's child uniqueness constraints before moving an unmatched child."""
+
+    if item.item_kind is ZaisanKind.EPISODE:
+        if item.episode_number is None:
+            return None
+        return item.item_kind, item.season_number, item.episode_number
+    return item.item_kind, item.sort_title.casefold()
+
+
+def _manual_item_merge_item(
+    item: Zaisan,
+    item_ids: set[int],
+    files_by_item: dict[int, tuple[MediaFile, ...]],
+) -> ManualItemMergeItem:
+    return ManualItemMergeItem(
+        id=item.id,
+        title=item.title,
+        kind=item.item_kind,
+        release_year=item.release_year,
+        media_file_count=sum(len(files_by_item.get(item_id, ())) for item_id in item_ids),
+        descendant_count=len(item_ids) - 1,
+    )
+
+
+def _manual_item_merge_conflicts(
+    source: Zaisan, target: Zaisan
+) -> tuple[ManualItemMergeConflict, ...]:
+    conflicts: list[ManualItemMergeConflict] = []
+    for definition in _MANUAL_ITEM_MERGE_FIELDS:
+        source_value = getattr(source, definition.attribute)
+        target_value = getattr(target, definition.attribute)
+        if source_value == target_value:
+            continue
+        conflicts.append(
+            ManualItemMergeConflict(
+                field=definition.field,
+                label=definition.label,
+                source_value=_manual_item_merge_display_value(source_value),
+                target_value=_manual_item_merge_display_value(target_value),
+            )
+        )
+    return tuple(conflicts)
+
+
+def _manual_item_merge_display_value(value: object) -> str:
+    """Render bounded scalar data for a comparison table without exposing internal paths."""
+
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Shown" if value else "Hidden"
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        normalised = value.strip()
+        if not normalised:
+            return "—"
+        if len(normalised) > 2_000:
+            return f"{normalised[:1_997]}…"
+        return normalised
+    return str(value)
+
+
+def _validated_manual_item_merge_choices(
+    plan: _ManualItemMergePlan,
+    field_choices: Sequence[ManualItemMergeFieldChoice],
+) -> dict[ManualItemMergeField, ManualItemMergeSide]:
+    choices: dict[ManualItemMergeField, ManualItemMergeSide] = {}
+    for choice in field_choices:
+        if choice.field in choices:
+            msg = "Each manual merge field can be selected only once."
+            raise ManualItemMergeError(msg)
+        choices[choice.field] = choice.keep
+    expected_fields = {conflict.field for conflict in plan.preview.conflicts}
+    if set(choices) != expected_fields:
+        msg = "The merge preview is stale. Reload it before applying the merge."
+        raise ManualItemMergeError(msg)
+    return choices
+
+
+def _apply_manual_item_merge(
+    session: Session,
+    plan: _ManualItemMergePlan,
+    choices: dict[ManualItemMergeField, ManualItemMergeSide],
+) -> None:
+    """Move graph state first, then remove matched descendants from leaves to root."""
+
+    source = _require_item(session, plan.source_item_id)
+    target = _require_item(session, plan.target_item_id)
+    source_values = {
+        definition.field: getattr(source, definition.attribute)
+        for definition in _MANUAL_ITEM_MERGE_FIELDS
+    }
+    _validate_manual_item_merge_target_identity(session, source, target, choices)
+    for source_child_id, target_parent_id in plan.transferred_children:
+        source_child = _require_item(session, source_child_id)
+        target_parent = _require_item(session, target_parent_id)
+        source_child.parent = target_parent
+    session.flush()
+
+    for source_item_id, target_item_id in reversed(plan.pairs[1:]):
+        _merge_items(session, source_item_id, target_item_id)
+    _merge_items(session, plan.source_item_id, plan.target_item_id)
+    target = _require_item(session, plan.target_item_id)
+    for definition in _MANUAL_ITEM_MERGE_FIELDS:
+        if choices.get(definition.field) is ManualItemMergeSide.SOURCE:
+            setattr(target, definition.attribute, source_values[definition.field])
+    session.add(
+        LibraryItemEditEvent(
+            library_item=target,
+            actor="manual merge",
+            changes={
+                "mergedItem": {
+                    "sourceItemId": plan.source_item_id,
+                    "fieldChoices": {
+                        field.value: side.value
+                        for field, side in sorted(choices.items(), key=lambda entry: entry[0].value)
+                    },
+                }
+            },
+            occurred_at=datetime.now(UTC),
+        )
+    )
+    session.flush()
+
+
+def _validate_manual_item_merge_target_identity(
+    session: Session,
+    source: Zaisan,
+    target: Zaisan,
+    choices: dict[ManualItemMergeField, ManualItemMergeSide],
+) -> None:
+    """Reject a field selection that would violate a remaining movie identity."""
+
+    if target.item_kind is not ZaisanKind.MOVIE or target.parent_id is not None:
+        return
+    sort_title = (
+        source.sort_title
+        if choices.get(ManualItemMergeField.SORT_TITLE) is ManualItemMergeSide.SOURCE
+        else target.sort_title
+    )
+    release_year = (
+        source.release_year
+        if choices.get(ManualItemMergeField.RELEASE_YEAR) is ManualItemMergeSide.SOURCE
+        else target.release_year
+    )
+    conditions = [
+        Zaisan.id.not_in((source.id, target.id)),
+        Zaisan.library_root_id == target.library_root_id,
+        Zaisan.parent_id.is_(None),
+        Zaisan.item_kind == ZaisanKind.MOVIE,
+        Zaisan.sort_title == sort_title,
+    ]
+    if release_year is None:
+        conditions.append(Zaisan.release_year.is_(None))
+    else:
+        conditions.append(Zaisan.release_year == release_year)
+    conflicting_item_id = session.scalar(select(Zaisan.id).where(*conditions))
+    if conflicting_item_id is not None:
+        msg = (
+            "The selected sort title and release year would conflict with "
+            f"library item {conflicting_item_id}."
+        )
+        raise ManualItemMergeError(msg)
+
+
 def _hierarchy_child_key(item: Zaisan) -> tuple[object, ...]:
     """Return the stable local identity used to pair duplicate hierarchy children."""
 
@@ -589,16 +1186,11 @@ def _merge_duplicate_item(session: Session, source_item_id: int, target_item_id:
         raise DuplicateResolutionError(msg)
     for source_child, target_child in reversed(pairs[1:]):
         _merge_items(session, source_child.id, target_child.id)
-    source_identifiers = {
-        (binding.provider, binding.provider_id) for binding in source.metadata_bindings
-    }
     source_title = source.title
     source_sort_title = source.sort_title
     source_release_year = source.release_year
     source_release_date = source.release_date
     source_overview = source.overview
-    source_tags = set(source.tags)
-    source_artwork = dict(source.selected_artwork_ids)
     _merge_items(session, source_item_id, target_item_id)
     target.title = source_title
     target.sort_title = source_sort_title
@@ -608,14 +1200,6 @@ def _merge_duplicate_item(session: Session, source_item_id: int, target_item_id:
         target.release_date = source_release_date
     if source_overview is not None:
         target.overview = source_overview
-    target.tags = sorted(set(target.tags) | source_tags)
-    target.selected_artwork_ids = {
-        **source_artwork,
-        **target.selected_artwork_ids,
-    }
-    for candidate in target.metadata_candidates:
-        if (candidate.provider, candidate.provider_id) in source_identifiers:
-            candidate.status = MetadataCandidateStatus.ACCEPTED
     session.flush()
 
 
@@ -634,7 +1218,28 @@ def _build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyR
             ).all()
         )
         files_by_item = _files_by_item(root_files)
-        hierarchy = _HierarchyIndex.from_items(root_items)
+        layout = resolve_library_layout(Path(root.path), root.expected_media_kind)
+        matched_series_ids = frozenset(
+            session.scalars(
+                select(MetadataBinding.library_item_id)
+                .join(Zaisan)
+                .where(
+                    Zaisan.library_root_id == root.id,
+                    Zaisan.item_kind == ZaisanKind.SERIES,
+                    MetadataBinding.status == MetadataMatchStatus.MATCHED,
+                )
+            )
+        )
+        hierarchy = _HierarchyIndex.from_items(
+            root_items,
+            series_path_aliases=accepted_series_path_aliases(
+                root_path=Path(root.path),
+                layout=layout,
+                items=root_items,
+                media_files=root_files,
+                matched_series_ids=matched_series_ids,
+            ),
+        )
         selected_items = (
             tuple(item for item in root_items if item.id == filters.item_id)
             if filters.item_id is not None
@@ -642,7 +1247,6 @@ def _build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyR
         )
         if filters.item_id is not None and not selected_items:
             continue
-        layout = infer_library_layout(Path(root.path))
         creation_keys: set[tuple[ZaisanKind, str, int | None]] = set()
         for item in selected_items:
             item_actions, item_reviews = _plan_item(
@@ -829,6 +1433,7 @@ def _plan_episode_or_special(
         ]
     parsed_item = candidates[0]
     assert parsed_item.series_title is not None
+    target_series_title = hierarchy.resolved_series_title(parsed_item.series_title)
     if parsed_item.kind is ParsedMediaKind.EPISODE:
         assert parsed_item.season_number is not None
         assert parsed_item.episode_number is not None
@@ -863,12 +1468,11 @@ def _plan_episode_or_special(
             and parent.season_number == parsed_item.season_number
             and series is not None
             and series.item_kind is ZaisanKind.SERIES
-            and _series_title_identity(series.sort_title)
-            == _series_title_identity(parsed_item.series_title)
+            and hierarchy.matches_series_path(series, parsed_item.series_title)
         ):
             return [], []
         actions = _ensure_series_and_season_actions(
-            root.id, parsed_item.series_title, parsed_item.season_number, hierarchy, creation_keys
+            root.id, target_series_title, parsed_item.season_number, hierarchy, creation_keys
         )
         if item.item_kind is not ZaisanKind.EPISODE:
             actions.append(
@@ -886,7 +1490,7 @@ def _plan_episode_or_special(
                 kind=RepairActionKind.REPARENT,
                 itemId=item.id,
                 targetKind=ZaisanKind.SEASON,
-                targetSeriesTitle=parsed_item.series_title,
+                targetSeriesTitle=target_series_title,
                 targetSeasonNumber=parsed_item.season_number,
                 explanation="Place the episode below its path-proven series season.",
             )
@@ -902,11 +1506,10 @@ def _plan_episode_or_special(
         item.item_kind is ZaisanKind.SPECIAL
         and parent is not None
         and parent.item_kind is ZaisanKind.SERIES
-        and _series_title_identity(parent.sort_title)
-        == _series_title_identity(parsed_item.series_title)
+        and hierarchy.matches_series_path(parent, parsed_item.series_title)
     ):
         return [], []
-    actions = _ensure_series_actions(root.id, parsed_item.series_title, hierarchy, creation_keys)
+    actions = _ensure_series_actions(root.id, target_series_title, hierarchy, creation_keys)
     if item.item_kind is not ZaisanKind.SPECIAL:
         actions.append(
             RepairAction(
@@ -922,7 +1525,7 @@ def _plan_episode_or_special(
             kind=RepairActionKind.REPARENT,
             itemId=item.id,
             targetKind=ZaisanKind.SERIES,
-            targetSeriesTitle=parsed_item.series_title,
+            targetSeriesTitle=target_series_title,
             explanation="Place the special below its path-proven series.",
         )
     )
@@ -968,13 +1571,14 @@ def _plan_top_level_extra(
         )
         return actions, []
     assert series_title is not None
-    actions = _ensure_series_actions(root.id, series_title, hierarchy, creation_keys)
+    target_series_title = hierarchy.resolved_series_title(series_title)
+    actions = _ensure_series_actions(root.id, target_series_title, hierarchy, creation_keys)
     actions.append(
         RepairAction(
             kind=RepairActionKind.REPARENT,
             itemId=item.id,
             targetKind=ZaisanKind.SERIES,
-            targetSeriesTitle=series_title,
+            targetSeriesTitle=target_series_title,
             explanation="Attach the top-level extra beneath its path-proven series.",
         )
     )
@@ -998,7 +1602,11 @@ def _plan_orphan_season(
         for child in hierarchy.children_by_parent.get(item.id, ())
         for media_file in files_by_item.get(child.id, ())
     )
-    parsed = _parsed_files(root, infer_library_layout(Path(root.path)), tuple(child_files))
+    parsed = _parsed_files(
+        root,
+        resolve_library_layout(Path(root.path), root.expected_media_kind),
+        tuple(child_files),
+    )
     episodes = tuple(entry for entry in parsed if entry.kind is ParsedMediaKind.EPISODE)
     series_titles = {entry.series_title for entry in episodes}
     if len(series_titles) != 1 or None in series_titles:
@@ -1011,13 +1619,14 @@ def _plan_orphan_season(
         ]
     series_title = next(iter(series_titles))
     assert series_title is not None
-    actions = _ensure_series_actions(root.id, series_title, hierarchy, creation_keys)
+    target_series_title = hierarchy.resolved_series_title(series_title)
+    actions = _ensure_series_actions(root.id, target_series_title, hierarchy, creation_keys)
     actions.append(
         RepairAction(
             kind=RepairActionKind.REPARENT,
             itemId=item.id,
             targetKind=ZaisanKind.SERIES,
-            targetSeriesTitle=series_title,
+            targetSeriesTitle=target_series_title,
             explanation="Place the season below the series proven by its child episode paths.",
         )
     )
@@ -1104,7 +1713,7 @@ def _ensure_series_actions(
     hierarchy: _HierarchyIndex,
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
-    if hierarchy.top_level_item(ZaisanKind.SERIES, title) is not None:
+    if hierarchy.series_item(title) is not None:
         return []
     key = (ZaisanKind.SERIES, title.casefold(), None)
     if key in creation_keys:
@@ -1129,7 +1738,7 @@ def _ensure_series_and_season_actions(
     creation_keys: set[tuple[ZaisanKind, str, int | None]],
 ) -> list[RepairAction]:
     actions = _ensure_series_actions(root_id, series_title, hierarchy, creation_keys)
-    existing_series = hierarchy.top_level_item(ZaisanKind.SERIES, series_title)
+    existing_series = hierarchy.series_item(series_title)
     existing_season = (
         hierarchy.season_item(existing_series.id, season_number)
         if existing_series is not None
@@ -1593,21 +2202,29 @@ def _merge_items(session: Session, source_id: int, target_id: int) -> None:
     _move_collection_memberships(session, source, target)
     _move_watch_order_entries(session, source, target)
     _move_metadata(session, source, target)
-    for media_file in source.media_files:
+    for media_file in tuple(source.media_files):
         media_file.library_item = target
-    for artwork in source.cached_artwork:
+    for artwork in tuple(source.cached_artwork):
         artwork.library_item = target
-    for session_entry in source.playback_session_entries:
+    for session_entry in tuple(source.playback_session_entries):
         session_entry.library_item = target
     for playback_session in session.scalars(
         select(PlaybackSession).where(PlaybackSession.context_item_id == source.id)
     ):
         playback_session.context_item_id = target.id
+    for edit_event in tuple(source.edit_events):
+        edit_event.library_item = target
     target.locked_metadata_fields = sorted(
         set(target.locked_metadata_fields) | set(source.locked_metadata_fields)
     )
+    target.tags = sorted(set(target.tags) | set(source.tags))
     target.local_external_ids = _merged_local_external_ids(source, target)
+    target.selected_artwork_ids = {
+        **source.selected_artwork_ids,
+        **target.selected_artwork_ids,
+    }
     session.flush()
+    _accept_candidates_for_matched_bindings(session, target)
     session.delete(source)
     session.flush()
 
@@ -1652,13 +2269,16 @@ def _move_playback_states(session: Session, source: Zaisan, target: Zaisan) -> N
             existing.position_seconds = state.position_seconds
             existing.duration_seconds = state.duration_seconds
             existing.last_played_at = state.last_played_at
+        source.playback_states.remove(state)
         session.delete(state)
     for user_id in affected_user_ids:
         bump_playback_state_revision(session, user_id=user_id)
 
 
 def _move_collection_memberships(session: Session, source: Zaisan, target: Zaisan) -> None:
+    affected_collection_ids: set[int] = set()
     for membership in tuple(source.collection_memberships):
+        affected_collection_ids.add(membership.collection_id)
         existing = session.scalar(
             select(CollectionKin).where(
                 CollectionKin.collection_id == membership.collection_id,
@@ -1668,11 +2288,24 @@ def _move_collection_memberships(session: Session, source: Zaisan, target: Zaisa
         if existing is None:
             membership.library_item = target
         else:
+            source.collection_memberships.remove(membership)
             session.delete(membership)
+    for collection in session.scalars(
+        select(Collection).where(Collection.artwork_item_id == source.id)
+    ):
+        collection.artwork_item_id = target.id
+        affected_collection_ids.add(collection.id)
+    if affected_collection_ids:
+        for collection in session.scalars(
+            select(Collection).where(Collection.id.in_(affected_collection_ids))
+        ):
+            collection.revision += 1
 
 
 def _move_watch_order_entries(session: Session, source: Zaisan, target: Zaisan) -> None:
+    affected_watch_order_ids: set[int] = set()
     for entry in tuple(source.watch_order_entries):
+        affected_watch_order_ids.add(entry.watch_order_id)
         existing = session.scalar(
             select(KeiroEntry).where(
                 KeiroEntry.watch_order_id == entry.watch_order_id,
@@ -1682,7 +2315,13 @@ def _move_watch_order_entries(session: Session, source: Zaisan, target: Zaisan) 
         if existing is None:
             entry.library_item = target
         else:
+            source.watch_order_entries.remove(entry)
             session.delete(entry)
+    if affected_watch_order_ids:
+        for watch_order in session.scalars(
+            select(Keiro).where(Keiro.id.in_(affected_watch_order_ids))
+        ):
+            watch_order.revision += 1
 
 
 def _move_metadata(session: Session, source: Zaisan, target: Zaisan) -> None:
@@ -1696,9 +2335,11 @@ def _move_metadata(session: Session, source: Zaisan, target: Zaisan) -> None:
         if existing is None:
             binding.library_item = target
         else:
-            for event in binding.review_events:
+            _prefer_matched_metadata_binding(existing, binding)
+            for event in tuple(binding.review_events):
                 event.library_item_id = target.id
                 event.metadata_binding_id = existing.id
+            source.metadata_bindings.remove(binding)
             session.delete(binding)
     for candidate in tuple(source.metadata_candidates):
         existing = session.scalar(
@@ -1711,12 +2352,59 @@ def _move_metadata(session: Session, source: Zaisan, target: Zaisan) -> None:
         if existing is None:
             candidate.library_item = target
         else:
-            for event in candidate.review_events:
+            for event in tuple(candidate.review_events):
                 event.library_item_id = target.id
                 event.metadata_candidate_id = existing.id
+            source.metadata_candidates.remove(candidate)
             session.delete(candidate)
     for event in tuple(source.metadata_review_events):
         event.library_item = target
+
+
+def _prefer_matched_metadata_binding(
+    target: MetadataBinding, source: MetadataBinding
+) -> None:
+    """Keep a transferred confirmed provider match over an unconfirmed duplicate."""
+
+    if (
+        source.status is not MetadataMatchStatus.MATCHED
+        or target.status is MetadataMatchStatus.MATCHED
+    ):
+        return
+    target.provider_id = source.provider_id
+    target.provider_media_kind = source.provider_media_kind
+    target.status = source.status
+    target.confidence = source.confidence
+    target.scoring_explanation = list(source.scoring_explanation)
+    target.provider_title = source.provider_title
+    target.provider_original_title = source.provider_original_title
+    target.provider_release_year = source.provider_release_year
+    target.provider_original_language = source.provider_original_language
+    target.provider_external_ids = list(source.provider_external_ids)
+    target.provider_refreshed_at = source.provider_refreshed_at
+    target.accepted_at = source.accepted_at
+    target.manual_decision = source.manual_decision
+
+
+def _accept_candidates_for_matched_bindings(session: Session, item: Zaisan) -> None:
+    """Keep candidate status aligned with every confirmed binding retained by a merge."""
+
+    matched_identifiers = {
+        (provider, provider_id)
+        for provider, provider_id in session.execute(
+            select(MetadataBinding.provider, MetadataBinding.provider_id).where(
+                MetadataBinding.library_item_id == item.id,
+                MetadataBinding.status == MetadataMatchStatus.MATCHED,
+            )
+        )
+    }
+    if not matched_identifiers:
+        return
+    for candidate in session.scalars(
+        select(MetadataCandidate).where(MetadataCandidate.library_item_id == item.id)
+    ):
+        if (candidate.provider, candidate.provider_id) in matched_identifiers:
+            candidate.status = MetadataCandidateStatus.ACCEPTED
 
 
 def _require_item(session: Session, item_id: int) -> Zaisan:

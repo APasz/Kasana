@@ -1844,6 +1844,68 @@ async function testAdministrationDirectReferenceSupersedesPendingSearch() {
   }]);
 }
 
+async function testAdministrationManualMergePreviewSupersedesPriorRequest() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.setAttribute(
+    'manual-merge-preview-source',
+    '/kanvas/data/administration/manual-item-merge-preview'
+  );
+  instance.renderLibraries = () => {};
+  const requests = [];
+  instance.postJson = (source, payload, signal) => new Promise((resolve, reject) => {
+    const request = {source, payload, resolve, aborted: false};
+    signal.addEventListener('abort', () => {
+      request.aborted = true;
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, {once: true});
+    requests.push(request);
+  });
+
+  const first = instance.previewManualItemMerge('7', '8');
+  const second = instance.previewManualItemMerge('9', '10');
+  const preview = {
+    source: {id: 9, title: 'Duplicate', kind: 'series', release_year: null, media_file_count: 1, descendant_count: 0},
+    target: {id: 10, title: 'Kept', kind: 'series', release_year: null, media_file_count: 2, descendant_count: 0},
+    conflicts: [],
+    matched_descendant_count: 0,
+    transferred_descendant_count: 0,
+    impact: {}
+  };
+
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].payload, {sourceItemId: 7, targetItemId: 8});
+  assert.equal(requests[0].aborted, true);
+  assert.deepEqual(requests[1].payload, {sourceItemId: 9, targetItemId: 10});
+  requests[1].resolve(preview);
+  await Promise.all([first, second]);
+
+  assert.equal(instance.manualItemMergePreview, preview);
+  assert.equal(instance.manualItemMergeSourceId, '9');
+  assert.equal(instance.manualItemMergeTargetId, '10');
+  assert.equal(instance.manualItemMergeRequest, null);
+  assert.equal(instance.manualItemMergeAbort, null);
+}
+
+function testAdministrationManualMergeChoicesSurviveRerender() {
+  const instance = new globalThis.__administrationTest.KanvasAdministration();
+  instance.manualItemMergePreview = {
+    source: {id: 7, title: 'Duplicate', kind: 'series', release_year: null, media_file_count: 1, descendant_count: 0},
+    target: {id: 8, title: 'Kept', kind: 'series', release_year: null, media_file_count: 2, descendant_count: 0},
+    conflicts: [{field: 'title', label: 'Title', source_value: 'Duplicate', target_value: 'Kept'}],
+    matched_descendant_count: 0,
+    transferred_descendant_count: 0,
+    impact: {}
+  };
+  instance.manualItemMergeFieldChoices.set('title', 'source');
+
+  const markup = instance.renderManualItemMergeSection();
+
+  assert.match(markup, /value="source"[^>]* checked/);
+  assert.doesNotMatch(markup, /value="target"[^>]* checked/);
+}
+
 async function testManualMetadataMatchFailurePublishesToast() {
   const instance = new globalThis.__administrationTest.KanvasAdministration();
   instance.reviewItems = [{itemId: 17, kind: 'movie'}];
@@ -1932,6 +1994,8 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
   assert.match(libraries.innerHTML, /Scan all/);
   assert.match(libraries.innerHTML, /Structural issues/);
   assert.match(libraries.innerHTML, /Duplicate issues/);
+  assert.match(libraries.innerHTML, /Merge two catalogue records/);
+  assert.match(libraries.innerHTML, /Remove item ID/);
   await libraries.saveRoot(null, fakeFormValues({
     displayName: 'Series',
     path: '/media/series',
@@ -2083,6 +2147,10 @@ function testItemEditorUsesTaskFocusedTabs() {
     /Search database/
   );
   assert.match(editor.renderOrganiseTab('movie', {}, ''), /Library organisation/);
+  assert.match(
+    editor.renderDetailsTab('movie', {title: 'Film', sort_title: 'Film'}),
+    /Remove catalogue record/
+  );
   assert.match(
     editor.renderArtworkTab('', 'series', {provider: 'tmdb', provider_id: '63712'}),
     /Load artwork choices/
@@ -2368,6 +2436,8 @@ async function main() {
   await testAdministrationReplacesPriorCompletionWithActionFailure();
   await testAdministrationClearingTrackedJobStopsTracking();
   await testAdministrationDirectReferenceSupersedesPendingSearch();
+  await testAdministrationManualMergePreviewSupersedesPriorRequest();
+  testAdministrationManualMergeChoicesSurviveRerender();
   await testManualMetadataMatchFailurePublishesToast();
   await testAdministrationPrimaryFlowKeepsWorkInFourAreas();
   testItemEditorShowsOnlyRelevantKindFields();

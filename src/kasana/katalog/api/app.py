@@ -45,6 +45,7 @@ from kasana.katalog.api.contracts import (
     JobStatus,
     JobSubmission,
     LibraryConsistencyRequest,
+    LibraryItemDeletion,
     LibraryItemDetail,
     LibraryItemEditAudit,
     LibraryItemKind,
@@ -56,6 +57,9 @@ from kasana.katalog.api.contracts import (
     LibraryRootDeletion,
     LibraryRootSummary,
     LibraryRootUpdate,
+    ManualItemMergePreview,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
     MediaTechnicalSummary,
     MetadataBindingReference,
     MetadataMatchRequest,
@@ -485,6 +489,20 @@ def create_app(
         runtime: KatalogApiRuntime = Depends(_runtime),
     ) -> LibraryItemMutationResult:
         return await run_blocking(runtime.queries.update_item, item_id, item)
+
+    @app.delete(
+        "/api/v1/library/items/{item_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        operation_id="v1_delete_library_item",
+        responses=_ERROR_RESPONSES,
+    )
+    async def delete_library_item(
+        item_id: Annotated[int, Path(gt=0)],
+        deletion: LibraryItemDeletion,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> Response:
+        await run_blocking(runtime.queries.delete_item, item_id, confirm=deletion.confirm)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get(
         "/api/v1/library/items/{item_id}/edit-audit",
@@ -1629,6 +1647,31 @@ def create_app(
             issue_id=issue_id,
             item_id=item_id,
         )
+
+    @app.post(
+        "/api/v1/repairs/manual-item-merge/preview",
+        response_model=ManualItemMergePreview,
+        operation_id="v1_get_manual_item_merge_preview",
+        responses=_ERROR_RESPONSES,
+    )
+    async def manual_item_merge_preview(
+        request: ManualItemMergePreviewRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> ManualItemMergePreview:
+        return await runtime.manual_item_merge_preview(request)
+
+    @app.post(
+        "/api/v1/repairs/manual-item-merge",
+        response_model=JobSubmission,
+        status_code=status.HTTP_202_ACCEPTED,
+        operation_id="v1_submit_manual_item_merge",
+        responses=_ERROR_RESPONSES,
+    )
+    async def submit_manual_item_merge(
+        request: ManualItemMergeRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> JobSubmission:
+        return JobSubmission(job=await runtime.submit_manual_item_merge(request))
 
     @app.get(
         "/api/v1/repairs/duplicates/preview",

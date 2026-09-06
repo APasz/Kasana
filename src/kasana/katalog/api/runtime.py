@@ -25,6 +25,12 @@ from kasana.katalog.api.contracts import (
     HierarchyRepairManualReview,
     HierarchyRepairPreview,
     LibraryItemKind,
+    ManualItemMergeConflict,
+    ManualItemMergeField,
+    ManualItemMergeItem,
+    ManualItemMergePreview,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
     MetadataSearchResult,
 )
 from kasana.katalog.api.jobs import JobCancelledError, JobContext, JobOutcome, JobRegistry
@@ -38,9 +44,20 @@ from kasana.katalog.repair import (
     DuplicateResolutionService,
     HierarchyRepairFilters,
     HierarchyRepairService,
+    ManualItemMergeService,
     RepairAction,
     duplicate_resolution_backup_path,
+    manual_item_merge_backup_path,
     repair_backup_path,
+)
+from kasana.katalog.repair import (
+    ManualItemMergeField as RepairManualItemMergeField,
+)
+from kasana.katalog.repair import (
+    ManualItemMergeFieldChoice as RepairManualItemMergeFieldChoice,
+)
+from kasana.katalog.repair import (
+    ManualItemMergeSide as RepairManualItemMergeSide,
 )
 from kasana.katalog.scanning import IncrementalScanner, ScanCancelledError, ScanResult
 from kasana.katalog.settings import KatalogSettings
@@ -555,6 +572,100 @@ class KatalogApiRuntime:
                 for candidate in candidates
             )
         )
+
+    async def manual_item_merge_preview(
+        self, request: ManualItemMergePreviewRequest
+    ) -> ManualItemMergePreview:
+        """Expose a fresh, path-free preview for an administrator-selected merge."""
+
+        preview = await run_blocking(
+            ManualItemMergeService(self.database).preview,
+            source_item_id=request.source_item_id,
+            target_item_id=request.target_item_id,
+        )
+        return ManualItemMergePreview(
+            preview_token=preview.preview_token,
+            source=ManualItemMergeItem(
+                id=preview.source.id,
+                title=preview.source.title,
+                kind=LibraryItemKind(preview.source.kind.value),
+                release_year=preview.source.release_year,
+                media_file_count=preview.source.media_file_count,
+                descendant_count=preview.source.descendant_count,
+            ),
+            target=ManualItemMergeItem(
+                id=preview.target.id,
+                title=preview.target.title,
+                kind=LibraryItemKind(preview.target.kind.value),
+                release_year=preview.target.release_year,
+                media_file_count=preview.target.media_file_count,
+                descendant_count=preview.target.descendant_count,
+            ),
+            conflicts=tuple(
+                ManualItemMergeConflict(
+                    field=ManualItemMergeField(conflict.field.value),
+                    label=conflict.label,
+                    source_value=conflict.source_value,
+                    target_value=conflict.target_value,
+                )
+                for conflict in preview.conflicts
+            ),
+            matched_descendant_count=preview.matched_descendant_count,
+            transferred_descendant_count=preview.transferred_descendant_count,
+            impact=HierarchyRepairImpact(
+                playback_states=preview.impact.playback_states,
+                metadata_bindings=preview.impact.metadata_bindings,
+                collection_memberships=preview.impact.collection_memberships,
+                watch_order_entries=preview.impact.watch_order_entries,
+            ),
+        )
+
+    async def submit_manual_item_merge(self, request: ManualItemMergeRequest) -> BackgroundJob:
+        """Queue a revalidated merge only after a durable SQLite backup is complete."""
+
+        field_choices = tuple(
+            RepairManualItemMergeFieldChoice(
+                field=RepairManualItemMergeField(choice.field.value),
+                keep=RepairManualItemMergeSide(choice.keep.value),
+            )
+            for choice in request.field_choices
+        )
+
+        async def merge(context: JobContext) -> JobOutcome:
+            await context.report(
+                phase="merging",
+                current=0,
+                total=1,
+                unit="records",
+                message="Revalidating the manual item merge.",
+            )
+            backup_path = manual_item_merge_backup_path(self.database.database_path)
+            await run_blocking(self.database.backup_to, backup_path)
+            await run_blocking(
+                ManualItemMergeService(self.database).apply,
+                source_item_id=request.source_item_id,
+                target_item_id=request.target_item_id,
+                preview_token=request.preview_token,
+                field_choices=field_choices,
+                backup_path=backup_path,
+            )
+            await context.report(
+                phase="complete",
+                current=1,
+                total=1,
+                unit="records",
+                message="Manual item merge complete.",
+                force=True,
+            )
+            return JobOutcome(
+                message=(
+                    f"Merged catalogue record {request.source_item_id} into "
+                    f"{request.target_item_id}. A database backup was created."
+                ),
+                counters={"merged": 1},
+            )
+
+        return await self.jobs.submit("manual-item-merge", merge)
 
     def _workflow(self) -> MetadataWorkflow:
         return MetadataWorkflow(

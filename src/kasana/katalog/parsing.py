@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from re import Match, Pattern
 
+from kasana.katalog.models import ZaisanKind
 from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
 
@@ -151,6 +152,24 @@ def infer_library_layout(root_path: Path) -> LibraryLayout:
             return LibraryLayout.ANIME
         case _:
             return LibraryLayout.UNKNOWN
+
+
+def resolve_library_layout(root_path: Path, expected_media_kind: ZaisanKind) -> LibraryLayout:
+    """Use a conventional root name when present, else its configured media kind."""
+
+    layout = infer_library_layout(root_path)
+    if layout is not LibraryLayout.UNKNOWN:
+        return layout
+    match expected_media_kind:
+        case ZaisanKind.MOVIE:
+            return LibraryLayout.MOVIES
+        case ZaisanKind.SERIES:
+            return LibraryLayout.TV_SHOWS
+        case _:
+            raise ValueError(
+                f"Library root {root_path} has unsupported expected kind "
+                f"{expected_media_kind.value}."
+            )
 
 
 def parse_season_number(directory_name: str, *, allow_volume: bool) -> int | None:

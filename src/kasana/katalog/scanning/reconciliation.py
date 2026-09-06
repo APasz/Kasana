@@ -17,14 +17,17 @@ from kasana.katalog.models import (
     AvailabilityState,
     Kura,
     MediaFile,
+    MetadataBinding,
+    MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
 )
-from kasana.katalog.parsing import ParsedMedia, ParsedMediaKind
+from kasana.katalog.parsing import ParsedMedia, ParsedMediaKind, resolve_library_layout
 from kasana.katalog.probe import ProbeResult
 from kasana.katalog.scanning.classification import ExistingFile, PlanAction, PlannedFile
 from kasana.katalog.scanning.discovery import AuditFinding, FileSnapshot, MediaSidecars
 from kasana.katalog.scanning.local_metadata import LocalMetadata
+from kasana.katalog.series_paths import accepted_series_path_aliases, series_title_identity
 from kasana.katalog.services import normalise_library_item_tags
 
 type MovieIdentity = tuple[str, int | None]
@@ -35,6 +38,7 @@ class ItemCache:
     movies: dict[MovieIdentity, Zaisan] = field(default_factory=dict)
     movie_directories: dict[Path, Zaisan | None] = field(default_factory=dict)
     series: dict[str, Zaisan] = field(default_factory=dict)
+    series_path_aliases: dict[str, Zaisan] = field(default_factory=dict)
     seasons: dict[tuple[int, int], Zaisan] = field(default_factory=dict)
     episodes: dict[tuple[int, int, int], Zaisan] = field(default_factory=dict)
     specials: dict[tuple[int, str], Zaisan] = field(default_factory=dict)
@@ -61,8 +65,44 @@ def apply_scan(
             select(MediaFile).where(MediaFile.id.in_([record.id for record in existing_files]))
         ).all()
     }
-    cache: ItemCache = item_cache(
+    for file_id in unavailable_ids:
+        existing_by_id[file_id].availability = AvailabilityState.UNAVAILABLE
+    for file_id in restored_ids:
+        existing_by_id[file_id].availability = AvailabilityState.AVAILABLE
+    current_media_paths = {
+        file.id: Path(file.absolute_path)
+        for file in existing_by_id.values()
+        if file.availability is AvailabilityState.AVAILABLE
+    }
+    for plan in plans:
+        if plan.existing_file_id is None:
+            continue
+        existing_by_id[plan.existing_file_id].availability = AvailabilityState.AVAILABLE
+        current_media_paths[plan.existing_file_id] = plan.snapshot.path
+    root_items = tuple(
         session.scalars(select(Zaisan).where(Zaisan.library_root_id == root.id)).all()
+    )
+    matched_series_ids = frozenset(
+        session.scalars(
+            select(MetadataBinding.library_item_id)
+            .join(Zaisan)
+            .where(
+                Zaisan.library_root_id == root.id,
+                Zaisan.item_kind == ZaisanKind.SERIES,
+                MetadataBinding.status == MetadataMatchStatus.MATCHED,
+            )
+        )
+    )
+    cache = item_cache(
+        root_items,
+        series_path_aliases=accepted_series_path_aliases(
+            root_path=Path(root.path),
+            layout=resolve_library_layout(Path(root.path), root.expected_media_kind),
+            items=root_items,
+            media_files=existing_by_id.values(),
+            matched_series_ids=matched_series_ids,
+            current_media_paths=current_media_paths,
+        ),
     )
     for file in existing_by_id.values():
         _cache_movie_directory(cache, file.library_item, Path(file.absolute_path))
@@ -128,10 +168,6 @@ def apply_scan(
             except LocalMetadataIdentityConflictError as error:
                 scan_findings.append(_local_metadata_conflict_finding(attachment, error))
             _cache_movie_directory(cache, file.library_item, Path(file.absolute_path))
-    for file_id in unavailable_ids:
-        existing_by_id[file_id].availability = AvailabilityState.UNAVAILABLE
-    for file_id in restored_ids:
-        existing_by_id[file_id].availability = AvailabilityState.AVAILABLE
     root_record: Kura | None = session.get(Kura, root.id)
     if root_record is None:
         msg: str = f"Library root {root.id} does not exist."
@@ -152,7 +188,9 @@ def apply_scan(
     return tuple(scan_findings)
 
 
-def item_cache(items: Iterable[Zaisan]) -> ItemCache:
+def item_cache(
+    items: Iterable[Zaisan], *, series_path_aliases: Mapping[str, Zaisan] | None = None
+) -> ItemCache:
     cache = ItemCache()
     item_list = list(items)
     by_id = {item.id: item for item in item_list}
@@ -162,6 +200,8 @@ def item_cache(items: Iterable[Zaisan]) -> ItemCache:
             cache.movies[_movie_identity(item.sort_title, item.release_year)] = item
         elif item.item_kind is ZaisanKind.SERIES:
             cache.series[title_key] = item
+    if series_path_aliases is not None:
+        cache.series_path_aliases.update(series_path_aliases)
     for item in item_list:
         title_key = item.sort_title.casefold()
         parent = by_id.get(item.parent_id) if item.parent_id is not None else None
@@ -321,6 +361,8 @@ def get_movie(
 def get_series(session: Session, root_id: int, cache: ItemCache, title: str) -> Zaisan:
     key = title.casefold()
     series = cache.series.get(key)
+    if series is None:
+        series = cache.series_path_aliases.get(series_title_identity(title))
     if series is None:
         series = Zaisan(
             library_root_id=root_id,

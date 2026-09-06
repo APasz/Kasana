@@ -208,6 +208,7 @@ from kasana.katalog.services import (
     EPISODIC_ITEM_KINDS,
     PLAYABLE_ITEM_KINDS,
     allowed_parent_kinds,
+    bump_playback_state_revision,
     clear_playback_items,
     effective_item_availabilities,
     effective_item_availability,
@@ -812,7 +813,7 @@ class KatalogQueryService:
             session.delete(root)
             session.flush()
 
-        self._database.run_transaction(remove)
+        self._database.run_transaction(remove, immediate=True)
 
     def list_items(
         self, *, filters: LibraryItemFilters, cursor: str | None, limit: int
@@ -1120,6 +1121,21 @@ class KatalogQueryService:
             return LibraryItemMutationResult(item=_detail(session, item), audit=_edit_audit(event))
 
         return self._database.run_transaction(update_item)
+
+    def delete_item(self, item_id: int, *, confirm: bool) -> None:
+        """Remove one catalogue subtree; physical media files are deliberately untouched."""
+
+        def remove(session: Session) -> None:
+            item = _require(session, Zaisan, item_id, "Library item")
+            if not confirm:
+                raise CatalogueValidationError("Deleting a catalogue item requires confirm=true.")
+            item_ids = _item_descendant_ids(session, item)
+            _mark_item_subtree_references_changed(session, item_ids)
+            _close_playback_sessions_referencing_items(session, item_ids)
+            session.delete(item)
+            session.flush()
+
+        self._database.run_transaction(remove, immediate=True)
 
     def list_item_edit_audit(self, item_id: int, *, limit: int) -> tuple[LibraryItemEditAudit, ...]:
         """Expose a bounded audit trail without retaining an editable event surface."""
@@ -4425,6 +4441,68 @@ def _item_descendant_ids(session: Session, item: Zaisan) -> set[int]:
             descendant_ids.add(child_id)
             pending_ids.append(child_id)
     return descendant_ids
+
+
+def _mark_item_subtree_references_changed(session: Session, item_ids: set[int]) -> None:
+    """Advance dependent revisions before deleting an item subtree by cascade."""
+
+    collection_ids = set(
+        session.scalars(
+            select(CollectionKin.collection_id).where(CollectionKin.library_item_id.in_(item_ids))
+        )
+    )
+    artwork_collections = tuple(
+        session.scalars(select(Collection).where(Collection.artwork_item_id.in_(item_ids)))
+    )
+    collection_ids.update(collection.id for collection in artwork_collections)
+    for collection in artwork_collections:
+        collection.artwork_item_id = None
+    if collection_ids:
+        for collection in session.scalars(select(Collection).where(Collection.id.in_(collection_ids))):
+            collection.revision += 1
+
+    watch_order_ids = set(
+        session.scalars(
+            select(KeiroEntry.watch_order_id).where(KeiroEntry.library_item_id.in_(item_ids))
+        )
+    )
+    if watch_order_ids:
+        for watch_order in session.scalars(select(Keiro).where(Keiro.id.in_(watch_order_ids))):
+            watch_order.revision += 1
+
+    user_ids = set(
+        session.scalars(
+            select(PlaybackState.user_id).where(PlaybackState.library_item_id.in_(item_ids))
+        )
+    )
+    for user_id in user_ids:
+        bump_playback_state_revision(session, user_id=user_id)
+
+
+def _close_playback_sessions_referencing_items(session: Session, item_ids: set[int]) -> None:
+    """Invalidate active queues before their deleted entries can become dangling state."""
+
+    session_ids = set(
+        session.scalars(
+            select(PlaybackSession.id).where(PlaybackSession.context_item_id.in_(item_ids))
+        )
+    )
+    session_ids.update(
+        session.scalars(
+            select(PlaybackSessionEntry.playback_session_id).where(
+                PlaybackSessionEntry.library_item_id.in_(item_ids)
+            )
+        )
+    )
+    if not session_ids:
+        return
+    now = datetime.now(UTC)
+    for playback_session in session.scalars(
+        select(PlaybackSession).where(
+            PlaybackSession.id.in_(session_ids), PlaybackSession.closed_at.is_(None)
+        )
+    ):
+        playback_session.closed_at = now
 
 
 def _validated_artwork_selection(

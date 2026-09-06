@@ -47,6 +47,7 @@ def render_administration(
             "metadata-source": "/kanvas/data/administration/metadata",
             "hierarchy-source": "/kanvas/data/administration/hierarchy",
             "duplicates-source": "/kanvas/data/administration/duplicates",
+            "manual-merge-preview-source": "/kanvas/data/administration/manual-item-merge-preview",
             "action-source": "/kanvas/actions/administration",
         }
         if subsection is not None:

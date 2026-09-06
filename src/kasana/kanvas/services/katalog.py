@@ -121,6 +121,9 @@ from kasana.katalog.public import (
     LibraryRootCreate,
     LibraryRootSummary,
     LibraryRootUpdate,
+    ManualItemMergePreview,
+    ManualItemMergePreviewRequest,
+    ManualItemMergeRequest,
     MetadataBindingReference,
     MetadataMatchRequest,
     MetadataRejectRequest,
@@ -584,6 +587,17 @@ class KanvasKatalogService:
             submission = await client.submit_duplicate_resolution_batch(request)
         return job_view(submission.job)
 
+    async def manual_item_merge_preview(
+        self, request: ManualItemMergePreviewRequest
+    ) -> ManualItemMergePreview:
+        async with self._client() as client:
+            return await client.manual_item_merge_preview(request)
+
+    async def submit_manual_item_merge(self, request: ManualItemMergeRequest) -> JobView:
+        async with self._client() as client:
+            submission = await client.submit_manual_item_merge(request)
+        return job_view(submission.job)
+
     async def cancel_job(self, job_id: str) -> JobView:
         async with self._client() as client:
             return job_view(await client.cancel_job(job_id))
@@ -782,6 +796,10 @@ class KanvasKatalogService:
     ) -> LibraryItemMutationResult:
         async with self._client() as client:
             return await client.update_library_item(item_id, request)
+
+    async def delete_item(self, item_id: int, *, confirm: bool) -> None:
+        async with self._client() as client:
+            await client.delete_library_item(item_id, confirm=confirm)
 
     async def item_edit_audit(self, item_id: int) -> tuple[LibraryItemEditAudit, ...]:
         async with self._client() as client:
