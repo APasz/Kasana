@@ -1130,9 +1130,11 @@ class KatalogQueryService:
             if not confirm:
                 raise CatalogueValidationError("Deleting a catalogue item requires confirm=true.")
             item_ids = _item_descendant_ids(session, item)
-            _mark_item_subtree_references_changed(session, item_ids)
+            affected_watch_order_ids = _mark_item_subtree_references_changed(session, item_ids)
             _close_playback_sessions_referencing_items(session, item_ids)
             session.delete(item)
+            session.flush()
+            _normalise_watch_order_positions(session, affected_watch_order_ids)
             session.flush()
 
         self._database.run_transaction(remove, immediate=True)
@@ -1727,9 +1729,7 @@ class KatalogQueryService:
             )
             page, has_next = _split_page(rows, normalised_limit)
             return PaginatedResponse[WatchOrderSummary](
-                items=tuple[WatchOrderSummary, ...](
-                    _watch_order_summary(session, order, user_id=user_id) for order in page
-                ),
+                items=_watch_order_summaries(session, page, user_id=user_id),
                 next_cursor=(
                     _encode_cursor("watch-orders", {"name": page[-1].name, "id": page[-1].id})
                     if has_next
@@ -2132,7 +2132,7 @@ class KatalogQueryService:
                 next_position = 0
             else:
                 existing_item_ids = {entry.library_item_id for entry in existing}
-                next_position: int = len(existing)
+                next_position = _highest_position(session, watch_order.id) + 1
             for item in generated.items:
                 if item.id in existing_item_ids:
                     continue
@@ -4443,8 +4443,8 @@ def _item_descendant_ids(session: Session, item: Zaisan) -> set[int]:
     return descendant_ids
 
 
-def _mark_item_subtree_references_changed(session: Session, item_ids: set[int]) -> None:
-    """Advance dependent revisions before deleting an item subtree by cascade."""
+def _mark_item_subtree_references_changed(session: Session, item_ids: set[int]) -> set[int]:
+    """Advance dependent revisions and return watch orders affected by a cascade."""
 
     collection_ids = set(
         session.scalars(
@@ -4477,6 +4477,8 @@ def _mark_item_subtree_references_changed(session: Session, item_ids: set[int]) 
     )
     for user_id in user_ids:
         bump_playback_state_revision(session, user_id=user_id)
+
+    return watch_order_ids
 
 
 def _close_playback_sessions_referencing_items(session: Session, item_ids: set[int]) -> None:
@@ -5433,9 +5435,7 @@ def _collection_detail(
             _membership_detail(membership, member_summaries[item.id])
             for membership, item in member_rows
         ),
-        watch_orders=tuple(
-            _watch_order_summary(session, order, user_id=user_id) for order in orders
-        ),
+        watch_orders=_watch_order_summaries(session, orders, user_id=user_id),
     )
 
 
@@ -5460,20 +5460,57 @@ def _collection_summary(session: Session, collection: Collection) -> CollectionS
     )
 
 
+def _watch_order_summaries(
+    session: Session, watch_orders: tuple[Keiro, ...], *, user_id: int | None = None
+) -> tuple[WatchOrderSummary, ...]:
+    """Build watch-order summaries with one entry-count query per page."""
+
+    if not watch_orders:
+        return ()
+    watch_order_ids = tuple(watch_order.id for watch_order in watch_orders)
+    entry_counts: dict[int, int] = {}
+    for watch_order_id, entry_count in session.execute(
+        select(KeiroEntry.watch_order_id, func.count(KeiroEntry.id))
+        .where(KeiroEntry.watch_order_id.in_(watch_order_ids))
+        .group_by(KeiroEntry.watch_order_id)
+    ):
+        entry_counts[watch_order_id] = entry_count
+    return tuple(
+        _watch_order_summary(
+            session,
+            watch_order,
+            user_id=user_id,
+            entry_count=entry_counts.get(watch_order.id, 0),
+        )
+        for watch_order in watch_orders
+    )
+
+
 def _watch_order_summary(
-    session: Session, watch_order: Keiro, *, user_id: int | None = None
+    session: Session,
+    watch_order: Keiro,
+    *,
+    user_id: int | None = None,
+    entry_count: int | None = None,
 ) -> WatchOrderSummary:
+    """Build one summary, querying an entry count only when it was not preloaded."""
+
+    resolved_entry_count = entry_count
+    if resolved_entry_count is None:
+        resolved_entry_count = (
+            session.scalar(
+                select(func.count())
+                .select_from(KeiroEntry)
+                .where(KeiroEntry.watch_order_id == watch_order.id)
+            )
+            or 0
+        )
     return WatchOrderSummary(
         id=watch_order.id,
         collection_id=watch_order.collection_id,
         name=watch_order.name,
         kind=WatchOrderKind(watch_order.order_kind.value),
-        entry_count=session.scalar(
-            select(func.count())
-            .select_from(KeiroEntry)
-            .where(KeiroEntry.watch_order_id == watch_order.id)
-        )
-        or 0,
+        entry_count=resolved_entry_count,
         revision=watch_order.revision,
         is_default=watch_order.collection.default_watch_order_id == watch_order.id,
         progress=_watch_order_progress(session, watch_order, user_id)
@@ -5662,6 +5699,37 @@ def _highest_position(session: Session, watch_order_id: int) -> int:
         select(func.max(KeiroEntry.position)).where(KeiroEntry.watch_order_id == watch_order_id)
     )
     return highest if highest is not None else -1
+
+
+def _normalise_watch_order_positions(session: Session, watch_order_ids: set[int]) -> None:
+    """Close gaps left by a cascaded item deletion while preserving entry order."""
+
+    positions_changed = False
+    for watch_order_id in sorted(watch_order_ids):
+        entries = tuple(
+            session.scalars(
+                select(KeiroEntry)
+                .where(KeiroEntry.watch_order_id == watch_order_id)
+                .order_by(KeiroEntry.position, KeiroEntry.id)
+            )
+        )
+        if all(entry.position == position for position, entry in enumerate(entries)):
+            continue
+        temporary_offset = _highest_position(session, watch_order_id) + len(entries) + 1
+        session.execute(
+            sql_update(KeiroEntry)
+            .where(KeiroEntry.watch_order_id == watch_order_id)
+            .values(position=KeiroEntry.position + temporary_offset)
+        )
+        positions_by_entry_id = {entry.id: position for position, entry in enumerate(entries)}
+        session.execute(
+            sql_update(KeiroEntry)
+            .where(KeiroEntry.id.in_(positions_by_entry_id))
+            .values(position=case(positions_by_entry_id, value=KeiroEntry.id))
+        )
+        positions_changed = True
+    if positions_changed:
+        session.expire_all()
 
 
 def _insertion_position(

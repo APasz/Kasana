@@ -165,6 +165,11 @@ class _CollectionMemberFilters(TypedDict, total=False):
     limit: int
 
 
+class _CollectionWatchOrderFilters(TypedDict, total=False):
+    limit: int
+    user_id: int | None
+
+
 class _WatchOrderEntryFilters(TypedDict, total=False):
     limit: int
 
@@ -540,7 +545,11 @@ class KatalogClient:
         self, collection_id: int, request: CollectionUpdate
     ) -> CollectionMutationResult:
         return await self._send_model(
-            "PATCH", f"/api/v1/collections/{collection_id}", request, CollectionMutationResult
+            "PATCH",
+            f"/api/v1/collections/{collection_id}",
+            request,
+            CollectionMutationResult,
+            exclude_unset=True,
         )
 
     async def delete_collection(
@@ -592,6 +601,7 @@ class KatalogClient:
             f"/api/v1/collections/{collection_id}/items/{library_item_id}",
             request,
             CollectionMutationResult,
+            exclude_unset=True,
         )
 
     async def remove_collection_member(
@@ -617,6 +627,20 @@ class KatalogClient:
             PaginatedResponse[WatchOrderSummary],
             params=_params(cursor=cursor, limit=limit, user_id=user_id),
         )
+
+    async def iter_collection_watch_orders(
+        self, collection_id: int, **filters: Unpack[_CollectionWatchOrderFilters]
+    ) -> AsyncIterator[WatchOrderSummary]:
+        cursor: str | None = None
+        while True:
+            page = await self.list_collection_watch_orders(
+                collection_id, cursor=cursor, **filters
+            )
+            for watch_order in page.items:
+                yield watch_order
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     async def create_collection_watch_order(
         self, collection_id: int, request: WatchOrderCreate
@@ -658,7 +682,11 @@ class KatalogClient:
         self, watch_order_id: int, request: WatchOrderUpdate
     ) -> WatchOrderMutationResult:
         return await self._send_model(
-            "PATCH", f"/api/v1/watch-orders/{watch_order_id}", request, WatchOrderMutationResult
+            "PATCH",
+            f"/api/v1/watch-orders/{watch_order_id}",
+            request,
+            WatchOrderMutationResult,
+            exclude_unset=True,
         )
 
     async def delete_watch_order(

@@ -715,6 +715,12 @@ class CollectionMembershipUpdate(APIModel):
     expected_revision: int = Field(ge=1)
     relationship: CollectionRelationship | None = None
 
+    @model_validator(mode="after")
+    def require_relationship(self) -> Self:
+        if "relationship" not in self.model_fields_set:
+            raise ValueError("Collection membership update must include relationship.")
+        return self
+
 
 class CollectionDetail(CollectionSummary):
     representative_artwork: ArtworkSelection | None = None

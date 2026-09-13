@@ -244,6 +244,7 @@ from kasana.katalog.public import (
     WatchOrderEntryDetail,
     WatchOrderKind,
     WatchOrderPlaybackContext,
+    WatchOrderSummary,
 )
 from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
@@ -1974,6 +1975,14 @@ async def test_library_and_collection_posters_show_partially_watched_series(
 ) -> None:
     series = _library_summary(item_id=8, title="Show", kind=LibraryItemKind.SERIES)
     membership = CollectionMembership(id=1, collection_id=12, item=series)
+    watch_order = WatchOrderSummary(
+        id=21,
+        collection_id=12,
+        name="Air order",
+        kind=WatchOrderKind.AIR,
+        entry_count=1,
+        revision=1,
+    )
     state_requests: list[tuple[int, ...]] = []
 
     class PartialWatchClient:
@@ -1992,9 +2001,10 @@ async def test_library_and_collection_posters_show_partially_watched_series(
                 id=12,
                 name="Favourites",
                 item_count=1,
-                watch_order_count=0,
+                watch_order_count=1,
                 revision=1,
                 members=(membership,),
+                watch_orders=(watch_order,),
             )
 
         async def list_collection_members(
@@ -2002,6 +2012,11 @@ async def test_library_and_collection_posters_show_partially_watched_series(
         ) -> PaginatedResponse[CollectionMembership]:
             assert (collection_id, limit) == (12, 100)
             return PaginatedResponse(items=(membership,), next_cursor=None, limit=limit)
+
+        def iter_collection_watch_orders(
+            self, *_arguments: object, **_keywords: object
+        ) -> AsyncIterator[WatchOrderSummary]:
+            raise AssertionError("The embedded watch-order page is already complete.")
 
         async def playback_states(
             self, user_id: int, request: PlaybackStatesRequest
@@ -2023,7 +2038,94 @@ async def test_library_and_collection_posters_show_partially_watched_series(
 
     assert library_page.items[0].partially_watched is True
     assert collection.series[0].poster.partially_watched is True
+    assert [card.id for card in collection.watch_orders] == [watch_order.id]
     assert state_requests == [(series.id,), (series.id,)]
+
+
+async def test_collection_editor_loads_every_member_and_watch_order_without_playback_state(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    members = tuple(
+        CollectionMembership(
+            id=item_id,
+            collection_id=12,
+            item=_library_summary(
+                item_id=item_id,
+                title=f"Movie {item_id}",
+                kind=LibraryItemKind.MOVIE,
+            ),
+        )
+        for item_id in range(1, 102)
+    )
+    watch_orders = tuple(
+        WatchOrderSummary(
+            id=order_id,
+            collection_id=12,
+            name=f"Order {order_id}",
+            kind=WatchOrderKind.CUSTOM,
+            entry_count=0,
+            revision=1,
+            is_default=order_id == 101,
+        )
+        for order_id in range(1, 102)
+    )
+    state_requests: list[tuple[int, ...]] = []
+
+    class PagedCollectionClient:
+        def __init__(self, *_arguments: object, **_keywords: object) -> None:
+            pass
+
+        async def __aenter__(self) -> PagedCollectionClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def get_collection(
+            self, collection_id: int, *, user_id: int | None = None
+        ) -> CollectionDetail:
+            assert (collection_id, user_id) == (12, None)
+            return CollectionDetail(
+                id=12,
+                name="Favourites",
+                item_count=len(members),
+                watch_order_count=len(watch_orders),
+                revision=1,
+                artwork_item_id=members[-1].item.id,
+                default_watch_order_id=watch_orders[-1].id,
+            )
+
+        async def iter_collection_members(
+            self, collection_id: int, *, limit: int
+        ) -> AsyncIterator[CollectionMembership]:
+            assert (collection_id, limit) == (12, 100)
+            for membership in members:
+                yield membership
+
+        async def iter_collection_watch_orders(
+            self, collection_id: int, *, limit: int, user_id: int | None
+        ) -> AsyncIterator[WatchOrderSummary]:
+            assert (collection_id, limit, user_id) == (12, 100, None)
+            for watch_order in watch_orders:
+                yield watch_order
+
+        async def playback_states(
+            self, user_id: int, request: PlaybackStatesRequest
+        ) -> SimpleNamespace:
+            assert user_id == 1
+            state_requests.append(request.item_ids)
+            return SimpleNamespace(states=(), partially_watched_item_ids=())
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", PagedCollectionClient)
+
+    editor = await KanvasKatalogService(Kanvas_Settings(), user_id=1).collection_editor(12)
+
+    assert editor.member_next_cursor is None
+    assert [member.poster.id for member in editor.movies] == list(range(1, 102))
+    assert [watch_order.id for watch_order in editor.watch_orders] == list(range(1, 102))
+    assert editor.artwork_item_id == 101
+    assert editor.default_watch_order_id == 101
+    assert state_requests == []
 
 
 async def test_item_detail_reads_completed_watched_state_directly(
@@ -4732,6 +4834,8 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         itemCount=1,
         watchOrderCount=1,
         revision=3,
+        artworkItemId=7,
+        defaultWatchOrderId=9,
         mosaicUrls=("/kanvas/artwork/7/8",),
         movies=(member,),
         memberNextCursor="next-members",
@@ -4787,6 +4891,10 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             assert collection_id == 4
             return collection
 
+        async def collection_editor(self, collection_id: int) -> CollectionDetailView:
+            assert collection_id == 4
+            return collection
+
         async def watch_order_editor(self, watch_order_id: int) -> WatchOrderEditorView:
             assert watch_order_id == 9
             return editor
@@ -4823,6 +4931,18 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             for element in client.elements.values()
             if element.tag == "input" and _element_props(element).get("type") == "hidden"
         ]
+        default_watch_order_options = [
+            element
+            for element in client.elements.values()
+            if element.tag == "option"
+            and _parent_element(element) is _select_named(client, "default_watch_order_id")
+        ]
+        artwork_options = [
+            element
+            for element in client.elements.values()
+            if element.tag == "option"
+            and _parent_element(element) is _select_named(client, "artwork_item_id")
+        ]
         generation_entries = next(
             element
             for element in client.elements.values()
@@ -4835,6 +4955,14 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
     assert any(_element_props(element).get("name") == "overview" for element in textareas)
     assert any(_element_props(element).get("value") == "Gate travel" for element in textareas)
     assert any(_element_props(element).get("name") == "revision" for element in hidden_fields)
+    assert [
+        (str(_element_props(option)["value"]), "selected" in _element_props(option))
+        for option in default_watch_order_options
+    ] == [("9", True)]
+    assert [
+        (str(_element_props(option)["value"]), "selected" in _element_props(option))
+        for option in artwork_options
+    ] == [("", False), ("7", True)]
 
 
 async def test_collection_routes_share_one_unavailable_state(monkeypatch: MonkeyPatch) -> None:
@@ -4843,6 +4971,9 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
             pass
 
         async def collection_detail(self, _collection_id: int) -> CollectionDetailView:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def collection_editor(self, _collection_id: int) -> CollectionDetailView:
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
         async def watch_order_editor(self, _watch_order_id: int) -> WatchOrderEditorView:

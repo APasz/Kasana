@@ -50,7 +50,7 @@ class WatchOrderCardView(BaseModel):
 
 
 class CollectionDetailView(BaseModel):
-    """A bounded collection detail page, grouped only by direct member kind."""
+    """A collection page view, grouped only by direct member kind."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -68,9 +68,7 @@ class CollectionDetailView(BaseModel):
     series: tuple[CollectionMemberView, ...] = ()
     other_members: tuple[CollectionMemberView, ...] = Field(default=(), alias="otherMembers")
     member_next_cursor: str | None = Field(default=None, max_length=500, alias="memberNextCursor")
-    watch_orders: tuple[WatchOrderCardView, ...] = Field(
-        default=(), max_length=100, alias="watchOrders"
-    )
+    watch_orders: tuple[WatchOrderCardView, ...] = Field(default=(), alias="watchOrders")
 
 
 class ItemPickerView(BaseModel):

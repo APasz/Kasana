@@ -144,6 +144,7 @@ from kasana.katalog.public import (
     WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
     WatchOrderKind,
+    WatchOrderSummary,
 )
 from kasana.katalog.public import (
     SystemIncidentCode as KatalogSystemIncidentCode,
@@ -157,6 +158,7 @@ _GRID_PAGE_SIZE = 48
 _DETAIL_CHILD_PAGE_SIZE = 50
 _COLLECTION_GRID_PAGE_SIZE = 24
 _COLLECTION_MEMBER_PAGE_SIZE = 100
+_COLLECTION_WATCH_ORDER_PAGE_SIZE = 100
 _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
@@ -841,7 +843,7 @@ class KanvasKatalogService:
         return tuple(collection_tile(detail) for detail in details), page.next_cursor
 
     async def collection_detail(self, collection_id: int) -> CollectionDetailView:
-        """Build a bounded direct-member detail view without expanding series children."""
+        """Build a direct-member detail view with complete watch-order cards."""
 
         user_id = self._required_user_id()
         async with self._client() as client:
@@ -849,42 +851,37 @@ class KanvasKatalogService:
                 client.get_collection(collection_id, user_id=user_id),
                 client.list_collection_members(collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE),
             )
-            playback_states = await _poster_playback_states(
+            watch_orders = (
+                detail.watch_orders
+                if detail.watch_order_count == len(detail.watch_orders)
+                else await _collection_watch_orders(client, collection_id, user_id=user_id)
+            )
+            return await _collection_detail_view(
                 client,
-                user_id,
-                (member.item.id for member in members_page.items),
+                detail,
+                members_page.items,
+                watch_orders,
+                playback_user_id=user_id,
+                member_next_cursor=members_page.next_cursor,
             )
-        members = tuple(
-            collection_member(
-                member.item,
-                member.relationship,
-                playback_states.state_for(member.item.id),
-                partially_watched=playback_states.is_partially_watched(member.item.id),
+
+    async def collection_editor(self, collection_id: int) -> CollectionDetailView:
+        """Build a complete editor view without loading unused playback state."""
+
+        async with self._client() as client:
+            detail, members, watch_orders = await gather(
+                client.get_collection(collection_id),
+                _collection_members(client, collection_id),
+                _collection_watch_orders(client, collection_id),
             )
-            for member in members_page.items
-        )
-        movies, series, other = group_collection_members(members)
-        cards = tuple(watch_order_card(order) for order in detail.watch_orders)
-        artwork_url, mosaic_urls = collection_artwork(
-            detail, tuple(member.poster for member in members)
-        )
-        return CollectionDetailView(
-            id=detail.id,
-            name=detail.name,
-            overview=detail.overview,
-            itemCount=detail.item_count,
-            watchOrderCount=detail.watch_order_count,
-            revision=detail.revision,
-            artworkItemId=detail.artwork_item_id,
-            defaultWatchOrderId=detail.default_watch_order_id,
-            artworkUrl=artwork_url,
-            mosaicUrls=mosaic_urls,
-            movies=movies,
-            series=series,
-            otherMembers=other,
-            memberNextCursor=members_page.next_cursor,
-            watchOrders=cards,
-        )
+            return await _collection_detail_view(
+                client,
+                detail,
+                members,
+                watch_orders,
+                playback_user_id=None,
+                member_next_cursor=None,
+            )
 
     async def watch_order_editor(self, watch_order_id: int) -> WatchOrderEditorView:
         """Load just the editor header; rows are separately cursor-paged by the browser."""
@@ -1452,6 +1449,90 @@ def _system_incident_history(incident: SystemIncidentResponse) -> SystemAlertHis
         lastDetectedAt=incident.last_detected_at,
         resolvedAt=incident.resolved_at,
         acknowledgedAt=incident.acknowledged_at,
+    )
+
+
+async def _collection_members(
+    client: KatalogClient, collection_id: int
+) -> tuple[CollectionMembership, ...]:
+    """Collect every direct membership for the collection editor."""
+
+    return tuple(
+        [
+            membership
+            async for membership in client.iter_collection_members(
+                collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE
+            )
+        ]
+    )
+
+
+async def _collection_watch_orders(
+    client: KatalogClient, collection_id: int, *, user_id: int | None = None
+) -> tuple[WatchOrderSummary, ...]:
+    """Collect every watch order, optionally including user-specific progress."""
+
+    return tuple(
+        [
+            watch_order
+            async for watch_order in client.iter_collection_watch_orders(
+                collection_id,
+                limit=_COLLECTION_WATCH_ORDER_PAGE_SIZE,
+                user_id=user_id,
+            )
+        ]
+    )
+
+
+async def _collection_detail_view(
+    client: KatalogClient,
+    detail: CollectionDetail,
+    memberships: tuple[CollectionMembership, ...],
+    watch_orders: tuple[WatchOrderSummary, ...],
+    *,
+    playback_user_id: int | None,
+    member_next_cursor: str | None,
+) -> CollectionDetailView:
+    """Map collection members and orders into the shared Kanvas page view."""
+
+    playback_states = (
+        await _poster_playback_states(
+            client,
+            playback_user_id,
+            (membership.item.id for membership in memberships),
+        )
+        if playback_user_id is not None
+        else _PosterPlaybackStates.empty()
+    )
+    members = tuple(
+        collection_member(
+            membership.item,
+            membership.relationship,
+            playback_states.state_for(membership.item.id),
+            partially_watched=playback_states.is_partially_watched(membership.item.id),
+        )
+        for membership in memberships
+    )
+    movies, series, other = group_collection_members(members)
+    artwork_url, mosaic_urls = collection_artwork(
+        detail, tuple(member.poster for member in members)
+    )
+    return CollectionDetailView(
+        id=detail.id,
+        name=detail.name,
+        overview=detail.overview,
+        itemCount=detail.item_count,
+        watchOrderCount=detail.watch_order_count,
+        revision=detail.revision,
+        artworkItemId=detail.artwork_item_id,
+        defaultWatchOrderId=detail.default_watch_order_id,
+        artworkUrl=artwork_url,
+        mosaicUrls=mosaic_urls,
+        movies=movies,
+        series=series,
+        otherMembers=other,
+        memberNextCursor=member_next_cursor,
+        watchOrders=tuple(watch_order_card(watch_order) for watch_order in watch_orders),
     )
 
 

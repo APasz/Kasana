@@ -152,7 +152,7 @@ async def render_collection_edit(
             feedback_state("Collections are read-only", "An administrator can edit collections.")
             return
         try:
-            detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
+            detail = await KanvasKatalogService(settings, profile.user.id).collection_editor(
                 collection_id
             )
         except KatalogClientError as error:

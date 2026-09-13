@@ -8,7 +8,7 @@ import json
 import logging
 import socket
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -56,15 +56,21 @@ from kasana.katalog.models import (
     UserRole as ModelUserRole,
 )
 from kasana.katalog.public import (
+    CollectionMembershipUpdate,
+    CollectionUpdate,
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPair,
     JobStatus,
     LibraryItemKind,
     LibraryItemPage,
     LibraryItemUpdate,
+    PaginatedResponse,
     UserAuthentication,
     UserCreate,
     UserUpdate,
+    WatchOrderKind,
+    WatchOrderSummary,
+    WatchOrderUpdate,
 )
 from kasana.katalog.repair import (
     HierarchyRepairPlan,
@@ -467,6 +473,105 @@ async def test_typed_client_keeps_the_single_kind_filter_shorthand(
             kind=LibraryItemKind.MOVIE,
             kinds=(LibraryItemKind.SERIES,),
         )
+
+
+async def test_typed_client_omits_unset_collection_patch_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = KatalogClient("http://katalog.test", bearer_token="test-token")
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    async def request(
+        _method: str,
+        path: str,
+        *,
+        params: list[tuple[str, str | int]] | None = None,
+        headers: Mapping[str, str] | None = None,
+        json: object | None = None,
+        expect_json: bool = True,
+        retry: bool = True,
+    ) -> SimpleNamespace:
+        del params, headers, expect_json, retry
+        assert isinstance(json, dict)
+        requests.append((path, cast(dict[str, object], json)))
+        if path == "/api/v1/watch-orders/4":
+            return SimpleNamespace(
+                payload={"watch_order_id": 4, "revision": 7, "collection_revision": 9},
+                request_id=None,
+            )
+        return SimpleNamespace(payload={"collection_id": 1, "revision": 7}, request_id=None)
+
+    monkeypatch.setattr(client, "_request", request)
+
+    await client.update_collection(1, CollectionUpdate(expected_revision=3, name="Renamed"))
+    await client.update_collection_member(
+        1,
+        2,
+        CollectionMembershipUpdate(
+            expected_revision=4,
+            relationship=None,
+        ),
+    )
+    await client.update_watch_order(
+        4,
+        WatchOrderUpdate(expected_revision=6, kind=WatchOrderKind.AIR),
+    )
+
+    assert requests == [
+        ("/api/v1/collections/1", {"expected_revision": 3, "name": "Renamed"}),
+        (
+            "/api/v1/collections/1/items/2",
+            {"expected_revision": 4, "relationship": None},
+        ),
+        ("/api/v1/watch-orders/4", {"expected_revision": 6, "kind": "air"}),
+    ]
+
+
+async def test_typed_client_iterates_every_collection_watch_order_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = KatalogClient("http://katalog.test", bearer_token="test-token")
+    watch_orders = (
+        WatchOrderSummary(
+            id=1,
+            collection_id=7,
+            name="Air",
+            kind=WatchOrderKind.AIR,
+            entry_count=0,
+            revision=1,
+        ),
+        WatchOrderSummary(
+            id=2,
+            collection_id=7,
+            name="Recommended",
+            kind=WatchOrderKind.RECOMMENDED,
+            entry_count=0,
+            revision=1,
+        ),
+    )
+    requested_cursors: list[str | None] = []
+
+    async def get_model(
+        path: str, _model: object, *, params: list[tuple[str, str | int]]
+    ) -> PaginatedResponse[WatchOrderSummary]:
+        assert path == "/api/v1/collections/7/watch-orders"
+        cursor = next((value for key, value in params if key == "cursor"), None)
+        assert cursor is None or isinstance(cursor, str)
+        requested_cursors.append(cursor)
+        if cursor is None:
+            return PaginatedResponse(items=(watch_orders[0],), next_cursor="second", limit=1)
+        assert cursor == "second"
+        return PaginatedResponse(items=(watch_orders[1],), next_cursor=None, limit=1)
+
+    monkeypatch.setattr(client, "_get_model", get_model)
+
+    loaded = [
+        watch_order
+        async for watch_order in client.iter_collection_watch_orders(7, limit=1, user_id=1)
+    ]
+
+    assert [watch_order.id for watch_order in loaded] == [1, 2]
+    assert requested_cursors == [None, "second"]
 
 
 async def test_missing_library_root_is_status_only_and_recovers(api_fixture: ApiFixture) -> None:

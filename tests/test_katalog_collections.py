@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionMembershipCreate,
+    CollectionMembershipUpdate,
     CollectionRelationship,
     CollectionUpdate,
     WatchOrderCreate,
@@ -189,6 +190,34 @@ def test_collection_membership_revisions_and_deletion_safety(
     )
 
 
+def test_collection_membership_updates_require_an_explicit_relationship(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Stargate"))
+    membership = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=collection.revision,
+            library_item_id=library["movie"],
+            relationship=CollectionRelationship.PRIMARY,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must include relationship"):
+        CollectionMembershipUpdate(expected_revision=membership.revision)
+
+    cleared = queries.update_collection_membership(
+        collection.collection_id,
+        library["movie"],
+        CollectionMembershipUpdate(expected_revision=membership.revision, relationship=None),
+    )
+
+    assert cleared.membership is not None
+    assert cleared.membership.relationship is None
+
+
 def test_watch_order_entry_moves_and_generation_preview(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -287,6 +316,62 @@ def test_watch_order_entry_moves_and_generation_preview(
         library["first_episode"],
         library["second_episode"],
         library["unavailable_extra"],
+    ]
+
+
+def test_deleting_an_item_compacts_watch_order_positions_before_a_merge(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Mixed"))
+    revision = collection.revision
+    for key in ("movie", "first_episode", "second_episode"):
+        membership = queries.add_collection_membership(
+            collection.collection_id,
+            CollectionMembershipCreate(expected_revision=revision, library_item_id=library[key]),
+        )
+        revision = membership.revision
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=revision,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+        ),
+    )
+    first = queries.add_watch_order_entry(
+        order.watch_order_id,
+        WatchOrderEntryCreate(expected_revision=order.revision, library_item_id=library["movie"]),
+    )
+    second = queries.add_watch_order_entry(
+        order.watch_order_id,
+        WatchOrderEntryCreate(
+            expected_revision=first.revision,
+            library_item_id=library["first_episode"],
+        ),
+    )
+
+    queries.delete_item(library["movie"], confirm=True)
+
+    after_deletion = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+    assert [(entry.position, entry.item.id) for entry in after_deletion.entries.items] == [
+        (0, library["first_episode"])
+    ]
+    applied = queries.apply_watch_order_generation(
+        order.watch_order_id,
+        WatchOrderGenerationRequest(
+            expected_revision=after_deletion.watch_order.revision,
+            mode=WatchOrderGenerationMode.RELEASE,
+            apply_mode=WatchOrderGenerationApplyMode.MERGE,
+        ),
+    )
+    merged = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+
+    assert applied.revision == second.revision + 2
+    assert [(entry.position, entry.item.id) for entry in merged.entries.items] == [
+        (0, library["first_episode"]),
+        (1, library["second_episode"]),
     ]
 
 
