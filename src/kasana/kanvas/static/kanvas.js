@@ -794,7 +794,7 @@
       const previousDrawer = this.drawer;
       const restoreDrawer = previousDrawer instanceof HTMLDialogElement && previousDrawer.open;
       if (restoreDrawer) previousDrawer.close();
-      if (!this.alerts.length && !this.history.length) {
+      if (!this.alerts.length) {
         this.hidden = true;
         this.drawer = null;
         this.replaceChildren();
@@ -802,24 +802,6 @@
       }
       this.hidden = false;
       const drawer = this.drawerElement();
-      if (!this.alerts.length) {
-        const historyBar = document.createElement('section');
-        historyBar.className = 'k-system-alerts__history-bar';
-        const message = document.createElement('div');
-        message.className = 'k-system-alerts__message';
-        const title = document.createElement('strong');
-        title.className = 'k-system-alerts__title';
-        title.textContent = 'No active system issues';
-        const detail = document.createElement('span');
-        detail.className = 'k-system-alerts__detail';
-        detail.textContent = `${this.history.length} recovered ${this.history.length === 1 ? 'condition' : 'conditions'} retained.`;
-        message.append(title, detail);
-        const drawerButton = this.drawerButton('System history');
-        historyBar.append(message, drawerButton);
-        this.replaceChildren(historyBar, drawer);
-        if (restoreDrawer) this.openDrawer();
-        return;
-      }
       const primary = this.alerts.find((alert) => alert.code === 'library_root_unavailable')
         || this.alerts.find((alert) => alert.severity === 'error')
         || this.alerts[0];
@@ -881,7 +863,7 @@
     drawerElement() {
       const drawer = document.createElement('dialog');
       drawer.className = 'k-kanvas-dialog k-system-alerts__drawer';
-      const drawerTitleText = this.alerts.length ? 'System attention' : 'System history';
+      const drawerTitleText = 'System attention';
       drawer.setAttribute('aria-label', drawerTitleText);
       const drawerContent = document.createElement('section');
       drawerContent.className = 'k-picker k-system-alerts__drawer-content';

@@ -164,17 +164,6 @@ kanvas-system-alerts[hidden] { display: none; }
     --k-system-alert-border: #c77d3c;
     --k-system-alert-surface: #6a360a;
 }
-.k-system-alerts__history-bar {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 8px 12px;
-    min-height: 42px;
-    padding: 7px clamp(18px, 3vw, 52px);
-    border-bottom: 1px solid var(--k-border-subtle);
-    background: var(--k-nav-backdrop);
-    pointer-events: auto;
-}
 .k-system-alerts__message { display: grid; min-width: 0; gap: 2px; }
 .k-system-alerts__title { overflow-wrap: anywhere; color: var(--k-text); font-size: 0.8rem; }
 .k-system-alerts__detail { overflow-wrap: anywhere; color: var(--k-text-muted); font-size: 0.72rem; line-height: 1.35; }
@@ -1955,8 +1944,6 @@ kanvas-profile-menu { position: relative; display: block; width: 100%; min-heigh
     .k-system-alerts__message { grid-column: 1; }
     .k-system-alerts__primary-action { grid-column: 1; justify-self: start; }
     .k-system-alerts__drawer-button { grid-column: 2; grid-row: 1 / span 2; }
-    .k-system-alerts__history-bar { grid-template-columns: minmax(0, 1fr) auto; padding: 7px 14px; }
-    .k-system-alerts__history-bar .k-system-alerts__drawer-button { grid-row: 1; }
     .k-system-alerts__item { grid-template-columns: 1fr; }
     .k-system-alerts__item .k-button { width: fit-content; }
     .k-system-alerts__controls { justify-items: start; }

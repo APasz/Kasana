@@ -411,9 +411,6 @@ function testSystemAlertNormalisationAndRendering() {
   shell.applyFeed([{...alert, detail: 'The mount is still unavailable.'}], []);
   assert.equal(shell.drawer.open, true);
   shell.applyFeed([], [history]);
-  assert.equal(shell.hidden, false);
-  assert.match(shell.children[0].className, /k-system-alerts__history-bar/);
-  shell.applyAlerts([]);
   assert.equal(shell.hidden, true);
   assert.equal(shell.children.length, 0);
 }
