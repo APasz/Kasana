@@ -126,12 +126,15 @@ def create_library_root(
     default_tags: frozenset[str] = frozenset[str](),
     enabled: bool = True,
     display_name: str | None = None,
+    required_mount_path: Path | None = None,
 ) -> Kura:
     if not path.is_absolute():
         msg = "A library root path must be absolute."
         raise ValueError(msg)
+    mount_path = validate_library_root_mount_path(path, required_mount_path)
     root: Kura = Kura(
         path=str(path),
+        required_mount_path=str(mount_path) if mount_path is not None else None,
         expected_media_kind=expected_media_kind,
         default_tags=sorted(default_tags),
         enabled=enabled,
@@ -140,6 +143,20 @@ def create_library_root(
     session.add(root)
     session.flush()
     return root
+
+
+def validate_library_root_mount_path(
+    library_root_path: Path, required_mount_path: Path | None
+) -> Path | None:
+    """Validate an optional mount dependency belonging to one library root."""
+
+    if required_mount_path is None:
+        return None
+    if not required_mount_path.is_absolute():
+        raise ValueError("A required mount path must be absolute.")
+    if not library_root_path.is_relative_to(required_mount_path):
+        raise ValueError("A required mount path must contain its library root path.")
+    return required_mount_path
 
 
 def create_library_item(

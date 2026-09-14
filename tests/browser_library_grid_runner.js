@@ -195,6 +195,10 @@ global.document = {
     listeners.push(listener);
     documentListeners.set(name, listeners);
   },
+  removeEventListener(name, listener) {
+    const listeners = documentListeners.get(name) || [];
+    documentListeners.set(name, listeners.filter((entry) => entry !== listener));
+  },
   querySelector() {
     return null;
   },
@@ -387,14 +391,22 @@ function testSystemAlertNormalisationAndRendering() {
   assert.equal(history.incidentId, 8);
   assert.equal(normaliseSystemAlertHistory({...history, incidentId: -1}), null);
 
+  const databaseAlert = {
+    id: 'database-unhealthy',
+    code: 'database_unhealthy',
+    severity: 'error',
+    title: 'Catalogue database needs attention',
+    detail: 'Katalog reported a database health problem.',
+    action: {kind: 'navigate', label: 'Open Administration', href: '/administration'}
+  };
   const shell = new KanvasSystemAlerts();
-  shell.applyAlerts([alert]);
+  shell.applyAlerts([databaseAlert, alert]);
 
   assert.equal(shell.hidden, false);
   assert.equal(shell.children.length, 2);
-  assert.match(shell.children[0].className, /k-system-alerts__banner--warning/);
-  assert.equal(shell.children[0].children[0].children[0].textContent, alert.title);
-  shell.openDrawer();
+  assert.match(shell.children[0].className, /k-system-alerts__banner--storage/);
+  assert.equal(shell.children[0].children[0].textContent, 'Filesystem Warning');
+  shell.children[0].children[0].click();
   assert.equal(shell.drawer.open, true);
   shell.applyFeed([{...alert, detail: 'The mount is still unavailable.'}], []);
   assert.equal(shell.drawer.open, true);
@@ -404,6 +416,111 @@ function testSystemAlertNormalisationAndRendering() {
   shell.applyAlerts([]);
   assert.equal(shell.hidden, true);
   assert.equal(shell.children.length, 0);
+}
+
+async function testSystemAlertsLoadWhenSourceArrivesAfterConnection() {
+  const {KanvasSystemAlerts} = globalThis.__systemAlertsTest;
+  const shell = new KanvasSystemAlerts();
+  assert.equal(typeof shell.source, 'undefined');
+  const originalFetch = global.fetch;
+  const requests = [];
+  try {
+    global.fetch = async (url) => {
+      requests.push(url);
+      return response({body: {alerts: [{
+        id: 'media-storage-unavailable',
+        code: 'library_root_unavailable',
+        severity: 'error',
+        title: 'Media storage unavailable',
+        detail: 'All media storage is unavailable.',
+        action: {kind: 'retry', label: 'Check again'}
+      }], history: []}});
+    };
+
+    shell.connectedCallback();
+    await nextTick();
+    assert.deepEqual(requests, []);
+
+    shell.setAttribute('source', '/kanvas/data/system-alerts');
+    shell.attributeChangedCallback('source', null, '/kanvas/data/system-alerts');
+    await nextTick();
+
+    assert.deepEqual(requests, ['/kanvas/data/system-alerts']);
+    assert.equal(shell.hidden, false);
+    assert.equal(shell.children[0].children[0].textContent, 'Filesystem Error');
+
+    const timersBeforeSourceRemoval = timerDelays.length;
+    shell.removeAttribute('source');
+    shell.attributeChangedCallback('source', '/kanvas/data/system-alerts', null);
+    shell.schedulePolling();
+    assert.equal(timerDelays.length, timersBeforeSourceRemoval);
+  } finally {
+    shell.disconnectedCallback();
+    global.fetch = originalFetch;
+  }
+}
+
+async function testSystemAlertsDiscardResponsesFromAReplacedSource() {
+  const {KanvasSystemAlerts} = globalThis.__systemAlertsTest;
+  const shell = new KanvasSystemAlerts();
+  const originalFetch = global.fetch;
+  let resolveStale;
+  let resolveCurrent;
+  const requests = [];
+  try {
+    global.fetch = (url) => {
+      requests.push(url);
+      if (url === '/kanvas/data/system-alerts/stale') {
+        return new Promise((resolve) => { resolveStale = resolve; });
+      }
+      if (url === '/kanvas/data/system-alerts/current') {
+        return new Promise((resolve) => { resolveCurrent = resolve; });
+      }
+      throw new Error(`Unexpected source: ${url}`);
+    };
+
+    shell.setAttribute('source', '/kanvas/data/system-alerts/stale');
+    const staleLoad = shell.load();
+    await nextTick();
+
+    shell.setAttribute('source', '/kanvas/data/system-alerts/current');
+    shell.attributeChangedCallback(
+      'source',
+      '/kanvas/data/system-alerts/stale',
+      '/kanvas/data/system-alerts/current'
+    );
+    resolveStale(response({body: {alerts: [{
+      id: 'stale-alert',
+      code: 'library_root_unavailable',
+      severity: 'warning',
+      title: 'Stale filesystem warning',
+      detail: 'This response must be ignored.',
+      action: {kind: 'retry', label: 'Check again'}
+    }], history: []}}));
+    await staleLoad;
+    await nextTick();
+
+    assert.deepEqual(requests, [
+      '/kanvas/data/system-alerts/stale',
+      '/kanvas/data/system-alerts/current'
+    ]);
+    assert.deepEqual(shell.alerts, []);
+
+    resolveCurrent(response({body: {alerts: [{
+      id: 'current-alert',
+      code: 'library_root_unavailable',
+      severity: 'error',
+      title: 'Current filesystem error',
+      detail: 'The current source is authoritative.',
+      action: {kind: 'retry', label: 'Check again'}
+    }], history: []}}));
+    await nextTick();
+
+    assert.equal(shell.alerts[0].id, 'current-alert');
+  } finally {
+    shell.disconnectedCallback();
+    global.fetch = originalFetch;
+  }
 }
 
 async function testRecoveredAcknowledgementRefreshesTheAlertFeed() {
@@ -1999,6 +2116,7 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
   await libraries.saveRoot(null, fakeFormValues({
     displayName: 'Series',
     path: '/media/series',
+    requiredMountPath: '/media',
     kind: 'series',
     tags: 'tv, sci-fi',
     preferredAudioLanguage: 'en',
@@ -2015,6 +2133,7 @@ async function testAdministrationPrimaryFlowKeepsWorkInFourAreas() {
         rootId: null,
         displayName: 'Series',
         path: '/media/series',
+        requiredMountPath: '/media',
         kind: 'series',
         tags: ['tv', 'sci-fi'],
         preferredAudioLanguage: 'en',
@@ -2387,6 +2506,8 @@ async function main() {
   await testQueuedToastConsumptionCanBeRequestedInPlace();
   await testToastsIgnoreConsumptionAfterDisconnection();
   testSystemAlertNormalisationAndRendering();
+  await testSystemAlertsLoadWhenSourceArrivesAfterConnection();
+  await testSystemAlertsDiscardResponsesFromAReplacedSource();
   await testRecoveredAcknowledgementRefreshesTheAlertFeed();
   await testAcknowledgementRefreshesAfterAnInFlightAlertPoll();
   await testTimedOutSystemAlertRequestShowsAnAvailabilityAlert();

@@ -133,6 +133,7 @@ from kasana.katalog.public import (
     PlaybackStateResponse,
     PlaybackStatesRequest,
     ScanRequest,
+    StatusResponse,
     SystemIncidentAcknowledgeRequest,
     SystemIncidentResponse,
     WatchOrderCreate,
@@ -199,6 +200,11 @@ _SYSTEM_INCIDENT_PRESENTATIONS: Mapping[KatalogSystemIncidentCode, _SystemIncide
         ),
     ),
 }
+
+_VIEWER_MEDIA_STORAGE_ACTION = SystemAlertActionView(
+    kind=SystemAlertActionKind.RETRY,
+    label="Check again",
+)
 
 
 @dataclass(frozen=True)
@@ -398,15 +404,18 @@ class KanvasKatalogService:
         return tuple(library_root_view(root) for root in roots)
 
     async def system_alert_feed(self, *, is_administrator: bool) -> SystemAlertFeedView:
-        """Return current shell alerts and administrator history without transport details."""
+        """Return safe current shell alerts appropriate to the active profile."""
 
-        incidents: KatalogSystemIncidentFeed | None = None
         try:
             async with self._client() as client:
+                status = await client.status()
                 if is_administrator:
-                    incidents = await client.system_incidents()
-                else:
-                    await client.status()
+                    try:
+                        incidents = await client.system_incidents()
+                    except KatalogClientError:
+                        return _administrator_system_alert_feed(status, incidents=None)
+                    return _administrator_system_alert_feed(status, incidents=incidents)
+                return _viewer_system_alert_feed(status)
         except KatalogClientError:
             return SystemAlertFeedView(
                 connected=False,
@@ -427,11 +436,6 @@ class KanvasKatalogService:
                     ),
                 ),
             )
-        if not is_administrator:
-            return SystemAlertFeedView(connected=True)
-        if incidents is None:
-            raise RuntimeError("Katalog did not return the administrator incident feed.")
-        return _system_alert_feed(incidents)
 
     async def acknowledge_system_incident(self, incident_id: int) -> None:
         """Record that the active administrator has seen one durable condition."""
@@ -1411,13 +1415,101 @@ class KanvasKatalogService:
             cursor = page.next_cursor
 
 
-def _system_alert_feed(incidents: KatalogSystemIncidentFeed) -> SystemAlertFeedView:
-    """Map Katalog's durable records onto shell-specific actions and aliases."""
+def _administrator_system_alert_feed(
+    status: StatusResponse,
+    *,
+    incidents: KatalogSystemIncidentFeed | None,
+) -> SystemAlertFeedView:
+    """Combine current root availability with optional durable administrator incidents."""
+
+    root_incident = (
+        next(
+            (
+                incident
+                for incident in incidents.active
+                if incident.code is KatalogSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE
+            ),
+            None,
+        )
+        if incidents is not None
+        else None
+    )
+    storage_alert = _media_storage_status_alert(
+        status,
+        is_administrator=True,
+        incident=root_incident,
+    )
+    durable_alerts = (
+        tuple(
+            _system_incident_alert(incident)
+            for incident in incidents.active
+            if incident.code is not KatalogSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE
+        )
+        if incidents is not None
+        else ()
+    )
 
     return SystemAlertFeedView(
         connected=True,
-        alerts=tuple(_system_incident_alert(incident) for incident in incidents.active),
-        history=tuple(_system_incident_history(incident) for incident in incidents.history),
+        alerts=((storage_alert,) if storage_alert is not None else ()) + durable_alerts,
+        history=(
+            tuple(_system_incident_history(incident) for incident in incidents.history)
+            if incidents is not None
+            else ()
+        ),
+    )
+
+
+def _viewer_system_alert_feed(status: StatusResponse) -> SystemAlertFeedView:
+    """Expose current media-storage availability without administrator-only detail."""
+
+    storage_alert = _media_storage_status_alert(status, is_administrator=False)
+    return SystemAlertFeedView(
+        connected=True,
+        alerts=(storage_alert,) if storage_alert is not None else (),
+    )
+
+
+def _media_storage_status_alert(
+    status: StatusResponse,
+    *,
+    is_administrator: bool,
+    incident: SystemIncidentResponse | None = None,
+) -> SystemAlertView | None:
+    """Present current root availability without depending on incident synchronisation."""
+
+    root_issue = status.library_root_availability_issue
+    if root_issue is None:
+        return None
+    severity = SystemAlertSeverity(root_issue.severity.value)
+    if is_administrator:
+        return SystemAlertView(
+            id=_SYSTEM_INCIDENT_PRESENTATIONS[
+                KatalogSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE
+            ].alert_id,
+            code=SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE,
+            severity=severity,
+            title=root_issue.title,
+            detail=root_issue.detail,
+            action=_SYSTEM_INCIDENT_PRESENTATIONS[
+                KatalogSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE
+            ].action,
+            incidentId=incident.id if incident is not None else None,
+            acknowledgedAt=incident.acknowledged_at if incident is not None else None,
+        )
+    if severity is SystemAlertSeverity.ERROR:
+        title = "Media storage unavailable"
+        detail = "All media storage is unavailable. Playback will resume when it is restored."
+    else:
+        title = "Some media storage unavailable"
+        detail = "Some media storage is unavailable. Affected titles may not play."
+    return SystemAlertView(
+        id="media-storage-unavailable",
+        code=SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE,
+        severity=severity,
+        title=title,
+        detail=detail,
+        action=_VIEWER_MEDIA_STORAGE_ACTION,
     )
 
 

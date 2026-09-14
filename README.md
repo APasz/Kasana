@@ -53,6 +53,17 @@ for `shared`, `katalog`, `kanvas`, `kestrel`, `kourier`, `tmdb`, and `fanart`.
 Environment variables and `.env` override those files.
 Set `KASANA_CONFIG_DIRECTORY` to relocate the configuration root.
 
+For a library root on physical or network storage, configure an optional mount dependency when
+creating or editing that root. The mount path must be absolute and contain the root path. When a
+configured mount is absent, only its dependent root is marked unavailable; this supports
+independent local, NFS, and SMB roots.
+
+```bash
+uv run kasana-katalog library update 1 --required-mount-path /SabaWolf
+uv run kasana-katalog library add /mnt/smb/Films --expected-kind movie --required-mount-path /mnt/smb
+uv run kasana-katalog library update 1 --clear-required-mount
+```
+
 Katalog and Kanvas create `configs/katalog.api-token` and
 `configs/kanvas.session-secret`, respectively, with owner-only permissions.
 Keep them private.

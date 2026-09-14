@@ -607,6 +607,10 @@
   });
 
   class KanvasSystemAlerts extends HTMLElement {
+    static get observedAttributes() {
+      return ['source'];
+    }
+
     constructor() {
       super();
       this.alerts = [];
@@ -631,6 +635,18 @@
       void this.load();
     }
 
+    attributeChangedCallback(name, previousValue, value) {
+      if (name !== 'source' || previousValue === value || !this.isConnected) return;
+      this.abort?.abort();
+      this.stopPolling();
+      if (!value) {
+        this.loadAgain = false;
+        this.applyFeed([], []);
+        return;
+      }
+      void this.load();
+    }
+
     disconnectedCallback() {
       document.removeEventListener('visibilitychange', this.onVisibilityChange);
       window.removeEventListener('online', this.onOnline);
@@ -641,8 +657,12 @@
       this.loadAgain = false;
     }
 
-    source() {
+    alertSource() {
       return this.getAttribute('source');
+    }
+
+    hasCurrentAlertSource(source) {
+      return this.isConnected && this.alertSource() === source;
     }
 
     acknowledgementSource() {
@@ -675,7 +695,7 @@
         this.stopPolling();
         return;
       }
-      const source = this.source();
+      const source = this.alertSource();
       if (!source) return;
       const controller = new AbortController();
       let timedOut = false;
@@ -691,11 +711,13 @@
           credentials: 'same-origin',
           signal: controller.signal,
         });
+        if (!this.hasCurrentAlertSource(source)) return;
         if (response.status === 401) {
           window.location.assign('/profiles');
           return;
         }
         const payload = await response.json().catch(() => null);
+        if (!this.hasCurrentAlertSource(source)) return;
         if (!response.ok || !payload || typeof payload !== 'object') {
           throw new Error('System alert request failed.');
         }
@@ -710,6 +732,7 @@
         if (alerts === null || history === null) throw new Error('System alert payload was invalid.');
         this.applyFeed(alerts, history);
       } catch (error) {
+        if (!this.hasCurrentAlertSource(source)) return;
         if (error?.name !== 'AbortError' || timedOut) {
           this.applyFeed([
             navigator.onLine === false ? browserOfflineAlert() : kanvasUnavailableAlert()
@@ -738,6 +761,7 @@
       this.stopPolling();
       if (
         !this.isConnected ||
+        !this.alertSource() ||
         document.visibilityState === 'hidden' ||
         navigator.onLine === false
       ) return;
@@ -796,11 +820,31 @@
         if (restoreDrawer) this.openDrawer();
         return;
       }
-      const primary = this.alerts.find((alert) => alert.severity === 'error') || this.alerts[0];
+      const primary = this.alerts.find((alert) => alert.code === 'library_root_unavailable')
+        || this.alerts.find((alert) => alert.severity === 'error')
+        || this.alerts[0];
       const banner = document.createElement('section');
       banner.className = `k-system-alerts__banner k-system-alerts__banner--${primary.severity}`;
       banner.setAttribute('role', primary.severity === 'error' ? 'alert' : 'status');
       banner.setAttribute('aria-live', primary.severity === 'error' ? 'assertive' : 'polite');
+
+      if (primary.code === 'library_root_unavailable') {
+        banner.classList.add('k-system-alerts__banner--storage');
+        banner.setAttribute('aria-label', `${primary.title}. ${primary.detail}`);
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'k-system-alerts__storage-trigger';
+        trigger.textContent = primary.severity === 'error'
+          ? 'Filesystem Error'
+          : 'Filesystem Warning';
+        trigger.setAttribute('aria-haspopup', 'dialog');
+        trigger.setAttribute('aria-label', `${primary.title}. Open system details.`);
+        trigger.addEventListener('click', () => this.openDrawer());
+        banner.append(trigger);
+        this.replaceChildren(banner, drawer);
+        if (restoreDrawer) this.openDrawer();
+        return;
+      }
 
       const message = document.createElement('div');
       message.className = 'k-system-alerts__message';

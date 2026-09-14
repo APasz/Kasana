@@ -3400,6 +3400,7 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         async def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
             calls.append("create-root")
             assert request.expected_kind is LibraryRootKind.MOVIE
+            assert request.required_mount_path == "/media"
             return LibraryRootSummary(
                 id=1,
                 path="media",
@@ -3415,8 +3416,18 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         ) -> LibraryRootSummary:
             calls.append("update-root")
             assert request.enabled is False
+            assert request.required_mount_path == "/media"
+            assert request.model_fields_set == {
+                "default_tags",
+                "enabled",
+                "required_mount_path",
+            }
             return await self.create_library_root(
-                LibraryRootCreate(path="media", expected_kind=LibraryRootKind.MOVIE)
+                LibraryRootCreate(
+                    path="media",
+                    required_mount_path="/media",
+                    expected_kind=LibraryRootKind.MOVIE,
+                )
             )
 
         async def delete_library_root(self, _root_id: int, *, confirm: bool) -> None:
@@ -3465,8 +3476,20 @@ async def test_administration_data_and_mutation_endpoints_stay_within_katalog_bo
         {"operation": "reject", "itemId": 7, "provider": "tmdb", "providerId": "42"},
         {"operation": "ignore", "itemId": 7},
         {"operation": "refresh", "itemId": 7},
-        {"operation": "root-create", "path": "media", "kind": "movie", "tags": ["films"]},
-        {"operation": "root-update", "rootId": 1, "enabled": False, "tags": list[str]()},
+        {
+            "operation": "root-create",
+            "path": "media",
+            "requiredMountPath": "/media",
+            "kind": "movie",
+            "tags": ["films"],
+        },
+        {
+            "operation": "root-update",
+            "rootId": 1,
+            "requiredMountPath": "/media",
+            "enabled": False,
+            "tags": list[str](),
+        },
         {"operation": "root-delete", "rootId": 1, "confirm": True},
     )
     actions = [
@@ -4039,9 +4062,7 @@ async def test_item_edit_endpoints_report_data_and_validation(
     invalid_action_response = await item_edit_action(
         7, cast(Request, JsonRequest({"tags": "anime"}))
     )
-    delete_response = await item_delete_action(
-        7, cast(Request, JsonRequest({"confirmed": True}))
-    )
+    delete_response = await item_delete_action(7, cast(Request, JsonRequest({"confirmed": True})))
     unconfirmed_delete_response = await item_delete_action(7, cast(Request, JsonRequest({})))
     artwork_fetch_response = await item_artwork_fetch_action(
         7, Request({"type": "http", "query_string": b"", "headers": []})

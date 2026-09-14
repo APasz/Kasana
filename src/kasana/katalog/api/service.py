@@ -140,6 +140,7 @@ from kasana.katalog.api.contracts import (
 )
 from kasana.katalog.container import canonical_container
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.filesystem import is_library_root_accessible
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
     MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
@@ -216,6 +217,7 @@ from kasana.katalog.services import (
     normalise_library_item_tags,
     record_playback_progress,
     validate_library_item_parent,
+    validate_library_root_mount_path,
 )
 from kasana.katalog.user_configuration import (
     SubtitlePreference,
@@ -747,12 +749,19 @@ class KatalogQueryService:
 
     def create_library_root(self, request: LibraryRootCreate) -> LibraryRootSummary:
         path = _validated_library_root_path(request.path)
+        required_mount_path = _validated_required_mount_path(
+            request.required_mount_path,
+            library_root_path=path,
+        )
 
         def create(session: Session) -> LibraryRootSummary:
             if session.scalar(select(Kura.id).where(Kura.path == str(path))) is not None:
                 raise CatalogueConflictError("A library root already uses this path.")
             root = Kura(
                 path=str(path),
+                required_mount_path=str(required_mount_path)
+                if required_mount_path is not None
+                else None,
                 expected_media_kind=ZaisanKind(request.expected_kind.value),
                 default_tags=list(request.default_tags),
                 preferred_audio_language=request.preferred_audio_language,
@@ -771,6 +780,17 @@ class KatalogQueryService:
 
         def change(session: Session) -> LibraryRootSummary:
             root = _require(session, Kura, root_id, "Library root")
+            fields = request.model_fields_set
+            updated_path = path if path is not None else Path(root.path)
+            requested_mount_path = (
+                request.required_mount_path
+                if "required_mount_path" in fields
+                else root.required_mount_path
+            )
+            required_mount_path = _validated_required_mount_path(
+                requested_mount_path,
+                library_root_path=updated_path,
+            )
             if path is not None:
                 duplicate = session.scalar(
                     select(Kura.id).where(Kura.path == str(path), Kura.id != root_id)
@@ -778,18 +798,22 @@ class KatalogQueryService:
                 if duplicate is not None:
                     raise CatalogueConflictError("A library root already uses this path.")
                 root.path = str(path)
+            if "required_mount_path" in fields:
+                root.required_mount_path = (
+                    str(required_mount_path) if required_mount_path is not None else None
+                )
             if request.expected_kind is not None:
                 root.expected_media_kind = ZaisanKind(request.expected_kind.value)
             if request.default_tags is not None:
                 root.default_tags = list(request.default_tags)
-            if "preferred_audio_language" in request.model_fields_set:
+            if "preferred_audio_language" in fields:
                 root.preferred_audio_language = request.preferred_audio_language
-            if "preferred_subtitle_language" in request.model_fields_set:
+            if "preferred_subtitle_language" in fields:
                 root.preferred_subtitle_language = request.preferred_subtitle_language
             if request.enabled is not None:
                 root.enabled = request.enabled
-            if request.display_name is not None:
-                root.display_name = request.display_name.strip() or None
+            if "display_name" in fields:
+                root.display_name = request.display_name.strip() if request.display_name else None
             session.flush()
             return _library_root_summary(session, root)
 
@@ -4458,7 +4482,9 @@ def _mark_item_subtree_references_changed(session: Session, item_ids: set[int]) 
     for collection in artwork_collections:
         collection.artwork_item_id = None
     if collection_ids:
-        for collection in session.scalars(select(Collection).where(Collection.id.in_(collection_ids))):
+        for collection in session.scalars(
+            select(Collection).where(Collection.id.in_(collection_ids))
+        ):
             collection.revision += 1
 
     watch_order_ids = set(
@@ -5959,10 +5985,39 @@ def _count(session: Session, model: type[object]) -> int:
 
 
 def _validated_library_root_path(value: str) -> Path:
-    path = Path(value).expanduser().resolve(strict=False)
-    if path.is_file():
+    try:
+        path = Path(value).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CatalogueValidationError("A library root path could not be resolved.") from error
+    try:
+        is_file = path.is_file()
+    except (OSError, ValueError) as error:
+        raise CatalogueValidationError("A library root path could not be inspected.") from error
+    if is_file:
         raise CatalogueValidationError("A library root path must not be a file.")
     return path
+
+
+def _validated_required_mount_path(value: str | None, *, library_root_path: Path) -> Path | None:
+    if value is None:
+        return None
+    try:
+        mount_path = Path(value).expanduser()
+    except (RuntimeError, ValueError) as error:
+        raise CatalogueValidationError("A required mount path could not be resolved.") from error
+    if not mount_path.is_absolute():
+        raise CatalogueValidationError("A required mount path must be absolute.")
+    try:
+        resolved_mount_path = mount_path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CatalogueValidationError("A required mount path could not be resolved.") from error
+    try:
+        return validate_library_root_mount_path(
+            library_root_path,
+            resolved_mount_path,
+        )
+    except ValueError as error:
+        raise CatalogueValidationError(str(error)) from error
 
 
 def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
@@ -5985,6 +6040,7 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
         id=root.id,
         display_name=root.display_name,
         path=root.path,
+        required_mount_path=root.required_mount_path,
         expected_kind=LibraryRootKind(root.expected_media_kind.value),
         default_tags=tuple(root.default_tags),
         preferred_audio_language=root.preferred_audio_language,
@@ -5998,7 +6054,12 @@ def _library_root_summary(session: Session, root: Kura) -> LibraryRootSummary:
 
 
 def _library_root_available(root: Kura) -> bool:
-    return Path(root.path).is_dir()
+    return is_library_root_accessible(
+        Path(root.path),
+        required_mount_path=Path(root.required_mount_path)
+        if root.required_mount_path is not None
+        else None,
+    )
 
 
 def _system_incident_observations(
@@ -6016,25 +6077,14 @@ def _system_incident_observations(
                 detail="Katalog reported a database health problem. Investigate the database service.",
             )
         )
-    if status.unavailable_root_count:
-        root_count = status.unavailable_root_count
+    root_issue = status.library_root_availability_issue
+    if root_issue is not None:
         observations.append(
             _SystemIncidentObservation(
                 code=ModelSystemIncidentCode.LIBRARY_ROOT_UNAVAILABLE,
-                severity=ModelSystemIncidentSeverity.WARNING,
-                title=(
-                    "Library root unavailable"
-                    if root_count == 1
-                    else f"{root_count} library roots unavailable"
-                ),
-                detail=(
-                    "A configured library root is not accessible. Check the disk or mount, then rescan."
-                    if root_count == 1
-                    else (
-                        f"{root_count} configured library roots are not accessible. "
-                        "Check the disks or mounts, then rescan."
-                    )
-                ),
+                severity=ModelSystemIncidentSeverity(root_issue.severity.value),
+                title=root_issue.title,
+                detail=root_issue.detail,
             )
         )
     problem_job_count = status.failed_job_count + status.interrupted_job_count

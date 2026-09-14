@@ -10,7 +10,7 @@ from typing import Literal
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from kasana.katalog.services import (
     create_library_root,
     create_user,
     effective_item_availabilities,
+    validate_library_root_mount_path,
 )
 from kasana.katalog.user_configuration import (
     UserConfiguration,
@@ -38,6 +39,23 @@ from kasana.katalog.user_configuration import (
 )
 
 type RootKind = Literal["movie", "series"]
+
+
+def _normalise_required_mount_path(value: Path | None) -> Path | None:
+    """Resolve one optional mount dependency while preserving its configuration rules."""
+
+    if value is None:
+        return None
+    try:
+        expanded_path = value.expanduser()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("A required mount path could not be resolved.") from error
+    if not expanded_path.is_absolute():
+        raise ValueError("A required mount path must be absolute.")
+    try:
+        return expanded_path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("A required mount path could not be resolved.") from error
 
 
 class AdminError(RuntimeError):
@@ -50,6 +68,7 @@ class KuraInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: Path
+    required_mount_path: Path | None = None
     expected_kind: RootKind
     default_tags: tuple[str, ...] = ()
     enabled: bool = True
@@ -60,6 +79,11 @@ class KuraInput(BaseModel):
     def normalise_path(cls, value: Path) -> Path:
         return value.expanduser().resolve(strict=False)
 
+    @field_validator("required_mount_path")
+    @classmethod
+    def normalise_required_mount_path(cls, value: Path | None) -> Path | None:
+        return _normalise_required_mount_path(value)
+
     @field_validator("default_tags")
     @classmethod
     def normalise_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -69,11 +93,17 @@ class KuraInput(BaseModel):
             raise ValueError(msg)
         return tags
 
+    @model_validator(mode="after")
+    def validate_required_mount_path(self) -> KuraInput:
+        validate_library_root_mount_path(self.path, self.required_mount_path)
+        return self
+
 
 class KuraUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: Path | None = None
+    required_mount_path: Path | None = None
     expected_kind: RootKind | None = None
     default_tags: tuple[str, ...] | None = None
     enabled: bool | None = None
@@ -83,6 +113,11 @@ class KuraUpdate(BaseModel):
     @classmethod
     def normalise_path(cls, value: Path | None) -> Path | None:
         return value.expanduser().resolve(strict=False) if value is not None else None
+
+    @field_validator("required_mount_path")
+    @classmethod
+    def normalise_required_mount_path(cls, value: Path | None) -> Path | None:
+        return _normalise_required_mount_path(value)
 
     @field_validator("default_tags")
     @classmethod
@@ -101,6 +136,7 @@ class KuraView(BaseModel):
 
     id: int
     path: Path
+    required_mount_path: Path | None
     expected_kind: RootKind
     default_tags: tuple[str, ...]
     enabled: bool
@@ -339,6 +375,7 @@ class KatalogAdmin:
                         default_tags=frozenset(root_input.default_tags),
                         enabled=root_input.enabled,
                         display_name=root_input.display_name,
+                        required_mount_path=root_input.required_mount_path,
                     )
                 )
             )
@@ -414,8 +451,27 @@ class KatalogAdmin:
     @staticmethod
     def _update_root(session: Session, root_id: int, changes: KuraUpdate) -> KuraView:
         root = _require_root(session, root_id)
+        updated_path = changes.path if changes.path is not None else Path(root.path)
+        requested_mount_path = (
+            changes.required_mount_path
+            if "required_mount_path" in changes.model_fields_set
+            else Path(root.required_mount_path)
+            if root.required_mount_path is not None
+            else None
+        )
+        try:
+            required_mount_path = validate_library_root_mount_path(
+                updated_path,
+                requested_mount_path,
+            )
+        except ValueError as error:
+            raise AdminError(str(error)) from error
         if changes.path is not None:
             root.path = str(changes.path)
+        if "required_mount_path" in changes.model_fields_set:
+            root.required_mount_path = (
+                str(required_mount_path) if required_mount_path is not None else None
+            )
         if changes.expected_kind is not None:
             root.expected_media_kind = ZaisanKind(changes.expected_kind)
         if changes.default_tags is not None:
@@ -450,6 +506,9 @@ def _root_view(root: Kura) -> KuraView:
     return KuraView(
         id=root.id,
         path=Path(root.path),
+        required_mount_path=Path(root.required_mount_path)
+        if root.required_mount_path is not None
+        else None,
         expected_kind=expected_kind,
         default_tags=tuple(root.default_tags),
         enabled=root.enabled,

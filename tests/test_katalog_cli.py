@@ -70,7 +70,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260904_0030"}
+    assert json.loads(current.output) == {"revision": "20260914_0031"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -85,6 +85,8 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
             "anime",
             "--display-name",
             "Films",
+            "--required-mount-path",
+            str(tmp_path),
         ],
         env=environment,
     )
@@ -98,15 +100,26 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
         "id": 1,
         "last_scan_completed_at": None,
         "path": str(library_path.resolve()),
+        "required_mount_path": str(tmp_path.resolve()),
     }
 
     updated = runner.invoke(
         katalog_cli.app,
-        ["--json", "library", "update", "1", "--disabled", "--display-name", "Archive"],
+        [
+            "--json",
+            "library",
+            "update",
+            "1",
+            "--disabled",
+            "--display-name",
+            "Archive",
+            "--clear-required-mount",
+        ],
         env=environment,
     )
     assert updated.exit_code == 0, updated.output
     assert json.loads(updated.output)["enabled"] is False
+    assert json.loads(updated.output)["required_mount_path"] is None
 
     listed = runner.invoke(katalog_cli.app, ["--json", "library", "list"], env=environment)
     assert listed.exit_code == 0, listed.output

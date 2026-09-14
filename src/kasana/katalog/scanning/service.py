@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kasana.katalog.database import KatalogDatabase
+from kasana.katalog.filesystem import is_library_root_accessible
 from kasana.katalog.models import (
     AuditCategory,
     AvailabilityState,
@@ -95,7 +96,12 @@ class IncrementalScanner:
         layout = resolve_library_layout(Path(root.path), root.expected_media_kind)
         self._raise_if_cancelled()
         existing_files = self._existing_files(root.id)
-        if not root_path.is_dir():
+        if not is_library_root_accessible(
+            root_path,
+            required_mount_path=Path(root.required_mount_path)
+            if root.required_mount_path is not None
+            else None,
+        ):
             totals = ScanTotals()
             finding = AuditFinding(
                 category=AuditCategory.UNREADABLE_FILE,

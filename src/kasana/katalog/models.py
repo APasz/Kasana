@@ -204,6 +204,7 @@ class Kura(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     path: Mapped[str] = mapped_column(String, nullable=False)
+    required_mount_path: Mapped[str | None] = mapped_column(String)
     expected_media_kind: Mapped[ZaisanKind] = mapped_column(
         _enum(ZaisanKind, "library_item_kind"), nullable=False
     )

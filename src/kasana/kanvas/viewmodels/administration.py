@@ -78,6 +78,11 @@ class LibraryRootView(BaseModel):
     id: int = Field(gt=0)
     display_name: str | None = Field(default=None, max_length=200, alias="displayName")
     path: str | None = Field(default=None, max_length=10_000)
+    required_mount_path: str | None = Field(
+        default=None,
+        max_length=10_000,
+        alias="requiredMountPath",
+    )
     kind: str = Field(min_length=1, max_length=32)
     tags: tuple[str, ...] = ()
     preferred_audio_language: str | None = Field(default=None, alias="preferredAudioLanguage")
@@ -198,6 +203,7 @@ def library_root_view(root: LibraryRootSummary) -> LibraryRootView:
         id=root.id,
         displayName=root.display_name,
         path=root.path,
+        requiredMountPath=root.required_mount_path,
         kind=root.expected_kind.value,
         tags=root.default_tags,
         preferredAudioLanguage=root.preferred_audio_language,

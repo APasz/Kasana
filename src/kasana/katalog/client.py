@@ -633,9 +633,7 @@ class KatalogClient:
     ) -> AsyncIterator[WatchOrderSummary]:
         cursor: str | None = None
         while True:
-            page = await self.list_collection_watch_orders(
-                collection_id, cursor=cursor, **filters
-            )
+            page = await self.list_collection_watch_orders(collection_id, cursor=cursor, **filters)
             for watch_order in page.items:
                 yield watch_order
             if page.next_cursor is None:
@@ -865,7 +863,11 @@ class KatalogClient:
         self, root_id: int, request: LibraryRootUpdate
     ) -> LibraryRootSummary:
         return await self._send_model(
-            "PATCH", f"/api/v1/library/roots/{root_id}", request, LibraryRootSummary
+            "PATCH",
+            f"/api/v1/library/roots/{root_id}",
+            request,
+            LibraryRootSummary,
+            exclude_unset=True,
         )
 
     async def delete_library_root(self, root_id: int, *, confirm: bool = False) -> None:

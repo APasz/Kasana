@@ -63,6 +63,11 @@ def _status(**changes: object) -> StatusResponse:
     return StatusResponse.model_validate(values)
 
 
+def test_status_rejects_unavailable_roots_above_the_enabled_count() -> None:
+    with pytest.raises(ValidationError, match="cannot exceed enabled root count"):
+        _status(enabled_root_count=1, unavailable_root_count=2)
+
+
 async def test_system_alert_feed_derives_safe_administrator_conditions(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -76,7 +81,7 @@ async def test_system_alert_feed_derives_safe_administrator_conditions(
             pass
 
         async def status(self) -> StatusResponse:
-            return _status()
+            return _status(enabled_root_count=3, unavailable_root_count=2)
 
         async def system_incidents(self) -> SystemIncidentFeed:
             return SystemIncidentFeed(
@@ -148,11 +153,11 @@ async def test_system_alert_feed_derives_safe_administrator_conditions(
 
     assert administrator_feed.connected is True
     assert [alert.id for alert in administrator_feed.alerts] == [
-        "database-unhealthy",
         "library-roots-unavailable",
+        "database-unhealthy",
         "maintenance-jobs-failed",
     ]
-    root_alert = administrator_feed.alerts[1]
+    root_alert = administrator_feed.alerts[0]
     assert root_alert.code is SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE
     assert root_alert.detail == (
         "2 configured library roots are not accessible. Check the disks or mounts, then rescan."
@@ -174,7 +179,107 @@ async def test_system_alert_feed_derives_safe_administrator_conditions(
             resolvedAt=observed_at,
         ),
     )
-    assert viewer_feed == SystemAlertFeedView(connected=True)
+    assert viewer_feed == SystemAlertFeedView(
+        connected=True,
+        alerts=(
+            SystemAlertView(
+                id="media-storage-unavailable",
+                code=SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE,
+                severity=SystemAlertSeverity.WARNING,
+                title="Some media storage unavailable",
+                detail="Some media storage is unavailable. Affected titles may not play.",
+                action=SystemAlertActionView(
+                    kind=SystemAlertActionKind.RETRY,
+                    label="Check again",
+                ),
+            ),
+        ),
+    )
+
+
+async def test_administrator_storage_alert_uses_live_status_when_incidents_omit_the_root(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class IncompleteIncidentClient:
+        async def __aenter__(self) -> IncompleteIncidentClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def status(self) -> StatusResponse:
+            return _status(enabled_root_count=2, unavailable_root_count=2)
+
+        async def system_incidents(self) -> SystemIncidentFeed:
+            return SystemIncidentFeed()
+
+    def incomplete_incident_client(*_args: object, **_kwargs: object) -> IncompleteIncidentClient:
+        return IncompleteIncidentClient()
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", incomplete_incident_client)
+
+    feed = await KanvasKatalogService(Kanvas_Settings()).system_alert_feed(is_administrator=True)
+
+    assert feed == SystemAlertFeedView(
+        connected=True,
+        alerts=(
+            SystemAlertView(
+                id="library-roots-unavailable",
+                code=SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE,
+                severity=SystemAlertSeverity.ERROR,
+                title="All enabled library roots unavailable",
+                detail=(
+                    "All enabled library roots are not accessible. "
+                    "Check the disks or mounts, then rescan."
+                ),
+                action=SystemAlertActionView(
+                    kind=SystemAlertActionKind.NAVIGATE,
+                    label="Open library roots",
+                    href="/administration/libraries",
+                ),
+            ),
+        ),
+    )
+
+
+async def test_system_alert_feed_explains_a_complete_media_outage_to_viewers(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class AllRootsUnavailableClient:
+        async def __aenter__(self) -> AllRootsUnavailableClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def status(self) -> StatusResponse:
+            return _status(enabled_root_count=2, unavailable_root_count=2)
+
+    def unavailable_client(*_args: object, **_kwargs: object) -> AllRootsUnavailableClient:
+        return AllRootsUnavailableClient()
+
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", unavailable_client)
+
+    feed = await KanvasKatalogService(Kanvas_Settings()).system_alert_feed(is_administrator=False)
+
+    assert feed == SystemAlertFeedView(
+        connected=True,
+        alerts=(
+            SystemAlertView(
+                id="media-storage-unavailable",
+                code=SystemAlertCode.LIBRARY_ROOT_UNAVAILABLE,
+                severity=SystemAlertSeverity.ERROR,
+                title="Media storage unavailable",
+                detail=(
+                    "All media storage is unavailable. Playback will resume when it is restored."
+                ),
+                action=SystemAlertActionView(
+                    kind=SystemAlertActionKind.RETRY,
+                    label="Check again",
+                ),
+            ),
+        ),
+    )
 
 
 async def test_system_alert_feed_preserves_a_safe_connection_alert(

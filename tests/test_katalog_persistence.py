@@ -40,13 +40,19 @@ from kasana.katalog.services import (
 )
 
 
-def _create_root(database: KatalogDatabase, path: Path) -> int:
+def _create_root(
+    database: KatalogDatabase,
+    path: Path,
+    *,
+    required_mount_path: Path | None = None,
+) -> int:
     def operation(session: Session) -> int:
         return create_library_root(
             session,
             path=path,
             expected_media_kind=ZaisanKind.MOVIE,
             default_tags=frozenset({"personal"}),
+            required_mount_path=required_mount_path,
         ).id
 
     return database.run_transaction(operation)
@@ -82,6 +88,34 @@ def test_status_does_not_need_an_extra_connection_from_a_bounded_pool(tmp_path: 
         assert status.database_revision is None
     finally:
         database.close()
+
+
+def test_required_mount_only_marks_its_library_root_unavailable(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    mount_path = tmp_path / "SabaWolf"
+    remote_root = mount_path / "Movies"
+    local_root = tmp_path / "Local"
+    remote_root.mkdir(parents=True)
+    local_root.mkdir()
+    _create_root(database, remote_root, required_mount_path=mount_path)
+    _create_root(database, local_root)
+    service = KatalogQueryService(
+        database,
+        artwork_cache_path=tmp_path / "artwork",
+    )
+
+    status = service.status(active_jobs=0, failed_jobs=0)
+
+    assert status.enabled_root_count == 2
+    assert status.unavailable_root_count == 1
+    assert status.all_enabled_roots_unavailable is False
+    availability_by_path = {root.path: root.available for root in service.list_library_roots()}
+    assert availability_by_path[str(remote_root)] is False
+    assert availability_by_path[str(local_root)] is True
+    incident = service.system_incidents(active_jobs=0, failed_jobs=0).active[0]
+    assert incident.severity.value == "warning"
+    assert incident.title == "Library root unavailable"
 
 
 def test_sqlite_connection_policy_does_not_reset_journal_mode_per_connection(

@@ -41,6 +41,7 @@ from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
     KeiroKind,
+    Kura,
     MaintenanceJob,
     MaintenanceJobStatus,
     MediaFile,
@@ -64,6 +65,7 @@ from kasana.katalog.public import (
     LibraryItemKind,
     LibraryItemPage,
     LibraryItemUpdate,
+    LibraryRootUpdate,
     PaginatedResponse,
     UserAuthentication,
     UserCreate,
@@ -475,7 +477,7 @@ async def test_typed_client_keeps_the_single_kind_filter_shorthand(
         )
 
 
-async def test_typed_client_omits_unset_collection_patch_fields(
+async def test_typed_client_omits_unset_patch_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = KatalogClient("http://katalog.test", bearer_token="test-token")
@@ -499,6 +501,19 @@ async def test_typed_client_omits_unset_collection_patch_fields(
                 payload={"watch_order_id": 4, "revision": 7, "collection_revision": 9},
                 request_id=None,
             )
+        if path == "/api/v1/library/roots/8":
+            return SimpleNamespace(
+                payload={
+                    "id": 8,
+                    "path": "/media/Films",
+                    "expected_kind": "movie",
+                    "enabled": False,
+                    "available": True,
+                    "item_count": 0,
+                    "media_file_count": 0,
+                },
+                request_id=None,
+            )
         return SimpleNamespace(payload={"collection_id": 1, "revision": 7}, request_id=None)
 
     monkeypatch.setattr(client, "_request", request)
@@ -516,6 +531,7 @@ async def test_typed_client_omits_unset_collection_patch_fields(
         4,
         WatchOrderUpdate(expected_revision=6, kind=WatchOrderKind.AIR),
     )
+    await client.update_library_root(8, LibraryRootUpdate(enabled=False))
 
     assert requests == [
         ("/api/v1/collections/1", {"expected_revision": 3, "name": "Renamed"}),
@@ -524,6 +540,7 @@ async def test_typed_client_omits_unset_collection_patch_fields(
             {"expected_revision": 4, "relationship": None},
         ),
         ("/api/v1/watch-orders/4", {"expected_revision": 6, "kind": "air"}),
+        ("/api/v1/library/roots/8", {"enabled": False}),
     ]
 
 
@@ -612,6 +629,87 @@ async def test_missing_library_root_is_status_only_and_recovers(api_fixture: Api
     assert {root["path"]: root["available"] for root in recovered_roots}[str(missing_path)] is True
 
 
+async def test_library_root_mount_dependency_is_scoped_and_can_be_cleared(
+    api_fixture: ApiFixture,
+) -> None:
+    mount_path = api_fixture.settings.database_path.parent / "SabaWolf"
+    library_path = mount_path / "Movies"
+    library_path.mkdir(parents=True)
+    created = await api_fixture.client.post(
+        "/api/v1/library/roots",
+        json={
+            "path": str(library_path),
+            "required_mount_path": str(mount_path),
+            "expected_kind": "movie",
+            "display_name": "Remote films",
+            "enabled": True,
+        },
+    )
+
+    assert created.status_code == 201
+    created_root = created.json()
+    assert created_root["required_mount_path"] == str(mount_path)
+    assert created_root["display_name"] == "Remote films"
+    assert created_root["available"] is False
+
+    status = (await api_fixture.client.get("/api/v1/status")).json()
+    assert status["enabled_root_count"] == 2
+    assert status["unavailable_root_count"] == 1
+    roots = (await api_fixture.client.get("/api/v1/library/roots")).json()
+    availability_by_path = {root["path"]: root["available"] for root in roots}
+    assert availability_by_path[str(library_path)] is False
+    assert availability_by_path[str(api_fixture.settings.database_path.parent / "library")] is True
+
+    preserved = await api_fixture.client.patch(
+        f"/api/v1/library/roots/{created_root['id']}",
+        json={"enabled": False},
+    )
+
+    assert preserved.status_code == 200
+    assert preserved.json()["required_mount_path"] == str(mount_path)
+    assert preserved.json()["display_name"] == "Remote films"
+
+    outside_mount = await api_fixture.client.patch(
+        f"/api/v1/library/roots/{created_root['id']}",
+        json={"path": str(api_fixture.settings.database_path.parent / "Elsewhere")},
+    )
+
+    assert outside_mount.status_code == 422
+
+    cleared = await api_fixture.client.patch(
+        f"/api/v1/library/roots/{created_root['id']}",
+        json={"required_mount_path": None, "display_name": None},
+    )
+
+    assert cleared.status_code == 200
+    assert cleared.json()["required_mount_path"] is None
+    assert cleared.json()["display_name"] is None
+    assert cleared.json()["available"] is True
+
+
+async def test_library_root_required_mount_path_rejects_invalid_filesystem_values(
+    api_fixture: ApiFixture,
+) -> None:
+    invalid_root = await api_fixture.client.post(
+        "/api/v1/library/roots",
+        json={
+            "path": "/\u0000",
+            "expected_kind": "movie",
+        },
+    )
+    invalid_mount = await api_fixture.client.post(
+        "/api/v1/library/roots",
+        json={
+            "path": str(api_fixture.settings.database_path.parent / "Movies"),
+            "required_mount_path": "/\u0000",
+            "expected_kind": "movie",
+        },
+    )
+
+    assert invalid_root.status_code == 422
+    assert invalid_mount.status_code == 422
+
+
 async def test_system_incidents_persist_acknowledgement_and_recovery_history(
     api_fixture: ApiFixture,
 ) -> None:
@@ -625,6 +723,7 @@ async def test_system_incidents_persist_acknowledgement_and_recovery_history(
         },
     )
     assert created.status_code == 201
+    created_root = created.json()
 
     concurrent_feeds = await asyncio.gather(
         *(
@@ -648,8 +747,23 @@ async def test_system_incidents_persist_acknowledgement_and_recovery_history(
     assert len(opened_payload["active"]) == 1
     incident = opened_payload["active"][0]
     assert incident["code"] == "library_root_unavailable"
+    assert incident["severity"] == "warning"
     assert incident["acknowledged_at"] is None
     assert incident["acknowledged_by_user_id"] is None
+
+    with api_fixture.database.transaction() as session:
+        available_roots = tuple(
+            session.scalars(select(Kura).where(Kura.id != created_root["id"])).all()
+        )
+        assert available_roots
+        for root in available_roots:
+            root.enabled = False
+
+    all_unavailable = (await api_fixture.client.get("/api/v1/system-incidents")).json()
+    assert len(all_unavailable["active"]) == 1
+    assert all_unavailable["active"][0]["id"] == incident["id"]
+    assert all_unavailable["active"][0]["severity"] == "error"
+    assert all_unavailable["active"][0]["title"] == "All enabled library roots unavailable"
 
     rejected_acknowledgement = await api_fixture.client.post(
         f"/api/v1/system-incidents/{incident['id']}/acknowledge",
@@ -942,16 +1056,14 @@ async def test_library_item_deletion_requires_confirmation_and_leaves_media_on_d
 
     path = media_path()
     rejected = await api_fixture.client.request(
-        "DELETE",
-        "/api/v1/library/items/1", json={"confirm": False}
+        "DELETE", "/api/v1/library/items/1", json={"confirm": False}
     )
 
     assert rejected.status_code == 422
     assert (await api_fixture.client.get("/api/v1/library/items/1")).status_code == 200
 
     deleted = await api_fixture.client.request(
-        "DELETE",
-        "/api/v1/library/items/1", json={"confirm": True}
+        "DELETE", "/api/v1/library/items/1", json={"confirm": True}
     )
 
     assert deleted.status_code == 204

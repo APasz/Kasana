@@ -120,7 +120,10 @@ def _scanner(
     return fake_client
 
 
-def _run_scan(database: KatalogDatabase, fake_client: _FakeFfprobeClient) -> IncrementalScanner:
+def _run_scan(
+    database: KatalogDatabase,
+    fake_client: _FakeFfprobeClient,
+) -> IncrementalScanner:
     scanner = IncrementalScanner(
         database,
         video_extensions=frozenset({".mkv", ".mp4", ".webm"}),
@@ -329,9 +332,7 @@ def test_scan_uses_a_moved_series_directory_as_the_current_alias(
     previous_directory_title = "LOTR; The Rings of Power"
     current_directory_title = "Rings of Power"
     first_episode_path = shows / previous_directory_title / "Season 01" / "S01E01.mkv"
-    current_first_episode_path = (
-        shows / current_directory_title / "Season 01" / "S01E01.mkv"
-    )
+    current_first_episode_path = shows / current_directory_title / "Season 01" / "S01E01.mkv"
     second_episode_path = shows / current_directory_title / "Season 01" / "S01E02.mkv"
     first_episode_path.parent.mkdir(parents=True)
     first_episode_path.write_bytes(b"first")
@@ -407,11 +408,7 @@ def test_scan_uses_a_moved_series_directory_as_the_current_alias(
         assert second_episode is not None
         return (
             second_episode.parent_id or 0,
-            len(
-                session.scalars(
-                    select(Zaisan).where(Zaisan.item_kind == ZaisanKind.SERIES)
-                ).all()
-            ),
+            len(session.scalars(select(Zaisan).where(Zaisan.item_kind == ZaisanKind.SERIES)).all()),
         )
 
     parent_id, series_count = database.run_transaction(hierarchy)
@@ -784,6 +781,31 @@ def test_scan_handles_missing_library_root_and_recovers(
     recovered_availability, issue_count = database.run_transaction(recovered_state)
     assert recovered_availability is AvailabilityState.AVAILABLE
     assert issue_count == 0
+
+
+def test_scan_marks_roots_unavailable_when_a_required_mount_is_not_mounted(
+    database: KatalogDatabase, fake_ffprobe: Path, tmp_path: Path
+) -> None:
+    mount_path = tmp_path / "SabaWolf"
+    movies = mount_path / "Movies"
+    film = movies / "1990s" / "Stargate.mkv"
+    film.parent.mkdir(parents=True)
+    film.write_bytes(b"first")
+    _register_root(database, movies, ZaisanKind.MOVIE)
+    fake_client = _scanner(database, fake_ffprobe, _probe_result())
+
+    assert _run_scan(database, fake_client).scan().totals.added == 1
+
+    with database.transaction() as session:
+        root = session.scalar(select(Kura))
+        assert root is not None
+        root.required_mount_path = str(mount_path)
+
+    unavailable = _run_scan(database, fake_client).scan()
+
+    assert unavailable.totals.failed == 1
+    assert unavailable.totals.unavailable == 1
+    assert unavailable.findings[0].path == movies
 
 
 def test_real_library_layouts_never_materialise_organisational_folders(
@@ -1603,7 +1625,9 @@ def test_scan_and_audit_cli_commands(
     monkeypatch.setattr(
         katalog_cli,
         "KatalogSettings",
-        lambda: KatalogSettings(database_path=Path(database.engine.url.database or "")),
+        lambda: KatalogSettings(
+            database_path=Path(database.engine.url.database or ""),
+        ),
     )
 
     katalog_cli.main(("scan",))

@@ -28,6 +28,7 @@ from kasana.katalog.public import (
 from .common import (
     administration_forbidden,
     administration_operation_failure_message,
+    boolean,
     data_profile,
     integer,
     invalid_action,
@@ -347,6 +348,10 @@ async def administration_action(request: Request) -> JSONResponse:
             root_id = optional_integer(payload.get("rootId"))
             name = optional_string(payload.get("displayName"), maximum_length=200)
             path = optional_string(payload.get("path"), maximum_length=10_000)
+            required_mount_path = optional_string(
+                payload.get("requiredMountPath"),
+                maximum_length=10_000,
+            )
             kind = optional_root_kind(payload.get("kind"))
             tags = tag_values(payload.get("tags"))
             preferred_audio_language = optional_string(
@@ -355,8 +360,7 @@ async def administration_action(request: Request) -> JSONResponse:
             preferred_subtitle_language = optional_string(
                 payload.get("preferredSubtitleLanguage"), maximum_length=32
             )
-            enabled_value = payload.get("enabled")
-            enabled: bool | None = enabled_value if isinstance(enabled_value, bool) else None
+            enabled = boolean(payload, "enabled") if "enabled" in payload else None
             if operation == "root-create":
                 if path is None or kind is None:
                     return invalid_action("Path and kind are required.")
@@ -364,31 +368,35 @@ async def administration_action(request: Request) -> JSONResponse:
                     LibraryRootCreate(
                         display_name=name,
                         path=path,
+                        required_mount_path=required_mount_path,
                         expected_kind=kind,
                         default_tags=tags,
                         preferred_audio_language=preferred_audio_language,
                         preferred_subtitle_language=preferred_subtitle_language,
-                        enabled=enabled is not False,
+                        enabled=enabled if enabled is not None else True,
                     )
                 )
             else:
                 if root_id is None:
                     return invalid_action("rootId is required.")
-                update_request = LibraryRootUpdate(
-                    display_name=name,
-                    path=path,
-                    expected_kind=kind,
-                    default_tags=tags,
-                    enabled=enabled,
-                )
+                update_values: dict[str, object] = {}
+                if "displayName" in payload:
+                    update_values["display_name"] = name
+                if "path" in payload:
+                    update_values["path"] = path
+                if "kind" in payload:
+                    update_values["expected_kind"] = kind
+                if "tags" in payload:
+                    update_values["default_tags"] = tags
+                if "enabled" in payload:
+                    update_values["enabled"] = enabled
+                if "requiredMountPath" in payload:
+                    update_values["required_mount_path"] = required_mount_path
                 if "preferredAudioLanguage" in payload:
-                    update_request = update_request.model_copy(
-                        update={"preferred_audio_language": preferred_audio_language}
-                    )
+                    update_values["preferred_audio_language"] = preferred_audio_language
                 if "preferredSubtitleLanguage" in payload:
-                    update_request = update_request.model_copy(
-                        update={"preferred_subtitle_language": preferred_subtitle_language}
-                    )
+                    update_values["preferred_subtitle_language"] = preferred_subtitle_language
+                update_request = LibraryRootUpdate.model_validate(update_values)
                 root = await service.update_library_root(root_id, update_request)
             return JSONResponse({"rootId": root.id})
         if operation == "root-delete":

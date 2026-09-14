@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, Self
@@ -163,6 +164,15 @@ class SystemIncidentSeverity(StrEnum):
     ERROR = "error"
 
 
+@dataclass(frozen=True)
+class LibraryRootAvailabilityIssue:
+    """The canonical current presentation of unavailable library roots."""
+
+    severity: SystemIncidentSeverity
+    title: str
+    detail: str
+
+
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -311,6 +321,57 @@ class StatusResponse(APIModel):
     running_job_count: int = Field(default=0, ge=0)
     interrupted_job_count: int = Field(default=0, ge=0)
     last_successful_scan_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_root_availability_counts(self) -> Self:
+        """Reject impossible root availability counts from a server response."""
+
+        if self.unavailable_root_count > self.enabled_root_count:
+            raise ValueError("Unavailable library root count cannot exceed enabled root count.")
+        return self
+
+    @property
+    def all_enabled_roots_unavailable(self) -> bool:
+        """Whether every enabled library root is currently inaccessible."""
+
+        return (
+            self.unavailable_root_count > 0
+            and self.unavailable_root_count == self.enabled_root_count
+        )
+
+    @property
+    def library_root_availability_issue(self) -> LibraryRootAvailabilityIssue | None:
+        """Return the current root outage wording and severity, when any root is unavailable."""
+
+        root_count = self.unavailable_root_count
+        if root_count == 0:
+            return None
+        if self.all_enabled_roots_unavailable:
+            return LibraryRootAvailabilityIssue(
+                severity=SystemIncidentSeverity.ERROR,
+                title="All enabled library roots unavailable",
+                detail=(
+                    "All enabled library roots are not accessible. "
+                    "Check the disks or mounts, then rescan."
+                ),
+            )
+        if root_count == 1:
+            return LibraryRootAvailabilityIssue(
+                severity=SystemIncidentSeverity.WARNING,
+                title="Library root unavailable",
+                detail=(
+                    "A configured library root is not accessible. "
+                    "Check the disk or mount, then rescan."
+                ),
+            )
+        return LibraryRootAvailabilityIssue(
+            severity=SystemIncidentSeverity.WARNING,
+            title=f"{root_count} library roots unavailable",
+            detail=(
+                f"{root_count} configured library roots are not accessible. "
+                "Check the disks or mounts, then rescan."
+            ),
+        )
 
 
 class SystemIncidentResponse(APIModel):
@@ -969,6 +1030,7 @@ class LibraryRootKind(StrEnum):
 class LibraryRootCreate(APIModel):
     display_name: str | None = Field(default=None, max_length=200)
     path: str = Field(min_length=1, max_length=10_000)
+    required_mount_path: str | None = Field(default=None, min_length=1, max_length=10_000)
     expected_kind: LibraryRootKind
     default_tags: tuple[str, ...] = Field(default=(), max_length=50)
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
@@ -979,6 +1041,7 @@ class LibraryRootCreate(APIModel):
 class LibraryRootUpdate(APIModel):
     display_name: str | None = Field(default=None, max_length=200)
     path: str | None = Field(default=None, min_length=1, max_length=10_000)
+    required_mount_path: str | None = Field(default=None, min_length=1, max_length=10_000)
     expected_kind: LibraryRootKind | None = None
     default_tags: tuple[str, ...] | None = Field(default=None, max_length=50)
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
@@ -990,6 +1053,7 @@ class LibraryRootSummary(APIModel):
     id: int = Field(gt=0)
     display_name: str | None = Field(default=None, max_length=200)
     path: str = Field(min_length=1, max_length=10_000)
+    required_mount_path: str | None = Field(default=None, max_length=10_000)
     expected_kind: LibraryRootKind
     default_tags: tuple[str, ...] = ()
     preferred_audio_language: str | None = Field(default=None, min_length=2, max_length=32)
