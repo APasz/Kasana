@@ -189,6 +189,7 @@ from kasana.katalog.public import (
     BackgroundJob,
     CollectionDetail,
     CollectionMembership,
+    CollectionRelationship,
     CollectionSummary,
     ContinueWatchingEntry,
     DirectoryEntry,
@@ -2451,6 +2452,37 @@ async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
     assert payload["intent"] == {"operation": "add", "revision": 7, "itemId": 12}
     assert payload["currentRevision"] == 8
     assert payload["reloadUrl"] == "/collections/4/edit"
+
+
+async def test_collection_member_action_adds_a_picker_item(monkeypatch: MonkeyPatch) -> None:
+    calls: list[tuple[int, int, int, object]] = []
+
+    class Catalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def add_collection_member(
+            self,
+            collection_id: int,
+            *,
+            revision: int,
+            item_id: int,
+            relationship: CollectionRelationship | None,
+        ) -> int:
+            calls.append((collection_id, revision, item_id, relationship))
+            return 8
+
+    class JsonRequest:
+        async def json(self) -> object:
+            return {"operation": "add", "revision": 7, "itemId": 12}
+
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", Catalogue)
+
+    response = await collection_member_action(4, cast(Request, JsonRequest()))
+
+    assert response.status_code == 200
+    assert json.loads(bytes(response.body)) == {"revision": 8}
+    assert calls == [(4, 7, 12, None)]
 
 
 async def test_collection_and_watch_order_action_routes_use_explicit_public_mutations(

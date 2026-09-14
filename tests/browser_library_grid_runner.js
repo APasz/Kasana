@@ -284,6 +284,9 @@ const exposed = source.replace(
   "if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);",
   "globalThis.__libraryTest = {KanvasPosterGrid, LibraryPageDirection, normalisePoster, posterMarkup, libraryGridPayload, updateRailControls, libraryFilterUrl, libraryGridLayout, libraryGridMarkup};\n  if (!customElements.get('kanvas-poster-grid')) customElements.define('kanvas-poster-grid', KanvasPosterGrid);"
 ).replace(
+  "if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);",
+  "globalThis.__collectionTest = {KanvasItemPicker};\n  if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);"
+).replace(
   "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
   "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
 ).replace(
@@ -2233,6 +2236,23 @@ function testItemEditorShowsOnlyRelevantKindFields() {
   assert.match(editor.renderLockRows('episode', new Set(['episode_number'])), /Episode number/);
 }
 
+async function testCollectionPickerUsesMountedRevisionForAdds() {
+  const picker = new globalThis.__collectionTest.KanvasItemPicker();
+  assert.equal('revision' in picker, false);
+  picker.setAttribute('revision', '6');
+  picker.connectedCallback();
+  picker.status = new FakeElement('div');
+  let intent = null;
+  picker.mutate = async (value) => {
+    intent = value;
+    return false;
+  };
+
+  await picker.addItem(7);
+
+  assert.deepEqual(intent, {operation: 'add', itemId: 7, revision: 6});
+}
+
 function testItemEditorUsesTaskFocusedTabs() {
   const editor = new globalThis.__itemEditorTest.KanvasItemEditor();
 
@@ -2558,6 +2578,7 @@ async function main() {
   testAdministrationManualMergeChoicesSurviveRerender();
   await testManualMetadataMatchFailurePublishesToast();
   await testAdministrationPrimaryFlowKeepsWorkInFourAreas();
+  await testCollectionPickerUsesMountedRevisionForAdds();
   testItemEditorShowsOnlyRelevantKindFields();
   testItemEditorUsesTaskFocusedTabs();
   testMetadataProviderLinksSupportDirectReassignment();

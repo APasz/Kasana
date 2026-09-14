@@ -197,15 +197,14 @@ async def render_collection_edit(
             action_button("Save", primary=True, button_type=ButtonType.SUBMIT)
         with ui.element("div").classes("k-editor-section-heading"):
             section_title("Members")
-            action_button("Add item", lambda: ui.run_javascript("window.kanvas.openPicker?.()"))
+            item_picker_overlay(
+                source=f"/kanvas/data/collections/{detail.id}/picker",
+                action=f"/kanvas/actions/collections/{detail.id}/members",
+                revision=detail.revision,
+                playable_only=False,
+                label="Add item",
+            )
         _collection_member_editor(detail)
-        item_picker_overlay(
-            source=f"/kanvas/data/collections/{detail.id}/picker",
-            action=f"/kanvas/actions/collections/{detail.id}/members",
-            revision=detail.revision,
-            playable_only=False,
-            label="Add collection item",
-        )
         section_title("Watch orders")
         action_button(
             "New watch order",

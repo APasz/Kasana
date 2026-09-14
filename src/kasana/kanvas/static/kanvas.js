@@ -2744,7 +2744,7 @@
     constructor() {
       super();
       this.cursor = null;
-      this.revision = Number(this.getAttribute('revision')) || 0;
+      this.collectionRevision = null;
       this.pendingIntent = null;
       this.searchTimer = null;
       this.dialog = null;
@@ -2753,6 +2753,7 @@
     }
 
     connectedCallback() {
+      this.currentRevision();
       const label = this.getAttribute('label') || 'Add item';
       this.innerHTML = `<button type="button" class="k-button" aria-haspopup="dialog">${escapeHtml(label)}</button><dialog class="k-kanvas-dialog"><div class="k-picker" role="document"><div class="k-picker__header"><label class="k-control-shell k-input-shell"><span class="k-sr-only">Search library</span><input class="k-input" type="search" data-picker-search aria-label="Search library" placeholder="Search library"></label><button type="button" class="k-button" data-picker-close>Close</button></div><div class="k-picker__status" aria-live="polite"></div><div class="k-picker__results" role="list"></div><button type="button" class="k-button" data-picker-more>Load more</button><div class="k-conflict-state" hidden aria-live="assertive"></div></div></dialog>`;
       this.dialog = this.querySelector('dialog');
@@ -2773,8 +2774,6 @@
         const target = event.target instanceof Element ? event.target.closest('[data-picker-add]') : null;
         if (target instanceof HTMLButtonElement) this.addItem(Number(target.dataset.pickerAdd));
       });
-      window.kanvas = window.kanvas || {};
-      window.kanvas.openPicker = () => this.open();
     }
 
     open() {
@@ -2825,9 +2824,24 @@
 
     async addItem(itemId) {
       if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
-      const intent = {operation: 'add', itemId, revision: this.revision};
+      const revision = this.currentRevision();
+      if (revision === null) {
+        if (this.status) this.status.textContent = 'Could not determine the collection version. Reload and try again.';
+        return;
+      }
+      const intent = {operation: 'add', itemId, revision};
       const success = await this.mutate(intent);
       if (success) window.location.reload();
+    }
+
+    currentRevision() {
+      if (Number.isSafeInteger(this.collectionRevision) && this.collectionRevision > 0) {
+        return this.collectionRevision;
+      }
+      const revision = Number(this.getAttribute('revision'));
+      if (!Number.isSafeInteger(revision) || revision <= 0) return null;
+      this.collectionRevision = revision;
+      return revision;
     }
 
     async mutate(intent) {
@@ -2842,7 +2856,7 @@
           return false;
         }
         if (!response.ok || !Number.isInteger(payload.revision)) throw new Error(payload.error || 'Action failed');
-        this.revision = payload.revision;
+        this.collectionRevision = payload.revision;
         this.status.textContent = '';
         return true;
       } catch (_) {
