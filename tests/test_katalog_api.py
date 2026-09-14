@@ -57,6 +57,8 @@ from kasana.katalog.models import (
     UserRole as ModelUserRole,
 )
 from kasana.katalog.public import (
+    CollectionMembershipAddition,
+    CollectionMembershipBatchRequest,
     CollectionMembershipUpdate,
     CollectionUpdate,
     DuplicateResolutionBatchRequest,
@@ -1463,6 +1465,65 @@ async def test_route_contracts_and_mutations(api_fixture: ApiFixture) -> None:
     ).status_code == 422
 
 
+async def test_collection_membership_batch_endpoint_is_atomic_and_conflict_guarded(
+    api_fixture: ApiFixture,
+) -> None:
+    initial = await api_fixture.client.get("/api/v1/collections/1")
+    assert initial.status_code == 200
+    initial_revision = initial.json()["revision"]
+
+    seeded = await api_fixture.client.post(
+        "/api/v1/collections/1/items",
+        json={"expected_revision": initial_revision, "library_item_id": 3},
+    )
+    assert seeded.status_code == 200
+    seeded_revision = seeded.json()["revision"]
+
+    batch = await api_fixture.client.post(
+        "/api/v1/collections/1/items/batch",
+        json={
+            "expected_revision": seeded_revision,
+            "additions": [{"library_item_id": 2, "relationship": None}],
+            "relationship_updates": [{"library_item_id": 1, "relationship": "related"}],
+            "removals": [3],
+        },
+    )
+
+    assert batch.status_code == 200
+    assert batch.json()["revision"] == seeded_revision + 1
+    memberships = await api_fixture.client.post(
+        "/api/v1/collections/1/items/lookup",
+        json={"library_item_ids": [1, 2, 3]},
+    )
+    assert memberships.status_code == 200
+    assert [
+        (membership["item"]["id"], membership["relationship"])
+        for membership in memberships.json()["memberships"]
+    ] == [(1, "related"), (2, None)]
+
+    stale = await api_fixture.client.post(
+        "/api/v1/collections/1/items/batch",
+        json={
+            "expected_revision": seeded_revision,
+            "additions": [{"library_item_id": 3}],
+            "relationship_updates": [],
+            "removals": [],
+        },
+    )
+    duplicate = await api_fixture.client.post(
+        "/api/v1/collections/1/items/batch",
+        json={
+            "expected_revision": batch.json()["revision"],
+            "additions": [{"library_item_id": 2}],
+            "relationship_updates": [],
+            "removals": [],
+        },
+    )
+
+    assert stale.status_code == 409
+    assert duplicate.status_code == 422
+
+
 async def test_duplicate_episode_issues_only_returns_unresolved_duplicate_findings(
     api_fixture: ApiFixture,
 ) -> None:
@@ -2226,6 +2287,17 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
             assert item_update.item.title == "Client-edited Alpha"
             assert item_update.audit.changed_fields == ("title",)
             assert await client.metadata_binding(1) is None
+            collection = await client.get_collection(1)
+            membership_batch = await client.batch_collection_memberships(
+                1,
+                CollectionMembershipBatchRequest(
+                    expected_revision=collection.revision,
+                    additions=(CollectionMembershipAddition(library_item_id=2),),
+                ),
+            )
+            assert membership_batch.revision == collection.revision + 1
+            looked_up_memberships = await client.lookup_collection_memberships(1, (1, 2))
+            assert [membership.item.id for membership in looked_up_memberships] == [1, 2]
             initial_state = await client.playback_state(1, 1)
             assert initial_state is not None
             assert initial_state.completed is True

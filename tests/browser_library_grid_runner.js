@@ -287,6 +287,12 @@ const exposed = source.replace(
   "if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);",
   "globalThis.__collectionTest = {KanvasItemPicker};\n  if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);"
 ).replace(
+  "if (!customElements.get('kanvas-collection-builder')) customElements.define('kanvas-collection-builder', KanvasCollectionBuilder);",
+  "globalThis.__collectionBuilderTest = {KanvasCollectionBuilder};\n  if (!customElements.get('kanvas-collection-builder')) customElements.define('kanvas-collection-builder', KanvasCollectionBuilder);"
+).replace(
+  "if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);",
+  "globalThis.__itemCollectionPickerTest = {KanvasItemCollectionPicker};\n  if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);"
+).replace(
   "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
   "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
 ).replace(
@@ -2516,6 +2522,222 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
   assert.equal(payload.forceDefaultSubtitleFontScale, false);
 }
 
+function testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry() {
+  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
+  const builder = new KanvasCollectionBuilder();
+  assert.equal('revision' in builder, false);
+  builder.collectionRevision = 7;
+  const existing = {poster: validPoster(7), kind: 'movie', relationship: 'primary'};
+  builder.currentMembers.set(7, existing);
+  builder.memberOrder = [7];
+  builder.searchRows = [
+    {...existing, alreadyMember: true},
+    {poster: validPoster(8), kind: 'movie', alreadyMember: false, relationship: null},
+    {poster: validPoster(9), kind: 'series', alreadyMember: false, relationship: null}
+  ];
+
+  builder.changeRelationship(7, 'related');
+  builder.toggleMemberRemoval(7);
+  builder.toggleSearchResult(8);
+  builder.selectAllShown('series');
+
+  assert.deepEqual(builder.batchPayload(), {
+    expected_revision: 7,
+    additions: [
+      {library_item_id: 8, relationship: null},
+      {library_item_id: 9, relationship: null}
+    ],
+    relationship_updates: [],
+    removals: [7]
+  });
+  assert.equal(builder.searchState(builder.searchRows[0]), 'removing');
+  assert.equal(builder.searchState(builder.searchRows[1]), 'selected');
+  assert.equal(builder.searchState(builder.searchRows[2]), 'selected');
+
+  let retried = false;
+  builder.conflict = {revision: 12};
+  builder.save = () => { retried = true; };
+  builder.retryConflict();
+
+  assert.equal(retried, true);
+  assert.equal(builder.collectionRevision, 12);
+  assert.equal(builder.conflict, null);
+  assert.deepEqual(builder.batchPayload(), {
+    expected_revision: 12,
+    additions: [
+      {library_item_id: 8, relationship: null},
+      {library_item_id: 9, relationship: null}
+    ],
+    relationship_updates: [],
+    removals: [7]
+  });
+}
+
+async function testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave() {
+  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
+  const builder = new KanvasCollectionBuilder();
+  assert.equal('revision' in builder, false);
+  builder.setAttribute('revision', '7');
+  builder.setAttribute('action', '/kanvas/actions/collections/4/members/batch');
+  builder.additions.set(8, {poster: validPoster(8), kind: 'movie', relationship: null});
+  builder.memberStatus = new FakeHTMLElement('div');
+  builder.renderWorkspace = () => {};
+  builder.resetMembers = async () => {};
+  builder.resetSearch = async () => {};
+  const originalFetch = global.fetch;
+  let request = null;
+  try {
+    global.fetch = async (url, options) => {
+      request = {url, body: JSON.parse(options.body)};
+      return response({body: {revision: 8, warnings: []}});
+    };
+    await builder.save();
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(request, {
+    url: '/kanvas/actions/collections/4/members/batch',
+    body: {
+      expected_revision: 7,
+      additions: [{library_item_id: 8, relationship: null}],
+      relationship_updates: [],
+      removals: []
+    }
+  });
+  assert.equal(builder.collectionRevision, 8);
+}
+
+function testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightEdits() {
+  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
+  const builder = new KanvasCollectionBuilder();
+  builder.collectionRevision = 12;
+  builder.setAttribute('collection-id', '4');
+  const metadataRevision = new global.HTMLInputElement('input');
+  const deleteRevision = new global.HTMLInputElement('input');
+  const artworkPicker = new global.HTMLSelectElement('select');
+  artworkPicker.value = '7';
+  artworkPicker.querySelectorAll = () => [];
+  const originalQuerySelectorAll = document.querySelectorAll;
+  document.querySelectorAll = (selector) => {
+    if (selector === '[data-collection-revision-for="4"]') {
+      return [metadataRevision, deleteRevision];
+    }
+    if (selector === '[data-collection-artwork-for="4"]') return [artworkPicker];
+    return originalQuerySelectorAll(selector);
+  };
+  try {
+    builder.syncPageRevision();
+    builder.removals.add(7);
+    builder.syncPageMembershipState();
+  } finally {
+    document.querySelectorAll = originalQuerySelectorAll;
+  }
+  assert.equal(metadataRevision.value, '12');
+  assert.equal(deleteRevision.value, '12');
+  assert.equal(artworkPicker.value, '');
+  builder.removals.clear();
+
+  const existing = {poster: validPoster(7), kind: 'movie', relationship: 'primary'};
+  builder.currentMembers.set(7, existing);
+  builder.searchRows = [
+    {...existing, alreadyMember: true},
+    {poster: validPoster(8), kind: 'movie', alreadyMember: false, relationship: null}
+  ];
+  builder.saving = true;
+  builder.toggleSearchResult(8);
+  builder.toggleMemberRemoval(7);
+  builder.changeRelationship(7, 'related');
+
+  assert.equal(builder.additions.size, 0);
+  assert.equal(builder.removals.size, 0);
+  assert.equal(builder.relationshipUpdates.size, 0);
+}
+
+function testCollectionBuilderBoundsMemberCacheWithoutDroppingStagedChanges() {
+  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
+  const builder = new KanvasCollectionBuilder();
+  for (let itemId = 1; itemId <= 145; itemId += 1) {
+    builder.currentMembers.set(itemId, {poster: validPoster(itemId)});
+    builder.memberOrder.push(itemId);
+  }
+  builder.removals.add(1);
+
+  builder.trimMemberCache();
+
+  assert.equal(builder.memberOrder.length, 144);
+  assert.equal(builder.currentMembers.size, 144);
+  assert.equal(builder.currentMembers.has(1), true);
+  assert.equal(builder.currentMembers.has(2), false);
+  assert.equal(builder.removals.has(1), true);
+}
+
+async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflict() {
+  const {KanvasItemCollectionPicker} = globalThis.__itemCollectionPickerTest;
+  const picker = new KanvasItemCollectionPicker();
+  picker.setAttribute('item-id', '7');
+  picker.setAttribute('action-prefix', '/kanvas/actions/collections');
+  picker.status = new FakeHTMLElement('div');
+  picker.targets.set(4, {
+    id: 4,
+    name: 'Stargate',
+    revision: 8,
+    isMember: true,
+    relationship: 'primary',
+    initialMember: true,
+    member: false
+  });
+  picker.targets.set(5, {
+    id: 5,
+    name: 'Atlantis',
+    revision: 3,
+    isMember: false,
+    relationship: null,
+    initialMember: false,
+    member: true
+  });
+  const requests = [];
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async (url, options) => {
+      requests.push({url, body: JSON.parse(options.body)});
+      return url.endsWith('/4/members/batch')
+        ? response({body: {revision: 9}})
+        : response({status: 409, body: {currentRevision: 6}});
+    };
+
+    await picker.save();
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(requests, [
+    {
+      url: '/kanvas/actions/collections/4/members/batch',
+      body: {
+        expected_revision: 8,
+        additions: [],
+        relationship_updates: [],
+        removals: [7]
+      }
+    },
+    {
+      url: '/kanvas/actions/collections/5/members/batch',
+      body: {
+        expected_revision: 3,
+        additions: [{library_item_id: 7, relationship: null}],
+        relationship_updates: [],
+        removals: []
+      }
+    }
+  ]);
+  assert.equal(picker.targets.get(4).initialMember, false);
+  assert.equal(picker.targets.get(5).initialMember, false);
+  assert.equal(picker.targets.get(5).member, true);
+  assert.equal(picker.conflicts.get(5), 6);
+  assert.match(picker.status.textContent, /Remaining staged changes/);
+}
+
 async function main() {
   testToastNormalisationAndPublishing();
   await testNativeActionFormKeepsTheClickedSubmitter();
@@ -2586,6 +2808,11 @@ async function main() {
   testItemEditorHidesForceControlsForAutomaticDefaults();
   testItemEditorPayloadPreservesHiddenState();
   testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults();
+  testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry();
+  await testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave();
+  testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightEdits();
+  testCollectionBuilderBoundsMemberCacheWithoutDroppingStagedChanges();
+  await testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflict();
   process.stdout.write('browser library grid checks passed\n');
 }
 

@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 
 from kasana.katalog.api.contracts import (
     CollectionCreate,
+    CollectionMembershipAddition,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipRelationshipUpdate,
     CollectionMembershipUpdate,
     CollectionRelationship,
     CollectionUpdate,
@@ -24,6 +27,7 @@ from kasana.katalog.api.contracts import (
 )
 from kasana.katalog.api.service import (
     CatalogueConflictError,
+    CatalogueNotFoundError,
     CatalogueValidationError,
     KatalogQueryService,
     _watch_order_entry_is_unavailable,  # pyright: ignore[reportPrivateUsage]
@@ -216,6 +220,101 @@ def test_collection_membership_updates_require_an_explicit_relationship(
 
     assert cleared.membership is not None
     assert cleared.membership.relationship is None
+
+
+def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Mixed"))
+    movie = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=collection.revision,
+            library_item_id=library["movie"],
+            relationship=CollectionRelationship.PRIMARY,
+        ),
+    )
+    series = queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=movie.revision,
+            library_item_id=library["series"],
+        ),
+    )
+
+    result = queries.batch_collection_memberships(
+        collection.collection_id,
+        CollectionMembershipBatchRequest(
+            expected_revision=series.revision,
+            additions=(
+                CollectionMembershipAddition(library_item_id=library["first_episode"]),
+            ),
+            relationship_updates=(
+                CollectionMembershipRelationshipUpdate(
+                    library_item_id=library["movie"],
+                    relationship=CollectionRelationship.RELATED,
+                ),
+            ),
+            removals=(library["series"],),
+        ),
+    )
+
+    assert result.membership is None
+    assert result.revision == series.revision + 1
+    detail = queries.get_collection(collection.collection_id)
+    assert detail.revision == result.revision
+    assert [(member.item.id, member.relationship) for member in detail.members] == [
+        (library["movie"], CollectionRelationship.RELATED),
+        (library["first_episode"], None),
+    ]
+
+    with pytest.raises(CatalogueConflictError, match="expected revision"):
+        queries.batch_collection_memberships(
+            collection.collection_id,
+            CollectionMembershipBatchRequest(
+                expected_revision=series.revision,
+                additions=(
+                    CollectionMembershipAddition(library_item_id=library["second_episode"]),
+                ),
+            ),
+        )
+    with pytest.raises(CatalogueValidationError, match="already"):
+        queries.batch_collection_memberships(
+            collection.collection_id,
+            CollectionMembershipBatchRequest(
+                expected_revision=result.revision,
+                additions=(CollectionMembershipAddition(library_item_id=library["movie"]),),
+            ),
+        )
+    with pytest.raises(CatalogueNotFoundError, match="does not exist"):
+        queries.batch_collection_memberships(
+            collection.collection_id,
+            CollectionMembershipBatchRequest(
+                expected_revision=result.revision,
+                additions=(CollectionMembershipAddition(library_item_id=999_999),),
+                relationship_updates=(
+                    CollectionMembershipRelationshipUpdate(
+                        library_item_id=library["movie"],
+                        relationship=CollectionRelationship.PRIMARY,
+                    ),
+                ),
+            ),
+        )
+
+    unchanged = queries.get_collection(collection.collection_id)
+    assert unchanged.revision == result.revision
+    assert unchanged.members[0].relationship is CollectionRelationship.RELATED
+
+    with pytest.raises(ValueError, match="must not repeat"):
+        CollectionMembershipBatchRequest(
+            expected_revision=result.revision,
+            additions=(
+                CollectionMembershipAddition(library_item_id=library["movie"]),
+                CollectionMembershipAddition(library_item_id=library["movie"]),
+            ),
+        )
 
 
 def test_watch_order_entry_moves_and_generation_preview(

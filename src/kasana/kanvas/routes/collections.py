@@ -6,11 +6,11 @@ from nicegui import ui
 
 from kasana.kanvas.components.collections import (
     collection_artwork,
+    collection_builder_workspace,
     collection_form_query,
     collection_grid,
     collection_members,
     generation_preview,
-    item_picker_overlay,
     watch_order_card,
     watch_order_header,
     watch_order_rows,
@@ -30,9 +30,8 @@ from kasana.kanvas.components.typography import page_title, quiet_copy, section_
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.kanvas.viewmodels.collections import CollectionDetailView, WatchOrderEditorView
+from kasana.kanvas.viewmodels.collections import WatchOrderEditorView
 from kasana.katalog.public import (
-    CollectionRelationship,
     KatalogClientError,
     KatalogClientErrorKind,
     WatchOrderGenerationApplyMode,
@@ -145,16 +144,16 @@ async def render_collection_detail(
 async def render_collection_edit(
     settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
 ) -> None:
-    """Render focused metadata, membership and relationship controls."""
+    """Render collection metadata plus the separately staged direct-member workspace."""
 
     with page_shell(settings, "/collections", "Edit collection", profile):
         if not profile.is_administrator:
             feedback_state("Collections are read-only", "An administrator can edit collections.")
             return
         try:
-            detail = await KanvasKatalogService(settings, profile.user.id).collection_editor(
-                collection_id
-            )
+            detail = await KanvasKatalogService(
+                settings, profile.user.id
+            ).collection_builder_context(collection_id)
         except KatalogClientError as error:
             _collection_error(error)
             return
@@ -164,7 +163,9 @@ async def render_collection_edit(
             .classes("k-editor-form")
             .props(action_form_props(f"/kanvas/actions/collections/{detail.id}"))
         ):
-            hidden_input(name="revision", value=str(detail.revision))
+            hidden_input(name="revision", value=str(detail.revision)).props(
+                f'data-collection-revision-for="{detail.id}"'
+            )
             text_input(name="name", aria_label="Collection name", value=detail.name)
             textarea_input(name="overview", aria_label="Overview", value=detail.overview)
             select_input(
@@ -193,18 +194,16 @@ async def render_collection_edit(
                     ),
                 ),
                 value=(str(detail.artwork_item_id) if detail.artwork_item_id is not None else ""),
-            )
+            ).props(f'data-collection-artwork-for="{detail.id}"')
             action_button("Save", primary=True, button_type=ButtonType.SUBMIT)
-        with ui.element("div").classes("k-editor-section-heading"):
-            section_title("Members")
-            item_picker_overlay(
-                source=f"/kanvas/data/collections/{detail.id}/picker",
-                action=f"/kanvas/actions/collections/{detail.id}/members",
-                revision=detail.revision,
-                playable_only=False,
-                label="Add item",
-            )
-        _collection_member_editor(detail)
+        section_title("Collection builder")
+        collection_builder_workspace(
+            collection_id=detail.id,
+            members_source=f"/kanvas/data/collections/{detail.id}/builder/members",
+            search_source=f"/kanvas/data/collections/{detail.id}/builder/search",
+            action=f"/kanvas/actions/collections/{detail.id}/members/batch",
+            revision=detail.revision,
+        )
         section_title("Watch orders")
         action_button(
             "New watch order",
@@ -219,7 +218,9 @@ async def render_collection_edit(
             .classes("k-danger-zone")
             .props(action_form_props(f"/kanvas/actions/collections/{detail.id}/delete"))
         ):
-            hidden_input(name="revision", value=str(detail.revision))
+            hidden_input(name="revision", value=str(detail.revision)).props(
+                f'data-collection-revision-for="{detail.id}"'
+            )
             quiet_copy("Deleting a collection keeps every library item.")
             text_input(
                 name="confirm",
@@ -332,35 +333,6 @@ async def render_watch_order(
                     placeholder="Type delete to confirm",
                 )
                 action_button("Delete watch order", button_type=ButtonType.SUBMIT)
-
-
-def _collection_member_editor(collection: CollectionDetailView) -> None:
-    for member in collection.movies + collection.series + collection.other_members:
-        member_action = f"/kanvas/actions/collections/{collection.id}/members/{member.poster.id}"
-        with ui.element("div").classes("k-member-editor-row"):
-            ui.label(member.poster.title).classes("k-member-editor-row__title")
-            with (
-                ui.element("form")
-                .classes("k-member-editor-row__form")
-                .props(action_form_props(member_action))
-            ):
-                hidden_input(name="revision", value=str(collection.revision))
-                select_input(
-                    name="relationship",
-                    aria_label=f"Relationship for {member.poster.title}",
-                    options=(
-                        SelectOption("", "No relationship"),
-                        *(
-                            SelectOption(relationship.value, relationship.value.replace("_", " "))
-                            for relationship in CollectionRelationship
-                        ),
-                    ),
-                    value=member.relationship or "",
-                )
-                action_button("Update", button_type=ButtonType.SUBMIT)
-            with ui.element("form").props(action_form_props(f"{member_action}/remove")):
-                hidden_input(name="revision", value=str(collection.revision))
-                action_button("Remove", button_type=ButtonType.SUBMIT)
 
 
 def _watch_order_playback_actions(watch_order_id: int) -> None:

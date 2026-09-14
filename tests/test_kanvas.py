@@ -70,7 +70,10 @@ from kasana.kanvas.dashboard import (
     apply_watch_order_generation_action,
     artwork,
     build_dashboard,
+    collection_builder_members_data,
+    collection_builder_search_data,
     collection_member_action,
+    collection_members_batch_action,
     collection_picker_data,
     collections_data,
     collections_page,
@@ -80,6 +83,7 @@ from kasana.kanvas.dashboard import (
     delete_watch_order_action,
     design_page,
     item_artwork_fetch_action,
+    item_collection_targets_data,
     item_delete_action,
     item_edit_action,
     item_edit_data,
@@ -146,6 +150,7 @@ from kasana.kanvas.viewmodels.administration import (
     overview_from_status,
 )
 from kasana.kanvas.viewmodels.collections import (
+    CollectionBuilderSearchResultView,
     CollectionDetailView,
     CollectionMemberView,
     CollectionTileView,
@@ -163,6 +168,7 @@ from kasana.kanvas.viewmodels.item import (
     EpisodeItemTitleView,
     ExternalLinkView,
     IncludedCollectionView,
+    ItemCollectionTargetView,
     ItemDetailView,
     ItemTitleLinkView,
     LinkedSeasonTitleView,
@@ -189,6 +195,7 @@ from kasana.katalog.public import (
     BackgroundJob,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipBatchRequest,
     CollectionRelationship,
     CollectionSummary,
     ContinueWatchingEntry,
@@ -2129,6 +2136,100 @@ async def test_collection_editor_loads_every_member_and_watch_order_without_play
     assert state_requests == []
 
 
+async def test_collection_builder_context_preserves_selected_metadata_choices_bounded(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    visible_item = _library_summary(
+        item_id=1, title="Visible", kind=LibraryItemKind.MOVIE
+    )
+    artwork_item = _library_summary(
+        item_id=99, title="Artwork", kind=LibraryItemKind.MOVIE
+    ).model_copy(
+        update={
+            "artwork": (
+                ArtworkSelection(
+                    id=199,
+                    kind=ArtworkKind.POSTER,
+                    url="/api/v1/library/items/99/artwork/199",
+                    content_type="image/jpeg",
+                    size_bytes=4,
+                ),
+            )
+        }
+    )
+    visible_membership = CollectionMembership(id=1, collection_id=12, item=visible_item)
+    artwork_membership = CollectionMembership(id=99, collection_id=12, item=artwork_item)
+    visible_order = WatchOrderSummary(
+        id=1,
+        collection_id=12,
+        name="Visible order",
+        kind=WatchOrderKind.CUSTOM,
+        entry_count=0,
+        revision=1,
+    )
+    default_order = WatchOrderSummary(
+        id=99,
+        collection_id=12,
+        name="Default order",
+        kind=WatchOrderKind.CUSTOM,
+        entry_count=0,
+        revision=1,
+        is_default=True,
+    )
+    lookup_calls: list[tuple[int, tuple[int, ...]]] = []
+    watch_order_requests: list[tuple[int, int, int | None]] = []
+
+    class CompactCollectionClient:
+        def __init__(self, *_arguments: object, **_keywords: object) -> None:
+            pass
+
+        async def __aenter__(self) -> CompactCollectionClient:
+            return self
+
+        async def __aexit__(self, *_arguments: object) -> None:
+            pass
+
+        async def get_collection(self, collection_id: int) -> CollectionDetail:
+            assert collection_id == 12
+            return CollectionDetail(
+                id=12,
+                name="Favourites",
+                item_count=21,
+                watch_order_count=21,
+                revision=1,
+                artwork_item_id=artwork_item.id,
+                default_watch_order_id=default_order.id,
+                members=(visible_membership,),
+                watch_orders=(visible_order,),
+            )
+
+        async def lookup_collection_memberships(
+            self, collection_id: int, item_ids: tuple[int, ...]
+        ) -> tuple[CollectionMembership, ...]:
+            lookup_calls.append((collection_id, item_ids))
+            return (artwork_membership,)
+
+        async def iter_collection_watch_orders(
+            self, collection_id: int, *, limit: int, user_id: int | None
+        ) -> AsyncIterator[WatchOrderSummary]:
+            watch_order_requests.append((collection_id, limit, user_id))
+            yield visible_order
+            yield default_order
+
+    monkeypatch.setattr(
+        "kasana.kanvas.services.katalog.KatalogClient", CompactCollectionClient
+    )
+
+    context = await KanvasKatalogService(Kanvas_Settings(), user_id=1).collection_builder_context(
+        12
+    )
+
+    assert [member.poster.id for member in context.movies] == [visible_item.id, artwork_item.id]
+    assert [order.id for order in context.watch_orders] == [visible_order.id, default_order.id]
+    assert lookup_calls == [(12, (artwork_item.id,))]
+    assert watch_order_requests == [(12, 100, None)]
+
+
 async def test_item_detail_reads_completed_watched_state_directly(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -2423,6 +2524,238 @@ async def test_collection_index_endpoint_is_cursor_bounded_and_serialises_safe_t
             "mosaicUrls": ["/kanvas/artwork/7/8"],
         }
     ]
+
+
+async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflict_safe(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    poster = PosterView(id=7, title="Pilot", href="/item/7", available=True)
+
+    class Catalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def collection_builder_member_page(
+            self, collection_id: int, *, cursor: str | None
+        ) -> tuple[tuple[CollectionMemberView, ...], str | None]:
+            assert (collection_id, cursor) == (4, "member-after")
+            calls.append(("members", cursor))
+            return ((CollectionMemberView(poster=poster, kind="episode"),), "member-next")
+
+        async def collection_builder_search_page(
+            self,
+            collection_id: int,
+            *,
+            cursor: str | None,
+            search: str | None,
+            kinds: tuple[LibraryItemKind, ...],
+        ) -> tuple[tuple[CollectionBuilderSearchResultView, ...], str | None]:
+            assert collection_id == 4
+            calls.append(("search", (cursor, search, kinds)))
+            return (
+                (
+                    CollectionBuilderSearchResultView(
+                        poster=poster,
+                        kind="episode",
+                        alreadyMember=True,
+                        relationship="primary",
+                    ),
+                ),
+                "search-next",
+            )
+
+        async def batch_collection_memberships(
+            self, collection_id: int, request: CollectionMembershipBatchRequest
+        ) -> tuple[int, tuple[str, ...]]:
+            assert collection_id == 4
+            calls.append(("batch", request.model_dump(mode="json")))
+            return 8, ("The item remains in 1 watch-order entry.",)
+
+    class JsonRequest:
+        def __init__(self, payload: Mapping[str, object]) -> None:
+            self._payload = dict(payload)
+
+        async def json(self) -> object:
+            return self._payload
+
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", Catalogue)
+    members = await collection_builder_members_data(
+        4,
+        Request({"type": "http", "query_string": b"cursor=member-after", "headers": []}),
+    )
+    search = await collection_builder_search_data(
+        4,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"cursor=search-after&search=Pilot&kind=episode&kind=movie",
+                "headers": [],
+            }
+        ),
+    )
+    default_search = await collection_builder_search_data(
+        4, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+    payload = {
+        "expected_revision": 7,
+        "additions": [{"library_item_id": 12, "relationship": None}],
+        "relationship_updates": [{"library_item_id": 7, "relationship": "related"}],
+        "removals": [9],
+    }
+    saved = await collection_members_batch_action(4, cast(Request, JsonRequest(payload)))
+
+    assert json.loads(bytes(members.body))["nextCursor"] == "member-next"
+    assert json.loads(bytes(search.body))["items"][0]["alreadyMember"] is True
+    assert json.loads(bytes(default_search.body))["nextCursor"] == "search-next"
+    assert json.loads(bytes(saved.body)) == {
+        "revision": 8,
+        "warnings": ["The item remains in 1 watch-order entry."],
+    }
+    assert calls == [
+        ("members", "member-after"),
+        (
+            "search",
+            (
+                "search-after",
+                "Pilot",
+                (LibraryItemKind.EPISODE, LibraryItemKind.MOVIE),
+            ),
+        ),
+        ("search", (None, None, (LibraryItemKind.MOVIE, LibraryItemKind.SERIES))),
+        (
+            "batch",
+            {
+                "expected_revision": 7,
+                "additions": [{"library_item_id": 12, "relationship": None}],
+                "relationship_updates": [{"library_item_id": 7, "relationship": "related"}],
+                "removals": [9],
+            },
+        ),
+    ]
+
+    class ConflictCatalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def batch_collection_memberships(
+            self, _collection_id: int, _request: CollectionMembershipBatchRequest
+        ) -> tuple[int, tuple[str, ...]]:
+            raise KatalogClientError(KatalogClientErrorKind.CONFLICT, "revision changed")
+
+        async def collection_detail(self, _collection_id: int) -> SimpleNamespace:
+            return SimpleNamespace(revision=12)
+
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", ConflictCatalogue)
+    monkeypatch.setattr(route_common, "KanvasKatalogService", ConflictCatalogue)
+    conflict = await collection_members_batch_action(4, cast(Request, JsonRequest(payload)))
+
+    assert conflict.status_code == 409
+    assert json.loads(bytes(conflict.body)) == {
+        "error": "This collection changed elsewhere.",
+        "intent": payload,
+        "currentRevision": 12,
+        "reloadUrl": "/collections/4/edit",
+    }
+
+
+def test_collection_builder_member_cards_keep_artwork_in_their_grid_cells() -> None:
+    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
+        encoding="utf-8"
+    )
+    member_grid_match = re.search(
+        r"^\.k-collection-builder__members \{([^}]*)\}", stylesheet, flags=re.MULTILINE
+    )
+    assert member_grid_match is not None
+    member_grid = member_grid_match.group(1)
+    card = stylesheet.split(
+        ".k-collection-builder__card, .k-collection-builder__member {", maxsplit=1
+    )[1].split("}", maxsplit=1)[0]
+    poster = stylesheet.split(
+        ".k-collection-builder .k-collection-builder__poster {", maxsplit=1
+    )[1].split("}", maxsplit=1)[0]
+
+    assert "grid-template-columns: repeat(auto-fill, minmax(min(136px, 100%), 1fr));" in member_grid
+    assert "align-items: start;" in member_grid
+    assert "align-self: start;" in card
+    assert "align-content: start;" in card
+    assert "width: 100%;" in poster
+    assert "max-width: none;" in poster
+    assert "kanvas-collection-builder { display: block; width: 100%; min-width: 0; }" in stylesheet
+    assert ".k-poster--landscape .k-poster__art { aspect-ratio: 16 / 9; }" in stylesheet
+
+
+async def test_item_collection_targets_are_paged_and_admin_only(monkeypatch: MonkeyPatch) -> None:
+    class Catalogue:
+        def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
+            pass
+
+        async def item_collection_target_page(
+            self, item_id: int, *, cursor: str | None, search: str | None
+        ) -> tuple[tuple[ItemCollectionTargetView, ...], str | None]:
+            assert (item_id, cursor, search) == (7, "after-first", "Gate")
+            return (
+                (
+                    ItemCollectionTargetView(
+                        id=4,
+                        name="Stargate",
+                        revision=8,
+                        isMember=True,
+                        relationship="primary",
+                    ),
+                    ItemCollectionTargetView(
+                        id=5,
+                        name="Atlantis",
+                        revision=3,
+                        isMember=False,
+                    ),
+                ),
+                "next-page",
+            )
+
+    monkeypatch.setattr(api_library, "KanvasKatalogService", Catalogue)
+    response = await item_collection_targets_data(
+        7,
+        Request(
+            {
+                "type": "http",
+                "query_string": b"cursor=after-first&search=Gate",
+                "headers": [],
+            }
+        ),
+    )
+
+    assert json.loads(bytes(response.body)) == {
+        "items": [
+            {
+                "id": 4,
+                "name": "Stargate",
+                "revision": 8,
+                "isMember": True,
+                "relationship": "primary",
+            },
+            {
+                "id": 5,
+                "name": "Atlantis",
+                "revision": 3,
+                "isMember": False,
+                "relationship": None,
+            },
+        ],
+        "nextCursor": "next-page",
+    }
+
+    viewer = SessionProfile(UserSummary(id=2, username="viewer", role=UserRole.USER))
+
+    async def viewer_profile(_request: Request) -> SessionProfile:
+        return viewer
+
+    monkeypatch.setattr(api_library, "data_profile", viewer_profile)
+    forbidden = await item_collection_targets_data(
+        7, Request({"type": "http", "query_string": b"", "headers": []})
+    )
+
+    assert forbidden.status_code == 403
 
 
 async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
@@ -4777,10 +5110,16 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
             for element in client.elements.values()
             if element.tag == BrowserComponent.ITEM_EDITOR
         ]
+        item_collection_pickers = [
+            element
+            for element in client.elements.values()
+            if element.tag == BrowserComponent.ITEM_COLLECTION_PICKER
+        ]
         assert browser_components
         assert all(element.tag != "nicegui-html" for element in browser_components)
         assert collection_sections
         assert len(item_editors) == 1
+        assert len(item_collection_pickers) == 1
         assert _element_props(item_editors[0])["action-source"] == "/kanvas/actions/items/7"
         assert _element_props(item_editors[0])["parent-choices-source"] == (
             "/kanvas/data/items/7/parent-choices"
@@ -4789,6 +5128,9 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
             "/kanvas/actions/items/7/artwork-fetch"
         )
         assert _element_props(item_editors[0])["delete-source"] == "/kanvas/actions/items/7/delete"
+        assert _element_props(item_collection_pickers[0])["source"] == (
+            "/kanvas/data/items/7/collections"
+        )
 
 
 def test_item_title_renders_linked_season_and_episode_hierarchies() -> None:
@@ -4948,6 +5290,10 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             assert collection_id == 4
             return collection
 
+        async def collection_builder_context(self, collection_id: int) -> CollectionDetailView:
+            assert collection_id == 4
+            return collection
+
         async def watch_order_editor(self, watch_order_id: int) -> WatchOrderEditorView:
             assert watch_order_id == 9
             return editor
@@ -4978,6 +5324,11 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         browser_components = [
             element for element in client.elements.values() if element.tag in set(BrowserComponent)
         ]
+        collection_builder = next(
+            element
+            for element in browser_components
+            if element.tag == BrowserComponent.COLLECTION_BUILDER
+        )
         textareas = [element for element in client.elements.values() if element.tag == "textarea"]
         hidden_fields = [
             element
@@ -5005,9 +5356,21 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
     assert generation_entries.tag == "ol"
     assert browser_components
     assert all(element.tag != "nicegui-html" for element in browser_components)
+    assert _element_props(collection_builder) == {
+        "collection-id": "4",
+        "members-source": "/kanvas/data/collections/4/builder/members",
+        "search-source": "/kanvas/data/collections/4/builder/search",
+        "action": "/kanvas/actions/collections/4/members/batch",
+        "revision": "3",
+    }
+    assert BrowserComponent.ITEM_PICKER not in {element.tag for element in browser_components}
     assert any(_element_props(element).get("name") == "overview" for element in textareas)
     assert any(_element_props(element).get("value") == "Gate travel" for element in textareas)
     assert any(_element_props(element).get("name") == "revision" for element in hidden_fields)
+    assert sum(
+        _element_props(element).get("data-collection-revision-for") == "4"
+        for element in hidden_fields
+    ) == 2
     assert [
         (str(_element_props(option)["value"]), "selected" in _element_props(option))
         for option in default_watch_order_options
@@ -5027,6 +5390,9 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
         async def collection_editor(self, _collection_id: int) -> CollectionDetailView:
+            raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
+
+        async def collection_builder_context(self, _collection_id: int) -> CollectionDetailView:
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
         async def watch_order_editor(self, _watch_order_id: int) -> WatchOrderEditorView:

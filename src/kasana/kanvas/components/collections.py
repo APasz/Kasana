@@ -121,6 +121,32 @@ def item_picker_overlay(
     mount_browser_component(BrowserComponent.ITEM_PICKER, attributes)
 
 
+def collection_builder_workspace(
+    *, collection_id: int, members_source: str, search_source: str, action: str, revision: int
+) -> None:
+    """Mount the staged, paged membership workspace used only by collection editing."""
+
+    mount_browser_component(
+        BrowserComponent.COLLECTION_BUILDER,
+        {
+            "collection-id": collection_id,
+            "members-source": members_source,
+            "search-source": search_source,
+            "action": action,
+            "revision": revision,
+        },
+    )
+
+
+def item_collection_picker(*, source: str, action_prefix: str, item_id: int) -> None:
+    """Mount the compact item-page overlay for toggling several collection memberships."""
+
+    mount_browser_component(
+        BrowserComponent.ITEM_COLLECTION_PICKER,
+        {"source": source, "action-prefix": action_prefix, "item-id": item_id},
+    )
+
+
 def watch_order_rows(*, source: str, action: str, launch_action: str, revision: int) -> None:
     """Mount a virtualised custom row component instead of Python-backed draggable rows."""
 

@@ -39,7 +39,10 @@ from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
+    CollectionMembershipLookupResponse,
     CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionRelationship,
@@ -1661,6 +1664,127 @@ class KatalogQueryService:
 
         return self._database.run_transaction(add)
 
+    def batch_collection_memberships(
+        self, collection_id: int, request: CollectionMembershipBatchRequest
+    ) -> CollectionMutationResult:
+        """Apply all staged direct-member changes in one transaction and revision bump."""
+
+        def batch(session: Session) -> CollectionMutationResult:
+            collection: Collection = _require(session, Collection, collection_id, "Collection")
+            _require_revision(collection.revision, request.expected_revision, "Collection")
+
+            additions_by_item_id = {
+                addition.library_item_id: addition for addition in request.additions
+            }
+            relationship_updates_by_item_id = {
+                update.library_item_id: update for update in request.relationship_updates
+            }
+            removal_item_ids = set(request.removals)
+            referenced_item_ids = set(additions_by_item_id)
+            referenced_item_ids.update(relationship_updates_by_item_id)
+            referenced_item_ids.update(removal_item_ids)
+            memberships_by_item_id = {
+                membership.library_item_id: membership
+                for membership in session.scalars(
+                    select(CollectionKin).where(
+                        CollectionKin.collection_id == collection.id,
+                        CollectionKin.library_item_id.in_(referenced_item_ids),
+                    )
+                )
+            }
+
+            duplicate_additions = set(additions_by_item_id).intersection(memberships_by_item_id)
+            if duplicate_additions:
+                raise CatalogueValidationError("That library item is already in this collection.")
+            missing_relationship_updates = set(relationship_updates_by_item_id).difference(
+                memberships_by_item_id
+            )
+            if missing_relationship_updates:
+                missing_item_id = min(missing_relationship_updates)
+                raise CatalogueNotFoundError(
+                    f"Library item {missing_item_id} is not a member of collection {collection.id}."
+                )
+            missing_removals = removal_item_ids.difference(memberships_by_item_id)
+            if missing_removals:
+                missing_item_id = min(missing_removals)
+                raise CatalogueNotFoundError(
+                    f"Library item {missing_item_id} is not a member of collection {collection.id}."
+                )
+
+            added_items_by_id = {
+                item.id: item
+                for item in session.scalars(
+                    select(Zaisan).where(Zaisan.id.in_(additions_by_item_id))
+                )
+            }
+            missing_additions = set(additions_by_item_id).difference(added_items_by_id)
+            if missing_additions:
+                missing_item_id = min(missing_additions)
+                raise CatalogueNotFoundError(f"Library item {missing_item_id} does not exist.")
+
+            warnings_by_item_id = _collection_membership_removal_warnings(
+                session, collection.id, removal_item_ids
+            )
+            for item_id, addition in additions_by_item_id.items():
+                session.add(
+                    CollectionKin(
+                        collection_id=collection.id,
+                        library_item_id=added_items_by_id[item_id].id,
+                        relationship=(
+                            Kinship(addition.relationship.value)
+                            if addition.relationship is not None
+                            else None
+                        ),
+                    )
+                )
+            for item_id, update in relationship_updates_by_item_id.items():
+                memberships_by_item_id[item_id].relationship = (
+                    Kinship(update.relationship.value) if update.relationship is not None else None
+                )
+            for item_id in removal_item_ids:
+                session.delete(memberships_by_item_id[item_id])
+            if collection.artwork_item_id in removal_item_ids:
+                collection.artwork_item_id = None
+            collection.revision += 1
+            session.flush()
+            return CollectionMutationResult(
+                collection_id=collection.id,
+                revision=collection.revision,
+                warnings=tuple(warnings_by_item_id[item_id] for item_id in sorted(warnings_by_item_id)),
+            )
+
+        return self._database.run_transaction(batch, immediate=True)
+
+    def lookup_collection_memberships(
+        self, collection_id: int, request: CollectionMembershipLookupRequest
+    ) -> CollectionMembershipLookupResponse:
+        """Load direct memberships for a bounded caller-selected item page."""
+
+        def lookup(session: Session) -> CollectionMembershipLookupResponse:
+            _require(session, Collection, collection_id, "Collection")
+            statement: Select[tuple[CollectionKin, Zaisan]] = (
+                select(CollectionKin, Zaisan)
+                .join(Zaisan, CollectionKin.library_item_id == Zaisan.id)
+                .where(
+                    CollectionKin.collection_id == collection_id,
+                    CollectionKin.library_item_id.in_(request.library_item_ids),
+                )
+            )
+            rows: tuple[Row[tuple[CollectionKin, Zaisan]], ...] = tuple(session.execute(statement))
+            items_by_id = _summaries_for(session, tuple(item for _, item in rows))
+            memberships_by_item_id = {
+                membership.library_item_id: membership for membership, _ in rows
+            }
+            return CollectionMembershipLookupResponse(
+                memberships=tuple(
+                    _membership_detail(memberships_by_item_id[item_id], items_by_id[item_id])
+                    for item_id in request.library_item_ids
+                    if item_id in memberships_by_item_id
+                )
+            )
+
+        return self._database.run_transaction(lookup)
+
     def update_collection_membership(
         self,
         collection_id: int,
@@ -1694,35 +1818,18 @@ class KatalogQueryService:
             collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, expected_revision, "Collection")
             membership: CollectionKin = _require_membership(session, collection.id, library_item_id)
-            entries_remaining: int = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(KeiroEntry)
-                    .join(Keiro, KeiroEntry.watch_order_id == Keiro.id)
-                    .where(
-                        Keiro.collection_id == collection.id,
-                        KeiroEntry.library_item_id == membership.library_item_id,
-                    )
-                )
-                or 0
+            warnings_by_item_id = _collection_membership_removal_warnings(
+                session, collection.id, {membership.library_item_id}
             )
             session.delete(membership)
             if collection.artwork_item_id == membership.library_item_id:
                 collection.artwork_item_id = None
             collection.revision += 1
             session.flush()
-            warnings: tuple[str] | tuple[()] = (
-                (
-                    (
-                        f"The item remains in {entries_remaining} watch-order "
-                        f"{'entry' if entries_remaining == 1 else 'entries'}."
-                    ),
-                )
-                if entries_remaining
-                else ()
-            )
             return CollectionMutationResult(
-                collection_id=collection.id, revision=collection.revision, warnings=warnings
+                collection_id=collection.id,
+                revision=collection.revision,
+                warnings=tuple(warnings_by_item_id.values()),
             )
 
         return self._database.run_transaction(remove)
@@ -5706,6 +5813,35 @@ def _require_membership(
             f"Library item {library_item_id} is not a member of collection {collection_id}."
         )
     return membership
+
+
+def _collection_membership_removal_warnings(
+    session: Session, collection_id: int, library_item_ids: set[int]
+) -> dict[int, str]:
+    """Describe watch-order entries that outlive a direct-membership removal."""
+
+    if not library_item_ids:
+        return {}
+    entry_counts = {
+        item_id: entry_count
+        for item_id, entry_count in session.execute(
+            select(KeiroEntry.library_item_id, func.count())
+            .join(Keiro, KeiroEntry.watch_order_id == Keiro.id)
+            .where(
+                Keiro.collection_id == collection_id,
+                KeiroEntry.library_item_id.in_(library_item_ids),
+            )
+            .group_by(KeiroEntry.library_item_id)
+        )
+    }
+    return {
+        item_id: (
+            f"The item remains in {entry_count} watch-order "
+            f"{'entry' if entry_count == 1 else 'entries'}."
+        )
+        for item_id, entry_count in entry_counts.items()
+        if entry_count
+    }
 
 
 def _require_watch_order_entry(session: Session, watch_order_id: int, entry_id: int) -> KeiroEntry:

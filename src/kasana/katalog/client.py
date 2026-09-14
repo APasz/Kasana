@@ -23,7 +23,10 @@ from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
+    CollectionMembershipLookupResponse,
     CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionSummary,
@@ -592,6 +595,33 @@ class KatalogClient:
             request,
             CollectionMutationResult,
         )
+
+    async def batch_collection_memberships(
+        self, collection_id: int, request: CollectionMembershipBatchRequest
+    ) -> CollectionMutationResult:
+        """Apply every staged direct-membership change in one API mutation."""
+
+        return await self._send_model(
+            "POST",
+            f"/api/v1/collections/{collection_id}/items/batch",
+            request,
+            CollectionMutationResult,
+        )
+
+    async def lookup_collection_memberships(
+        self, collection_id: int, library_item_ids: tuple[int, ...]
+    ) -> tuple[CollectionMembership, ...]:
+        """Return direct memberships only for one bounded page of library item IDs."""
+
+        if not library_item_ids:
+            return ()
+        response = await self._send_model(
+            "POST",
+            f"/api/v1/collections/{collection_id}/items/lookup",
+            CollectionMembershipLookupRequest(library_item_ids=library_item_ids),
+            CollectionMembershipLookupResponse,
+        )
+        return response.memberships
 
     async def update_collection_member(
         self, collection_id: int, library_item_id: int, request: CollectionMembershipUpdate

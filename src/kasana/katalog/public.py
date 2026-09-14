@@ -14,7 +14,12 @@ from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipAddition,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
+    CollectionMembershipLookupResponse,
+    CollectionMembershipRelationshipUpdate,
     CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionRelationship,
@@ -152,12 +157,14 @@ from kasana.katalog.client import (
     MediaTransfer,
 )
 from kasana.katalog.limits import (
+    MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
 )
 from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
 __all__ = [
+    "MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE",
     "MAX_PLAYBACK_STATE_BATCH_SIZE",
     "MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS",
     "NUMERAL_TOKEN_PATTERN",
@@ -171,7 +178,12 @@ __all__ = [
     "CollectionCreate",
     "CollectionDetail",
     "CollectionMembership",
+    "CollectionMembershipAddition",
+    "CollectionMembershipBatchRequest",
     "CollectionMembershipCreate",
+    "CollectionMembershipLookupRequest",
+    "CollectionMembershipLookupResponse",
+    "CollectionMembershipRelationshipUpdate",
     "CollectionMembershipUpdate",
     "CollectionMutationResult",
     "CollectionRelationship",

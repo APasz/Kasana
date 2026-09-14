@@ -6,13 +6,16 @@ from typing import Literal
 
 from fastapi import HTTPException
 from nicegui import app
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.katalog.public import (
+    CollectionMembershipBatchRequest,
     KatalogClientError,
     KatalogClientErrorKind,
+    LibraryItemKind,
     WatchOrderGenerationApplyMode,
     WatchOrderGenerationMode,
     WatchOrderKind,
@@ -99,6 +102,64 @@ async def collection_picker_data(collection_id: int, request: Request) -> JSONRe
     )
 
 
+@app.get("/kanvas/data/collections/{collection_id}/builder/members", include_in_schema=False)
+async def collection_builder_members_data(collection_id: int, request: Request) -> JSONResponse:
+    """Return one virtualised collection-pane member page for the staged builder."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := administration_forbidden(profile):
+        return forbidden
+    cursor = query_text(request, "cursor", maximum_length=500)
+    try:
+        members, next_cursor = await KanvasKatalogService(
+            runtime.settings, profile.user.id
+        ).collection_builder_member_page(collection_id, cursor=cursor)
+    except KatalogClientError as error:
+        return katalog_data_error(error, "Katalog could not load collection members.")
+    return JSONResponse(
+        {
+            "items": [member.model_dump(by_alias=True, mode="json") for member in members],
+            "nextCursor": next_cursor,
+        }
+    )
+
+
+@app.get("/kanvas/data/collections/{collection_id}/builder/search", include_in_schema=False)
+async def collection_builder_search_data(collection_id: int, request: Request) -> JSONResponse:
+    """Return one kind-filtered library page with direct-membership state for the builder."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := administration_forbidden(profile):
+        return forbidden
+    search = query_text(request, "search", maximum_length=250)
+    cursor = query_text(request, "cursor", maximum_length=500)
+    try:
+        kinds = _collection_builder_kinds(request)
+    except ValueError as error:
+        return invalid_action(str(error))
+    try:
+        items, next_cursor = await KanvasKatalogService(
+            runtime.settings, profile.user.id
+        ).collection_builder_search_page(
+            collection_id,
+            cursor=cursor,
+            search=search,
+            kinds=kinds,
+        )
+    except KatalogClientError as error:
+        return katalog_data_error(error, "Katalog could not load library items.")
+    return JSONResponse(
+        {
+            "items": [item.model_dump(by_alias=True, mode="json") for item in items],
+            "nextCursor": next_cursor,
+        }
+    )
+
+
 @app.get("/kanvas/data/watch-orders/{watch_order_id}", include_in_schema=False)
 async def watch_order_data(watch_order_id: int, request: Request) -> JSONResponse:
     """Return one cursor-bounded page for the virtual watch-order row component."""
@@ -167,6 +228,25 @@ async def collection_member_action(collection_id: int, request: Request) -> JSON
         return invalid_action(str(error))
     queue_success_toast(request, "Item added to collection")
     return JSONResponse({"revision": next_revision})
+
+
+@app.post("/kanvas/actions/collections/{collection_id}/members/batch", include_in_schema=False)
+async def collection_members_batch_action(collection_id: int, request: Request) -> JSONResponse:
+    """Commit one staged collection builder edit under a single expected revision."""
+
+    profile = await require_profile(request)
+    require_administrator(profile)
+    payload = await json_object(request)
+    try:
+        changes = CollectionMembershipBatchRequest.model_validate(payload)
+        revision, warnings = await KanvasKatalogService(
+            runtime.settings, profile.user.id
+        ).batch_collection_memberships(collection_id, changes)
+    except KatalogClientError as error:
+        return await collection_mutation_error(collection_id, profile, error, payload)
+    except (ValidationError, ValueError) as error:
+        return invalid_action(str(error))
+    return JSONResponse({"revision": revision, "warnings": list(warnings)})
 
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}/entries", include_in_schema=False)
@@ -426,6 +506,23 @@ async def apply_watch_order_generation_action(
     return toast_redirect(
         request, f"/watch-orders/{watch_order_id}/edit", "Generated order applied"
     )
+
+
+def _collection_builder_kinds(request: Request) -> tuple[LibraryItemKind, ...]:
+    """Parse explicit builder kind filters, defaulting to the two top-level media kinds."""
+
+    raw_kinds = tuple(request.query_params.getlist("kind"))
+    if not raw_kinds:
+        return (LibraryItemKind.MOVIE, LibraryItemKind.SERIES)
+    if len(raw_kinds) > len(LibraryItemKind):
+        raise ValueError("Too many collection builder kind filters.")
+    try:
+        kinds = tuple(LibraryItemKind(raw_kind) for raw_kind in raw_kinds)
+    except ValueError as error:
+        raise ValueError("Invalid collection builder kind filter.") from error
+    if len(set(kinds)) != len(kinds):
+        raise ValueError("Collection builder kind filters must not repeat.")
+    return kinds
 
 
 @app.get("/kanvas/artwork/{item_id}/{artwork_id}", include_in_schema=False)

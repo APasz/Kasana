@@ -12,6 +12,7 @@ from kasana.kanvas.components.browser import (
     BrowserComponent,
     mount_browser_component,
 )
+from kasana.kanvas.components.collections import item_collection_picker
 from kasana.kanvas.components.controls import ButtonType, action_button
 from kasana.kanvas.components.feedback import feedback_state
 from kasana.kanvas.components.inputs import SelectOption, hidden_input, select_input
@@ -258,6 +259,7 @@ def _item_actions(
         if playback_session_id is not None:
             action_button("Stop", stop, primary=True)
             _item_editor_button(item_id, profile, editor_tab)
+            _item_collection_picker(item_id, profile)
             return
         action_button("Play", lambda: launch(False), primary=True, disabled=not available)
         if download_options:
@@ -266,6 +268,7 @@ def _item_actions(
             "Mark unwatched" if watched_state.watched else "Mark watched", toggle_watched
         )
         _item_editor_button(item_id, profile, editor_tab)
+        _item_collection_picker(item_id, profile)
 
 
 def _item_download_form(
@@ -315,6 +318,18 @@ def _item_editor_button(
     mount_browser_component(
         BrowserComponent.ITEM_EDITOR,
         attributes,
+    )
+
+
+def _item_collection_picker(item_id: int, profile: SessionProfile) -> None:
+    """Offer administrators a compact, staged collection-toggle overlay on item pages."""
+
+    if not profile.is_administrator:
+        return
+    item_collection_picker(
+        source=f"/kanvas/data/items/{item_id}/collections",
+        action_prefix="/kanvas/actions/collections",
+        item_id=item_id,
     )
 
 

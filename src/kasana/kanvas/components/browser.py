@@ -14,8 +14,10 @@ class BrowserComponent(StrEnum):
     """Custom elements implemented by Kanvas browser scripts."""
 
     ADMINISTRATION = "kanvas-administration"
+    COLLECTION_BUILDER = "kanvas-collection-builder"
     COLLECTION_GRID = "kanvas-collection-grid"
     ITEM_EDITOR = "kanvas-item-editor"
+    ITEM_COLLECTION_PICKER = "kanvas-item-collection-picker"
     ONBOARDING = "kanvas-onboarding"
     ITEM_PICKER = "kanvas-item-picker"
     PLAYBACK_PLAYER = "kanvas-playback-player"

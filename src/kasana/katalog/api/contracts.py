@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
+    MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE,
     MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
     MAX_PLAYBACK_QUEUE_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
@@ -781,6 +782,90 @@ class CollectionMembershipUpdate(APIModel):
         if "relationship" not in self.model_fields_set:
             raise ValueError("Collection membership update must include relationship.")
         return self
+
+
+class CollectionMembershipAddition(APIModel):
+    """One direct member selected for a collection membership batch."""
+
+    library_item_id: int = Field(gt=0)
+    relationship: CollectionRelationship | None = None
+
+
+class CollectionMembershipRelationshipUpdate(APIModel):
+    """One explicit relationship value selected for a current direct member."""
+
+    library_item_id: int = Field(gt=0)
+    relationship: CollectionRelationship | None
+
+
+class CollectionMembershipBatchRequest(APIModel):
+    """Apply a staged collection membership edit under one collection revision."""
+
+    expected_revision: int = Field(ge=1)
+    additions: tuple[CollectionMembershipAddition, ...] = Field(
+        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
+    relationship_updates: tuple[CollectionMembershipRelationshipUpdate, ...] = Field(
+        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
+    removals: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
+
+    @model_validator(mode="after")
+    def validate_operations(self) -> Self:
+        addition_ids = tuple(addition.library_item_id for addition in self.additions)
+        relationship_update_ids = tuple(
+            update.library_item_id for update in self.relationship_updates
+        )
+        removal_ids = self.removals
+        operation_ids = (
+            ("additions", addition_ids),
+            ("relationship_updates", relationship_update_ids),
+            ("removals", removal_ids),
+        )
+        if not addition_ids and not relationship_update_ids and not removal_ids:
+            raise ValueError("Collection membership batch must include a change.")
+        if sum(len(item_ids) for _, item_ids in operation_ids) > MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE:
+            raise ValueError(
+                "Collection membership batch exceeds the maximum number of changes."
+            )
+        for label, item_ids in operation_ids:
+            if len(set(item_ids)) != len(item_ids):
+                raise ValueError(f"Collection membership batch {label} must not repeat items.")
+        additions = set(addition_ids)
+        relationship_updates = set(relationship_update_ids)
+        removals = set(removal_ids)
+        if additions & relationship_updates:
+            raise ValueError("Added collection members cannot also receive relationship updates.")
+        if additions & removals:
+            raise ValueError("Collection members cannot be added and removed together.")
+        if relationship_updates & removals:
+            raise ValueError("Removed collection members cannot receive relationship updates.")
+        return self
+
+
+class CollectionMembershipLookupRequest(APIModel):
+    """Bounded lookup used to mark a searched library page's direct memberships."""
+
+    library_item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1, max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
+
+    @field_validator("library_item_ids")
+    @classmethod
+    def require_unique_library_item_ids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if len(set(values)) != len(values):
+            raise ValueError("Collection membership lookups must not repeat library items.")
+        return values
+
+
+class CollectionMembershipLookupResponse(APIModel):
+    """The direct memberships among a caller-provided, bounded item set."""
+
+    memberships: tuple[CollectionMembership, ...] = Field(
+        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
 
 
 class CollectionDetail(CollectionSummary):

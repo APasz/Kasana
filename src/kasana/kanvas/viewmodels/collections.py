@@ -85,6 +85,17 @@ class ItemPickerView(BaseModel):
     poster_url: str | None = Field(default=None, alias="posterUrl")
 
 
+class CollectionBuilderSearchResultView(BaseModel):
+    """One searchable library result with its current direct-membership state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    poster: PosterView
+    kind: str = Field(min_length=1, max_length=32)
+    already_member: bool = Field(alias="alreadyMember")
+    relationship: str | None = Field(default=None, max_length=32)
+
+
 class WatchOrderRowView(BaseModel):
     """One order entry with the shared poster representation used by Kanvas grids."""
 

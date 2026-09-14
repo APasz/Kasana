@@ -30,6 +30,18 @@ class CollectionChoiceView(BaseModel):
     revision: int = Field(ge=1)
 
 
+class ItemCollectionTargetView(BaseModel):
+    """One cursor-paged collection row in the compact item-page membership overlay."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=1_000)
+    revision: int = Field(ge=1)
+    is_member: bool = Field(alias="isMember")
+    relationship: str | None = Field(default=None, max_length=32)
+
+
 class DownloadOptionView(BaseModel):
     """One Katalog-confirmed media version available for a native download form."""
 

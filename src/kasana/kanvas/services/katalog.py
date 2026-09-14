@@ -50,7 +50,9 @@ from kasana.kanvas.viewmodels.administration import (
     overview_from_status,
 )
 from kasana.kanvas.viewmodels.collections import (
+    CollectionBuilderSearchResultView,
     CollectionDetailView,
+    CollectionMemberView,
     CollectionTileView,
     GenerationPreviewView,
     ItemPickerView,
@@ -65,6 +67,7 @@ from kasana.kanvas.viewmodels.item import (
     EpisodeItemTitleView,
     ExternalLinkView,
     IncludedCollectionView,
+    ItemCollectionTargetView,
     ItemDetailView,
     ItemTitleLinkView,
     LinkedSeasonTitleView,
@@ -96,6 +99,7 @@ from kasana.katalog.public import (
     CollectionCreate,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
     CollectionMembershipUpdate,
     CollectionRelationship,
@@ -159,6 +163,7 @@ _GRID_PAGE_SIZE = 48
 _DETAIL_CHILD_PAGE_SIZE = 50
 _COLLECTION_GRID_PAGE_SIZE = 24
 _COLLECTION_MEMBER_PAGE_SIZE = 100
+_COLLECTION_BUILDER_PAGE_SIZE = 48
 _COLLECTION_WATCH_ORDER_PAGE_SIZE = 100
 _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
 _WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE = 100
@@ -757,6 +762,41 @@ class KanvasKatalogService:
             availableCollections=_available_collection_choices(collection_summaries, item),
         )
 
+    async def item_collection_target_page(
+        self, item_id: int, *, cursor: str | None, search: str | None
+    ) -> tuple[tuple[ItemCollectionTargetView, ...], str | None]:
+        """List one searchable collection page and mark the viewed item's current memberships."""
+
+        async with self._client() as client:
+            conditional_item, page = await gather(
+                client.get_library_item(item_id),
+                client.list_collections(
+                    cursor=cursor, limit=_COLLECTION_BUILDER_PAGE_SIZE, search=search
+                ),
+            )
+        item = conditional_item.item
+        if item is None:
+            raise RuntimeError("Katalog returned an unexpected empty item response.")
+        relationships_by_collection_id = {
+            membership.id: (
+                membership.relationship.value if membership.relationship is not None else None
+            )
+            for membership in item.collections
+        }
+        return (
+            tuple(
+                ItemCollectionTargetView(
+                    id=collection.id,
+                    name=collection.name,
+                    revision=collection.revision,
+                    isMember=collection.id in relationships_by_collection_id,
+                    relationship=relationships_by_collection_id.get(collection.id),
+                )
+                for collection in page.items
+            ),
+            page.next_cursor,
+        )
+
     async def create_download_grant(
         self, item_id: int, media_file_id: int
     ) -> DownloadGrantResponse:
@@ -886,6 +926,88 @@ class KanvasKatalogService:
                 playback_user_id=None,
                 member_next_cursor=None,
             )
+
+    async def collection_builder_context(self, collection_id: int) -> CollectionDetailView:
+        """Load a bounded member context while preserving separate watch-order editing."""
+
+        async with self._client() as client:
+            detail = await client.get_collection(collection_id)
+            memberships = detail.members
+            if detail.artwork_item_id is not None and not any(
+                membership.item.id == detail.artwork_item_id for membership in memberships
+            ):
+                memberships += await client.lookup_collection_memberships(
+                    collection_id, (detail.artwork_item_id,)
+                )
+            watch_orders = (
+                detail.watch_orders
+                if detail.watch_order_count == len(detail.watch_orders)
+                else await _collection_watch_orders(client, collection_id)
+            )
+            return await _collection_detail_view(
+                client,
+                detail,
+                memberships,
+                watch_orders,
+                playback_user_id=None,
+                member_next_cursor=None,
+            )
+
+    async def collection_builder_member_page(
+        self, collection_id: int, *, cursor: str | None
+    ) -> tuple[tuple[CollectionMemberView, ...], str | None]:
+        """Return one render-bounded direct-member page for the collection pane."""
+
+        async with self._client() as client:
+            page = await client.list_collection_members(
+                collection_id, cursor=cursor, limit=_COLLECTION_BUILDER_PAGE_SIZE
+            )
+        return (
+            tuple(
+                collection_member(membership.item, membership.relationship)
+                for membership in page.items
+            ),
+            page.next_cursor,
+        )
+
+    async def collection_builder_search_page(
+        self,
+        collection_id: int,
+        *,
+        cursor: str | None,
+        search: str | None,
+        kinds: tuple[LibraryItemKind, ...],
+    ) -> tuple[tuple[CollectionBuilderSearchResultView, ...], str | None]:
+        """Search one library page and look up membership state only for its results."""
+
+        async with self._client() as client:
+            page = await client.list_library_items(
+                cursor=cursor,
+                limit=_COLLECTION_BUILDER_PAGE_SIZE,
+                kinds=kinds,
+                search=search,
+            )
+            memberships = await client.lookup_collection_memberships(
+                collection_id, tuple(item.id for item in page.items)
+            )
+        relationships_by_item_id = {
+            membership.item.id: (
+                membership.relationship.value if membership.relationship is not None else None
+            )
+            for membership in memberships
+        }
+        return (
+            tuple(
+                CollectionBuilderSearchResultView(
+                    poster=poster_from_summary(item),
+                    kind=item.kind.value,
+                    alreadyMember=item.id in relationships_by_item_id,
+                    relationship=relationships_by_item_id.get(item.id),
+                )
+                for item in page.items
+            ),
+            page.next_cursor,
+        )
 
     async def watch_order_editor(self, watch_order_id: int) -> WatchOrderEditorView:
         """Load just the editor header; rows are separately cursor-paged by the browser."""
@@ -1056,6 +1178,15 @@ class KanvasKatalogService:
                 ),
             )
         return result.revision
+
+    async def batch_collection_memberships(
+        self, collection_id: int, request: CollectionMembershipBatchRequest
+    ) -> tuple[int, tuple[str, ...]]:
+        """Commit a collection builder's staged add, relationship, and removal changes."""
+
+        async with self._client() as client:
+            result = await client.batch_collection_memberships(collection_id, request)
+        return result.revision, result.warnings
 
     async def update_collection_member(
         self,

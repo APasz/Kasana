@@ -40,6 +40,7 @@ from .common import (
     katalog_status,
     library_item_update_payload,
     optional_relationship,
+    query_text,
     queue_success_toast,
     require_administrator,
     require_profile,
@@ -159,6 +160,33 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
             "collectionRelationships": [
                 relationship.value for relationship in CollectionRelationship
             ],
+        }
+    )
+
+
+@app.get("/kanvas/data/items/{item_id}/collections", include_in_schema=False)
+async def item_collection_targets_data(item_id: int, request: Request) -> JSONResponse:
+    """Return one searchable collection page with immediate membership state for an item."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := administration_forbidden(profile):
+        return forbidden
+    search = query_text(request, "search", maximum_length=250)
+    cursor = query_text(request, "cursor", maximum_length=500)
+    try:
+        collections, next_cursor = await KanvasKatalogService(
+            runtime.settings, profile.user.id
+        ).item_collection_target_page(item_id, cursor=cursor, search=search)
+    except KatalogClientError as error:
+        return katalog_data_error(error, "Katalog could not load collections for this item.")
+    return JSONResponse(
+        {
+            "items": [
+                collection.model_dump(by_alias=True, mode="json") for collection in collections
+            ],
+            "nextCursor": next_cursor,
         }
     )
 

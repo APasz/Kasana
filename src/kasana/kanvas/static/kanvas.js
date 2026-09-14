@@ -2883,6 +2883,963 @@
     }
   }
 
+  const COLLECTION_BUILDER_KINDS = [
+    'movie', 'series', 'season', 'episode', 'special', 'extra'
+  ];
+  const COLLECTION_BUILDER_KIND_LABELS = {
+    movie: 'Movies',
+    series: 'Series',
+    season: 'Seasons',
+    episode: 'Episodes',
+    special: 'Specials',
+    extra: 'Extras'
+  };
+  const collectionBuilderKindLabel = (kind) => COLLECTION_BUILDER_KIND_LABELS[kind] || kind;
+
+  const normaliseCollectionBuilderMember = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const member = value;
+    const poster = normalisePoster(member.poster);
+    if (!poster || typeof member.kind !== 'string' || !COLLECTION_BUILDER_KINDS.includes(member.kind)) return null;
+    if (member.relationship != null && typeof member.relationship !== 'string') return null;
+    return {poster, kind: member.kind, relationship: member.relationship ?? null};
+  };
+
+  const normaliseCollectionBuilderSearchResult = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const result = value;
+    const poster = normalisePoster(result.poster);
+    if (!poster || typeof result.kind !== 'string' || !COLLECTION_BUILDER_KINDS.includes(result.kind)) return null;
+    if (typeof result.alreadyMember !== 'boolean') return null;
+    if (result.relationship != null && typeof result.relationship !== 'string') return null;
+    return {
+      poster,
+      kind: result.kind,
+      alreadyMember: result.alreadyMember,
+      relationship: result.relationship ?? null
+    };
+  };
+
+  const collectionBuilderRelationshipSelect = (itemId, relationship, title) => {
+    const label = document.createElement('label');
+    label.className = 'k-collection-builder__relationship';
+    const visuallyHidden = document.createElement('span');
+    visuallyHidden.className = 'k-sr-only';
+    visuallyHidden.textContent = `Relationship for ${title}`;
+    const select = document.createElement('select');
+    select.className = 'k-select';
+    select.dataset.builderRelationship = String(itemId);
+    const options = [['', 'No relationship']].concat(
+      ['primary', 'sequel', 'prequel', 'spinoff', 'remake', 'alternate_continuity', 'related']
+        .map((value) => [value, value.replaceAll('_', ' ')])
+    );
+    for (const [value, labelText] of options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = labelText;
+      option.selected = value === (relationship || '');
+      select.append(option);
+    }
+    label.append(visuallyHidden, select);
+    return label;
+  };
+
+  class KanvasCollectionBuilder extends HTMLElement {
+    constructor() {
+      super();
+      this.collectionRevision = 0;
+      this.memberCursor = null;
+      this.memberLoaded = false;
+      this.memberDone = false;
+      this.memberLoading = false;
+      this.memberGeneration = 0;
+      this.currentMembers = new Map();
+      this.memberOrder = [];
+      this.additions = new Map();
+      this.removals = new Set();
+      this.relationshipUpdates = new Map();
+      this.searchCursor = null;
+      this.searchLoaded = false;
+      this.searchDone = false;
+      this.searchLoading = false;
+      this.searchGeneration = 0;
+      this.searchRows = [];
+      this.searchKinds = new Set(['movie', 'series']);
+      this.searchTimer = null;
+      this.saving = false;
+      this.conflict = null;
+      this.memberResults = null;
+      this.searchResults = null;
+      this.memberStatus = null;
+      this.searchStatus = null;
+      this.summary = null;
+      this.conflictState = null;
+    }
+
+    connectedCallback() {
+      this.collectionRevision = this.currentRevision() || 0;
+      this.innerHTML = `<section class="k-collection-builder" aria-label="Collection builder">
+        <section class="k-collection-builder__pane k-collection-builder__pane--find" aria-label="Find media">
+          <div class="k-collection-builder__heading"><div><h2>Find media</h2><p>Search the library and stage several additions before saving.</p></div></div>
+          <label class="k-control-shell k-input-shell"><span class="k-sr-only">Search media</span><input class="k-input" type="search" data-builder-search aria-label="Search media" placeholder="Search movies and series"></label>
+          <fieldset class="k-collection-builder__filters"><legend>Media types</legend>${COLLECTION_BUILDER_KINDS.map((kind) => `<label class="k-check"><input type="checkbox" value="${kind}" data-builder-kind${this.searchKinds.has(kind) ? ' checked' : ''}> ${escapeHtml(collectionBuilderKindLabel(kind))}</label>`).join('')}</fieldset>
+          <div class="k-collection-builder__status" data-builder-search-status aria-live="polite"></div>
+          <div class="k-collection-builder__results" data-builder-search-results></div>
+          <button type="button" class="k-button" data-builder-action="load-search">Load more results</button>
+        </section>
+        <section class="k-collection-builder__pane k-collection-builder__pane--collection" aria-label="Collection">
+          <div class="k-collection-builder__heading"><div><h2>Collection</h2><p>Membership and relationship changes stay local until you save.</p></div><button type="button" class="k-button k-button--primary" data-builder-action="save">Save changes</button></div>
+          <div class="k-collection-builder__summary" data-builder-summary></div>
+          <div class="k-collection-builder__status" data-builder-member-status aria-live="polite"></div>
+          <div class="k-collection-builder__members" data-builder-members></div>
+          <button type="button" class="k-button" data-builder-action="load-members">Load more members</button>
+          <div class="k-conflict-state" data-builder-conflict hidden aria-live="assertive"></div>
+        </section>
+      </section>`;
+      this.memberResults = this.querySelector('[data-builder-members]');
+      this.searchResults = this.querySelector('[data-builder-search-results]');
+      this.memberStatus = this.querySelector('[data-builder-member-status]');
+      this.searchStatus = this.querySelector('[data-builder-search-status]');
+      this.summary = this.querySelector('[data-builder-summary]');
+      this.conflictState = this.querySelector('[data-builder-conflict]');
+      this.addEventListener('click', (event) => this.onClick(event));
+      this.addEventListener('change', (event) => this.onChange(event));
+      this.querySelector('[data-builder-search]')?.addEventListener('input', () => {
+        if (this.saving) return;
+        window.clearTimeout(this.searchTimer);
+        this.searchTimer = window.setTimeout(() => { void this.resetSearch(); }, 220);
+      });
+      void this.resetMembers();
+      void this.resetSearch();
+    }
+
+    disconnectedCallback() {
+      window.clearTimeout(this.searchTimer);
+      this.memberGeneration += 1;
+      this.searchGeneration += 1;
+    }
+
+    currentRevision() {
+      const revision = Number(this.getAttribute('revision'));
+      return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+    }
+
+    syncPageRevision() {
+      const collectionId = Number(this.getAttribute('collection-id'));
+      if (!Number.isSafeInteger(collectionId) || collectionId <= 0) return;
+      for (const input of document.querySelectorAll(`[data-collection-revision-for="${collectionId}"]`)) {
+        if (input instanceof HTMLInputElement) input.value = String(this.collectionRevision);
+      }
+    }
+
+    syncPageMembershipState() {
+      const collectionId = Number(this.getAttribute('collection-id'));
+      if (!Number.isSafeInteger(collectionId) || collectionId <= 0 || !this.removals.size) return;
+      for (const select of document.querySelectorAll(`[data-collection-artwork-for="${collectionId}"]`)) {
+        if (!(select instanceof HTMLSelectElement)) continue;
+        if (this.removals.has(Number(select.value))) select.value = '';
+        for (const option of select.querySelectorAll('option')) {
+          if (this.removals.has(Number(option.value))) option.remove();
+        }
+      }
+    }
+
+    onClick(event) {
+      const button = event.target instanceof Element ? event.target.closest('[data-builder-action]') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      if (this.saving) return;
+      const action = button.dataset.builderAction;
+      if (action === 'load-search') void this.loadSearch();
+      if (action === 'load-members') void this.loadMembers();
+      if (action === 'save') void this.save();
+      if (action === 'retry') this.retryConflict();
+      if (action === 'discard') window.location.reload();
+      if (action === 'select') this.toggleSearchResult(Number(button.dataset.builderItem));
+      if (action === 'select-all') this.selectAllShown(button.dataset.builderKind || '');
+      if (action === 'remove-member') this.toggleMemberRemoval(Number(button.dataset.builderItem));
+    }
+
+    onChange(event) {
+      if (this.saving) return;
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
+      if (target instanceof HTMLInputElement && target.matches('[data-builder-kind]')) {
+        const selectedKinds = new Set(
+          Array.from(this.querySelectorAll('[data-builder-kind]'))
+            .filter((input) => input instanceof HTMLInputElement && input.checked)
+            .map((input) => input.value)
+        );
+        if (!selectedKinds.size) {
+          target.checked = true;
+          selectedKinds.add(target.value);
+        }
+        this.searchKinds = selectedKinds;
+        void this.resetSearch();
+        return;
+      }
+      if (target instanceof HTMLSelectElement && target.matches('[data-builder-relationship]')) {
+        this.changeRelationship(Number(target.dataset.builderRelationship), target.value || null);
+      }
+    }
+
+    async resetMembers() {
+      this.memberGeneration += 1;
+      this.memberCursor = null;
+      this.memberLoaded = false;
+      this.memberDone = false;
+      this.memberLoading = false;
+      this.currentMembers.clear();
+      this.memberOrder = [];
+      this.renderMembers();
+      await this.loadMembers();
+    }
+
+    async loadMembers() {
+      if (this.memberLoading || (this.memberLoaded && this.memberDone)) return;
+      const source = this.getAttribute('members-source');
+      if (!source || !this.memberResults || !this.memberStatus) return;
+      const generation = this.memberGeneration;
+      this.memberLoading = true;
+      this.memberStatus.textContent = this.memberLoaded ? 'Loading more members…' : 'Loading members…';
+      try {
+        const url = new URL(source, window.location.origin);
+        if (this.memberCursor) url.searchParams.set('cursor', this.memberCursor);
+        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        if (!response.ok) throw new Error('Member request failed');
+        const payload = await response.json();
+        if (generation !== this.memberGeneration) return;
+        const members = Array.isArray(payload.items)
+          ? payload.items.map(normaliseCollectionBuilderMember).filter(Boolean)
+          : [];
+        for (const member of members) {
+          this.currentMembers.set(member.poster.id, member);
+          this.ensureMemberVisible(member.poster.id);
+        }
+        this.memberCursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
+        this.memberLoaded = true;
+        this.memberDone = this.memberCursor === null;
+        this.memberStatus.textContent = members.length || this.memberOrder.length
+          ? ''
+          : 'This collection has no direct members yet.';
+        this.trimMemberCache();
+        this.renderMembers();
+      } catch (_) {
+        if (generation === this.memberGeneration) this.memberStatus.textContent = 'Could not load collection members.';
+      } finally {
+        if (generation === this.memberGeneration) this.memberLoading = false;
+      }
+    }
+
+    async resetSearch() {
+      this.searchGeneration += 1;
+      this.searchCursor = null;
+      this.searchLoaded = false;
+      this.searchDone = false;
+      this.searchLoading = false;
+      this.searchRows = [];
+      this.renderSearch();
+      await this.loadSearch();
+    }
+
+    async loadSearch() {
+      if (this.searchLoading || (this.searchLoaded && this.searchDone)) return;
+      const source = this.getAttribute('search-source');
+      if (!source || !this.searchResults || !this.searchStatus) return;
+      const generation = this.searchGeneration;
+      this.searchLoading = true;
+      this.searchStatus.textContent = this.searchLoaded ? 'Loading more results…' : 'Searching library…';
+      try {
+        const url = new URL(source, window.location.origin);
+        const search = this.querySelector('[data-builder-search]');
+        if (search instanceof HTMLInputElement && search.value.trim()) {
+          url.searchParams.set('search', search.value.trim());
+        }
+        for (const kind of this.searchKinds) url.searchParams.append('kind', kind);
+        if (this.searchCursor) url.searchParams.set('cursor', this.searchCursor);
+        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        if (!response.ok) throw new Error('Search request failed');
+        const payload = await response.json();
+        if (generation !== this.searchGeneration) return;
+        const rows = Array.isArray(payload.items)
+          ? payload.items.map(normaliseCollectionBuilderSearchResult).filter(Boolean)
+          : [];
+        const knownIds = new Set(this.searchRows.map((row) => row.poster.id));
+        for (const row of rows) {
+          if (knownIds.has(row.poster.id)) continue;
+          knownIds.add(row.poster.id);
+          this.searchRows.push(row);
+          if (row.alreadyMember && !this.currentMembers.has(row.poster.id)) {
+            this.currentMembers.set(row.poster.id, {
+              poster: row.poster,
+              kind: row.kind,
+              relationship: row.relationship
+            });
+          }
+        }
+        if (this.searchRows.length > MAX_MOUNTED_POSTERS) {
+          this.searchRows.splice(0, this.searchRows.length - MAX_MOUNTED_POSTERS);
+        }
+        this.searchCursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
+        this.searchLoaded = true;
+        this.searchDone = this.searchCursor === null;
+        this.searchStatus.textContent = this.searchRows.length ? '' : 'No media matches these filters.';
+        this.trimMemberCache();
+        this.renderSearch();
+      } catch (_) {
+        if (generation === this.searchGeneration) this.searchStatus.textContent = 'Could not load library results.';
+      } finally {
+        if (generation === this.searchGeneration) this.searchLoading = false;
+      }
+    }
+
+    ensureMemberVisible(itemId) {
+      if (!this.memberOrder.includes(itemId)) this.memberOrder.push(itemId);
+    }
+
+    trimMemberCache() {
+      while (this.memberOrder.length > MAX_MOUNTED_POSTERS) {
+        const removableIndex = this.memberOrder.findIndex((itemId) => (
+          !this.additions.has(itemId)
+          && !this.removals.has(itemId)
+          && !this.relationshipUpdates.has(itemId)
+        ));
+        if (removableIndex < 0) break;
+        const [itemId] = this.memberOrder.splice(removableIndex, 1);
+        this.currentMembers.delete(itemId);
+      }
+      const retainedIds = new Set([
+        ...this.memberOrder,
+        ...this.additions.keys(),
+        ...this.removals,
+        ...this.relationshipUpdates.keys()
+      ]);
+      for (const itemId of this.currentMembers.keys()) {
+        if (!retainedIds.has(itemId)) this.currentMembers.delete(itemId);
+      }
+    }
+
+    searchState(result) {
+      const itemId = result.poster.id;
+      if (this.additions.has(itemId)) return 'selected';
+      if (this.removals.has(itemId)) return 'removing';
+      if (this.currentMembers.has(itemId) || result.alreadyMember) return 'existing';
+      return 'normal';
+    }
+
+    relationshipFor(itemId) {
+      if (this.additions.has(itemId)) return this.additions.get(itemId).relationship;
+      if (this.relationshipUpdates.has(itemId)) return this.relationshipUpdates.get(itemId);
+      return this.currentMembers.get(itemId)?.relationship || null;
+    }
+
+    toggleSearchResult(itemId) {
+      if (this.saving) return;
+      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+      const result = this.searchRows.find((row) => row.poster.id === itemId);
+      if (!result) return;
+      let member = this.currentMembers.get(itemId);
+      if (!member && result.alreadyMember) {
+        member = {poster: result.poster, kind: result.kind, relationship: result.relationship};
+        this.currentMembers.set(itemId, member);
+      }
+      if (this.additions.has(itemId)) {
+        this.additions.delete(itemId);
+      } else if (member) {
+        this.ensureMemberVisible(itemId);
+        if (this.removals.has(itemId)) {
+          this.removals.delete(itemId);
+        } else {
+          this.relationshipUpdates.delete(itemId);
+          this.removals.add(itemId);
+        }
+      } else {
+        this.additions.set(itemId, {poster: result.poster, kind: result.kind, relationship: null});
+        this.ensureMemberVisible(itemId);
+      }
+      this.renderWorkspace();
+    }
+
+    selectAllShown(kind) {
+      if (this.saving) return;
+      if (!COLLECTION_BUILDER_KINDS.includes(kind)) return;
+      for (const result of this.searchRows) {
+        if (result.kind !== kind || this.searchState(result) !== 'normal') continue;
+        this.additions.set(result.poster.id, {
+          poster: result.poster,
+          kind: result.kind,
+          relationship: null
+        });
+        this.ensureMemberVisible(result.poster.id);
+      }
+      this.renderWorkspace();
+    }
+
+    toggleMemberRemoval(itemId) {
+      if (this.saving) return;
+      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+      if (this.additions.has(itemId)) {
+        this.additions.delete(itemId);
+      } else if (this.currentMembers.has(itemId)) {
+        if (this.removals.has(itemId)) {
+          this.removals.delete(itemId);
+        } else {
+          this.relationshipUpdates.delete(itemId);
+          this.removals.add(itemId);
+        }
+      }
+      this.renderWorkspace();
+    }
+
+    changeRelationship(itemId, relationship) {
+      if (this.saving) return;
+      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+      if (this.additions.has(itemId)) {
+        this.additions.get(itemId).relationship = relationship;
+      } else {
+        const member = this.currentMembers.get(itemId);
+        if (!member) return;
+        if (member.relationship === relationship) this.relationshipUpdates.delete(itemId);
+        else this.relationshipUpdates.set(itemId, relationship);
+      }
+      this.renderWorkspace();
+    }
+
+    stagedChangeCount() {
+      return this.additions.size + this.removals.size + this.relationshipUpdates.size;
+    }
+
+    batchPayload() {
+      return {
+        expected_revision: this.collectionRevision,
+        additions: Array.from(this.additions, ([libraryItemId, member]) => ({
+          library_item_id: libraryItemId,
+          relationship: member.relationship
+        })),
+        relationship_updates: Array.from(this.relationshipUpdates, ([libraryItemId, relationship]) => ({
+          library_item_id: libraryItemId,
+          relationship
+        })),
+        removals: Array.from(this.removals)
+      };
+    }
+
+    async save() {
+      if (this.saving) return;
+      const changes = this.stagedChangeCount();
+      if (!changes) {
+        if (this.memberStatus) this.memberStatus.textContent = 'There are no staged collection changes.';
+        return;
+      }
+      const mountedRevision = this.currentRevision();
+      if (
+        (!Number.isSafeInteger(this.collectionRevision) || this.collectionRevision <= 0)
+        && mountedRevision !== null
+      ) this.collectionRevision = mountedRevision;
+      if (!Number.isSafeInteger(this.collectionRevision) || this.collectionRevision <= 0) {
+        if (this.memberStatus) this.memberStatus.textContent = 'Could not determine the collection version. Reload and try again.';
+        return;
+      }
+      const action = this.getAttribute('action');
+      if (!action) return;
+      this.saving = true;
+      this.renderWorkspace();
+      if (this.memberStatus) this.memberStatus.textContent = 'Saving staged collection changes…';
+      try {
+        const response = await fetch(action, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          credentials: 'same-origin',
+          body: JSON.stringify(this.batchPayload())
+        });
+        let payload = null;
+        try { payload = await response.json(); } catch (_) { /* handled below */ }
+        if (response.status === 409) {
+          this.conflict = {
+            revision: Number.isInteger(payload?.currentRevision) ? payload.currentRevision : null
+          };
+          if (this.memberStatus) this.memberStatus.textContent = 'This collection changed elsewhere. Your staged changes are still here.';
+          this.renderConflict();
+          return;
+        }
+        if (!response.ok || !Number.isInteger(payload?.revision)) {
+          throw new Error(typeof payload?.error === 'string' ? payload.error : 'Collection changes could not be saved.');
+        }
+        this.collectionRevision = payload.revision;
+        this.setAttribute('revision', String(this.collectionRevision));
+        this.syncPageRevision();
+        this.syncPageMembershipState();
+        this.additions.clear();
+        this.removals.clear();
+        this.relationshipUpdates.clear();
+        this.conflict = null;
+        if (this.memberStatus) {
+          const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter((warning) => typeof warning === 'string') : [];
+          this.memberStatus.textContent = warnings.length ? warnings.join(' ') : 'Collection changes saved.';
+        }
+        publishKanvasToast({severity: 'success', title: 'Collection changes saved'});
+        await Promise.all([this.resetMembers(), this.resetSearch()]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Collection changes could not be saved.';
+        if (this.memberStatus) this.memberStatus.textContent = message;
+        publishKanvasToast({severity: 'error', title: 'Collection update failed', detail: message});
+      } finally {
+        this.saving = false;
+        this.renderWorkspace();
+      }
+    }
+
+    retryConflict() {
+      if (!Number.isInteger(this.conflict?.revision) || this.conflict.revision <= 0) return;
+      this.collectionRevision = this.conflict.revision;
+      this.setAttribute('revision', String(this.collectionRevision));
+      this.conflict = null;
+      this.renderConflict();
+      void this.save();
+    }
+
+    renderWorkspace() {
+      this.trimMemberCache();
+      this.renderSummary();
+      this.renderMembers();
+      this.renderSearch();
+      this.renderConflict();
+    }
+
+    renderSummary() {
+      if (!this.summary) return;
+      const parts = [];
+      if (this.additions.size) parts.push(`${this.additions.size} to add`);
+      if (this.relationshipUpdates.size) parts.push(`${this.relationshipUpdates.size} relationship update${this.relationshipUpdates.size === 1 ? '' : 's'}`);
+      if (this.removals.size) parts.push(`${this.removals.size} to remove`);
+      this.summary.textContent = parts.length ? `${parts.join(' · ')} staged` : 'No staged changes.';
+      const save = this.querySelector('[data-builder-action="save"]');
+      if (save instanceof HTMLButtonElement) save.disabled = this.saving || !parts.length;
+      for (const input of this.querySelectorAll('[data-builder-kind]')) {
+        if (input instanceof HTMLInputElement) input.disabled = this.saving;
+      }
+    }
+
+    renderSearch() {
+      if (!this.searchResults) return;
+      this.searchResults.replaceChildren();
+      const rowsByKind = new Map(COLLECTION_BUILDER_KINDS.map((kind) => [kind, []]));
+      for (const row of this.searchRows) rowsByKind.get(row.kind)?.push(row);
+      for (const kind of COLLECTION_BUILDER_KINDS) {
+        const rows = rowsByKind.get(kind) || [];
+        if (!rows.length) continue;
+        const group = document.createElement('section');
+        group.className = 'k-collection-builder__group';
+        const header = document.createElement('div');
+        header.className = 'k-collection-builder__group-heading';
+        const title = document.createElement('h3');
+        title.textContent = collectionBuilderKindLabel(kind);
+        const selectAll = document.createElement('button');
+        selectAll.type = 'button';
+        selectAll.className = 'k-button';
+        selectAll.dataset.builderAction = 'select-all';
+        selectAll.dataset.builderKind = kind;
+        const normalCount = rows.filter((row) => this.searchState(row) === 'normal').length;
+        selectAll.disabled = this.saving || !normalCount;
+        selectAll.textContent = normalCount ? 'Select all shown' : 'No available items';
+        header.append(title, selectAll);
+        const grid = document.createElement('div');
+        grid.className = 'k-collection-builder__card-grid';
+        for (const row of rows) grid.append(this.searchCard(row));
+        group.append(header, grid);
+        this.searchResults.append(group);
+      }
+      const more = this.querySelector('[data-builder-action="load-search"]');
+      if (more instanceof HTMLButtonElement) {
+        more.hidden = !this.searchLoaded || this.searchDone;
+        more.disabled = this.saving;
+      }
+    }
+
+    searchCard(result) {
+      const itemId = result.poster.id;
+      const state = this.searchState(result);
+      const card = document.createElement('article');
+      card.className = `k-collection-builder__card k-collection-builder__card--${state}`;
+      const poster = posterElement({...result.poster, state: state === 'selected' ? 'selected' : result.poster.state});
+      poster.classList.add('k-collection-builder__poster');
+      const footer = document.createElement('div');
+      footer.className = 'k-collection-builder__card-footer';
+      const status = document.createElement('span');
+      status.className = 'k-collection-builder__membership-state';
+      status.textContent = {
+        existing: 'Already in collection',
+        selected: 'Selected to add',
+        removing: 'Staged for removal',
+        normal: 'Available to add'
+      }[state];
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'k-button';
+      action.dataset.builderAction = 'select';
+      action.dataset.builderItem = String(itemId);
+      action.textContent = {
+        existing: 'Remove',
+        selected: 'Unselect',
+        removing: 'Keep',
+        normal: 'Select'
+      }[state];
+      action.disabled = this.saving;
+      footer.append(status, action);
+      card.append(poster, footer);
+      return card;
+    }
+
+    renderMembers() {
+      if (!this.memberResults) return;
+      this.memberResults.replaceChildren();
+      const memberIds = this.memberOrder.filter((itemId) => (
+        this.currentMembers.has(itemId) || this.additions.has(itemId)
+      ));
+      const visibleIds = memberIds.length > MAX_MOUNTED_POSTERS
+        ? memberIds.slice(memberIds.length - MAX_MOUNTED_POSTERS)
+        : memberIds;
+      for (const itemId of visibleIds) this.memberResults.append(this.memberCard(itemId));
+      const more = this.querySelector('[data-builder-action="load-members"]');
+      if (more instanceof HTMLButtonElement) {
+        more.hidden = !this.memberLoaded || this.memberDone;
+        more.disabled = this.saving;
+      }
+    }
+
+    memberCard(itemId) {
+      const stagedAddition = this.additions.get(itemId);
+      const member = stagedAddition || this.currentMembers.get(itemId);
+      const state = stagedAddition ? 'selected' : this.removals.has(itemId) ? 'removing' : 'current';
+      const card = document.createElement('article');
+      card.className = `k-collection-builder__member k-collection-builder__member--${state}`;
+      const poster = posterElement({...member.poster, state: stagedAddition ? 'selected' : member.poster.state});
+      poster.classList.add('k-collection-builder__poster');
+      const controls = document.createElement('div');
+      controls.className = 'k-collection-builder__member-controls';
+      const stateLabel = document.createElement('span');
+      stateLabel.className = 'k-collection-builder__membership-state';
+      stateLabel.textContent = stagedAddition
+        ? 'Staged add'
+        : this.removals.has(itemId)
+          ? 'Staged removal'
+          : 'Current member';
+      const relationship = collectionBuilderRelationshipSelect(
+        itemId, this.relationshipFor(itemId), member.poster.title
+      );
+      relationship.querySelector('select')?.toggleAttribute(
+        'disabled', this.saving || this.removals.has(itemId)
+      );
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'k-button';
+      action.dataset.builderAction = 'remove-member';
+      action.dataset.builderItem = String(itemId);
+      action.textContent = stagedAddition ? 'Unselect' : this.removals.has(itemId) ? 'Keep' : 'Remove';
+      action.disabled = this.saving;
+      controls.append(stateLabel, relationship, action);
+      card.append(poster, controls);
+      return card;
+    }
+
+    renderConflict() {
+      if (!this.conflictState) return;
+      this.conflictState.replaceChildren();
+      if (!this.conflict) {
+        this.conflictState.hidden = true;
+        return;
+      }
+      this.conflictState.hidden = false;
+      const copy = document.createElement('span');
+      copy.textContent = 'This collection changed elsewhere. Your staged changes have not been discarded.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'k-button';
+      retry.dataset.builderAction = 'retry';
+      retry.disabled = !Number.isInteger(this.conflict.revision);
+      retry.textContent = 'Retry staged changes';
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.className = 'k-button';
+      discard.dataset.builderAction = 'discard';
+      discard.textContent = 'Discard and reload';
+      this.conflictState.append(copy, retry, discard);
+    }
+  }
+
+  const normaliseItemCollectionTarget = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    const target = value;
+    if (!Number.isSafeInteger(target.id) || target.id <= 0) return null;
+    if (typeof target.name !== 'string' || !target.name.trim()) return null;
+    if (!Number.isSafeInteger(target.revision) || target.revision <= 0) return null;
+    if (typeof target.isMember !== 'boolean') return null;
+    if (target.relationship != null && typeof target.relationship !== 'string') return null;
+    return {
+      id: target.id,
+      name: target.name,
+      revision: target.revision,
+      isMember: target.isMember,
+      relationship: target.relationship ?? null
+    };
+  };
+
+  class KanvasItemCollectionPicker extends HTMLElement {
+    constructor() {
+      super();
+      this.cursor = null;
+      this.loaded = false;
+      this.done = false;
+      this.loading = false;
+      this.saving = false;
+      this.generation = 0;
+      this.searchTimer = null;
+      this.targets = new Map();
+      this.resultIds = [];
+      this.conflicts = new Map();
+      this.dialog = null;
+      this.results = null;
+      this.status = null;
+    }
+
+    connectedCallback() {
+      this.innerHTML = `<button type="button" class="k-button" data-item-collection-open aria-haspopup="dialog">Add to collection</button><dialog class="k-kanvas-dialog k-item-collection-picker"><section class="k-picker" role="document"><div class="k-picker__header"><label class="k-control-shell k-input-shell"><span class="k-sr-only">Search collections</span><input class="k-input" type="search" data-item-collection-search aria-label="Search collections" placeholder="Search collections"></label><button type="button" class="k-button" data-item-collection-close>Close</button></div><div class="k-picker__status" data-item-collection-status aria-live="polite"></div><div class="k-item-collection-picker__results" data-item-collection-results></div><button type="button" class="k-button" data-item-collection-more>Load more</button><div class="k-action-row"><button type="button" class="k-button k-button--primary" data-item-collection-save>Save collection changes</button></div></section></dialog>`;
+      this.dialog = this.querySelector('dialog');
+      this.results = this.querySelector('[data-item-collection-results]');
+      this.status = this.querySelector('[data-item-collection-status]');
+      this.querySelector('[data-item-collection-open]')?.addEventListener('click', () => this.open());
+      this.querySelector('[data-item-collection-close]')?.addEventListener('click', () => this.dialog?.close());
+      this.querySelector('[data-item-collection-more]')?.addEventListener('click', () => void this.loadNext());
+      this.querySelector('[data-item-collection-save]')?.addEventListener('click', () => void this.save());
+      this.querySelector('[data-item-collection-search]')?.addEventListener('input', () => {
+        window.clearTimeout(this.searchTimer);
+        this.searchTimer = window.setTimeout(() => { void this.resetAndLoad(); }, 220);
+      });
+      this.results?.addEventListener('change', (event) => this.toggle(event));
+      this.results?.addEventListener('click', (event) => this.retry(event));
+    }
+
+    disconnectedCallback() {
+      window.clearTimeout(this.searchTimer);
+      this.generation += 1;
+    }
+
+    open() {
+      if (!this.dialog) return;
+      if (!this.dialog.open) this.dialog.showModal();
+      void this.resetAndLoad();
+      this.querySelector('[data-item-collection-search]')?.focus();
+    }
+
+    async resetAndLoad() {
+      if (this.saving) return;
+      this.generation += 1;
+      this.cursor = null;
+      this.loaded = false;
+      this.done = false;
+      this.loading = false;
+      this.resultIds = Array.from(this.targets.values())
+        .filter((target) => target.member !== target.initialMember || this.conflicts.has(target.id))
+        .map((target) => target.id);
+      this.trimTargetCache();
+      this.render();
+      await this.loadNext();
+    }
+
+    async loadNext() {
+      if (this.saving || this.loading || (this.loaded && this.done)) return;
+      const source = this.getAttribute('source');
+      if (!source || !this.status) return;
+      const generation = this.generation;
+      this.loading = true;
+      this.status.textContent = this.loaded ? 'Loading more collections…' : 'Loading collections…';
+      try {
+        const url = new URL(source, window.location.origin);
+        const search = this.querySelector('[data-item-collection-search]');
+        if (search instanceof HTMLInputElement && search.value.trim()) url.searchParams.set('search', search.value.trim());
+        if (this.cursor) url.searchParams.set('cursor', this.cursor);
+        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
+        if (!response.ok) throw new Error('Collection request failed');
+        const payload = await response.json();
+        if (generation !== this.generation) return;
+        const rows = Array.isArray(payload.items)
+          ? payload.items.map(normaliseItemCollectionTarget).filter(Boolean)
+          : [];
+        for (const row of rows) {
+          const previous = this.targets.get(row.id);
+          const dirty = previous && previous.member !== previous.initialMember;
+          this.targets.set(row.id, dirty
+            ? {...previous, name: row.name}
+            : {...row, initialMember: row.isMember, member: row.isMember});
+          if (!this.resultIds.includes(row.id)) this.resultIds.push(row.id);
+        }
+        if (this.resultIds.length > MAX_MOUNTED_POSTERS) {
+          this.resultIds.splice(0, this.resultIds.length - MAX_MOUNTED_POSTERS);
+        }
+        this.trimTargetCache();
+        this.cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
+        this.loaded = true;
+        this.done = this.cursor === null;
+        this.status.textContent = this.resultIds.length ? '' : 'No collections match this search.';
+        this.render();
+      } catch (_) {
+        if (generation === this.generation) this.status.textContent = 'Could not load collections.';
+      } finally {
+        if (generation === this.generation) this.loading = false;
+      }
+    }
+
+    toggle(event) {
+      if (this.saving) return;
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || !input.matches('[data-item-collection-toggle]')) return;
+      const target = this.targets.get(Number(input.dataset.itemCollectionToggle));
+      if (!target) return;
+      target.member = input.checked;
+      this.conflicts.delete(target.id);
+      this.render();
+    }
+
+    retry(event) {
+      if (this.saving) return;
+      const button = event.target instanceof Element ? event.target.closest('[data-item-collection-retry]') : null;
+      if (!(button instanceof HTMLButtonElement)) return;
+      const id = Number(button.dataset.itemCollectionRetry);
+      const target = this.targets.get(id);
+      const revision = this.conflicts.get(id);
+      if (!target || !Number.isInteger(revision) || revision <= 0) return;
+      target.revision = revision;
+      this.conflicts.delete(id);
+      this.render();
+      void this.save();
+    }
+
+    changedTargets() {
+      return Array.from(this.targets.values()).filter((target) => target.member !== target.initialMember);
+    }
+
+    trimTargetCache() {
+      const visibleIds = new Set(this.resultIds);
+      for (const [id, target] of this.targets) {
+        if (
+          !visibleIds.has(id)
+          && target.member === target.initialMember
+          && !this.conflicts.has(id)
+        ) {
+          this.targets.delete(id);
+        }
+      }
+    }
+
+    async save() {
+      if (this.saving) return;
+      const itemId = Number(this.getAttribute('item-id'));
+      const actionPrefix = this.getAttribute('action-prefix');
+      const changes = this.changedTargets();
+      if (!Number.isSafeInteger(itemId) || itemId <= 0 || !actionPrefix || !this.status) return;
+      if (!changes.length) {
+        this.status.textContent = 'There are no staged collection changes.';
+        return;
+      }
+      this.saving = true;
+      this.render();
+      this.status.textContent = 'Saving collection changes…';
+      let saved = 0;
+      try {
+        for (const target of changes) {
+          const body = target.member
+            ? {expected_revision: target.revision, additions: [{library_item_id: itemId, relationship: null}], relationship_updates: [], removals: []}
+            : {expected_revision: target.revision, additions: [], relationship_updates: [], removals: [itemId]};
+          try {
+            const response = await fetch(`${actionPrefix}/${encodeURIComponent(String(target.id))}/members/batch`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+              credentials: 'same-origin',
+              body: JSON.stringify(body)
+            });
+            let payload = null;
+            try { payload = await response.json(); } catch (_) { /* handled below */ }
+            if (response.status === 409) {
+              this.conflicts.set(
+                target.id,
+                Number.isInteger(payload?.currentRevision) ? payload.currentRevision : null
+              );
+              continue;
+            }
+            if (!response.ok || !Number.isInteger(payload?.revision)) {
+              throw new Error(typeof payload?.error === 'string' ? payload.error : 'Collection membership could not be saved.');
+            }
+            target.initialMember = target.member;
+            target.revision = payload.revision;
+            this.conflicts.delete(target.id);
+            saved += 1;
+          } catch (_) {
+            this.conflicts.set(target.id, null);
+          }
+        }
+        const remaining = this.changedTargets().length;
+        if (!remaining) {
+          this.status.textContent = saved === 1 ? 'Collection membership saved.' : 'Collection memberships saved.';
+          publishKanvasToast({severity: 'success', title: 'Collection memberships saved'});
+          window.location.reload();
+          return;
+        }
+        this.status.textContent = saved
+          ? 'Saved available changes. Remaining staged changes need your attention.'
+          : 'Could not save the staged collection changes. They are still selected.';
+      } finally {
+        this.saving = false;
+        this.render();
+      }
+    }
+
+    render() {
+      if (!this.results) return;
+      this.results.replaceChildren();
+      for (const id of this.resultIds) {
+        const target = this.targets.get(id);
+        if (!target) continue;
+        const row = document.createElement('div');
+        row.className = 'k-item-collection-picker__row';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = target.member;
+        input.disabled = this.saving;
+        input.id = `item-collection-toggle-${this.getAttribute('item-id')}-${target.id}`;
+        input.dataset.itemCollectionToggle = String(target.id);
+        const detail = document.createElement('label');
+        detail.className = 'k-item-collection-picker__detail';
+        detail.htmlFor = input.id;
+        const name = document.createElement('strong');
+        name.textContent = target.name;
+        const facts = document.createElement('small');
+        const staged = target.member !== target.initialMember ? ' · staged' : '';
+        const relationship = target.relationship ? ` · ${target.relationship.replaceAll('_', ' ')}` : '';
+        facts.textContent = `${target.initialMember ? 'Already in collection' : 'Not in collection'}${relationship}${staged}`;
+        detail.append(name, facts);
+        row.append(input, detail);
+        if (this.conflicts.has(target.id)) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'k-button';
+          retry.dataset.itemCollectionRetry = String(target.id);
+          retry.disabled = this.saving || !Number.isInteger(this.conflicts.get(target.id));
+          retry.textContent = 'Retry';
+          row.append(retry);
+        }
+        this.results.append(row);
+      }
+      const more = this.querySelector('[data-item-collection-more]');
+      if (more instanceof HTMLButtonElement) {
+        more.hidden = !this.loaded || this.done;
+        more.disabled = this.saving;
+      }
+      const save = this.querySelector('[data-item-collection-save]');
+      if (save instanceof HTMLButtonElement) {
+        save.disabled = this.saving || !this.changedTargets().length;
+      }
+    }
+  }
+
   const normaliseWatchRow = (value) => {
     if (!value || typeof value !== 'object') return null;
     const row = value;
@@ -3566,6 +4523,8 @@
   }
 
   if (!customElements.get('kanvas-collection-grid')) customElements.define('kanvas-collection-grid', KanvasCollectionGrid);
+  if (!customElements.get('kanvas-collection-builder')) customElements.define('kanvas-collection-builder', KanvasCollectionBuilder);
+  if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
   if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
   if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);

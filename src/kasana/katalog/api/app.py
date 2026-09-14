@@ -26,7 +26,10 @@ from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionDetail,
     CollectionMembership,
+    CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
+    CollectionMembershipLookupResponse,
     CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionSummary,
@@ -707,6 +710,36 @@ def create_app(
     ) -> CollectionMutationResult:
         return await run_blocking(
             runtime.queries.add_collection_membership, collection_id, membership
+        )
+
+    @app.post(
+        "/api/v1/collections/{collection_id}/items/batch",
+        response_model=CollectionMutationResult,
+        operation_id="v1_batch_collection_memberships",
+        responses=_ERROR_RESPONSES,
+    )
+    async def batch_collection_memberships(
+        collection_id: Annotated[int, Path(gt=0)],
+        changes: CollectionMembershipBatchRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMutationResult:
+        return await run_blocking(
+            runtime.queries.batch_collection_memberships, collection_id, changes
+        )
+
+    @app.post(
+        "/api/v1/collections/{collection_id}/items/lookup",
+        response_model=CollectionMembershipLookupResponse,
+        operation_id="v1_lookup_collection_memberships",
+        responses=_ERROR_RESPONSES,
+    )
+    async def lookup_collection_memberships(
+        collection_id: Annotated[int, Path(gt=0)],
+        request: CollectionMembershipLookupRequest,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> CollectionMembershipLookupResponse:
+        return await run_blocking(
+            runtime.queries.lookup_collection_memberships, collection_id, request
         )
 
     @app.patch(
