@@ -71,7 +71,6 @@ from kasana.kanvas.dashboard import (
     artwork,
     build_dashboard,
     collection_builder_members_data,
-    collection_builder_search_data,
     collection_member_action,
     collection_members_batch_action,
     collection_picker_data,
@@ -150,9 +149,10 @@ from kasana.kanvas.viewmodels.administration import (
     overview_from_status,
 )
 from kasana.kanvas.viewmodels.collections import (
-    CollectionBuilderSearchResultView,
     CollectionDetailView,
+    CollectionMembershipStateView,
     CollectionMemberView,
+    CollectionModeView,
     CollectionTileView,
     GenerationPreviewView,
     ItemPickerView,
@@ -188,6 +188,7 @@ from kasana.kanvas.viewmodels.library import (
     PosterView,
 )
 from kasana.katalog.public import (
+    MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE,
     ArtworkFetchRequest,
     ArtworkKind,
     ArtworkSelection,
@@ -2016,7 +2017,7 @@ async def test_library_and_collection_posters_show_partially_watched_series(
             )
 
         async def list_collection_members(
-            self, collection_id: int, *, limit: int
+            self, collection_id: int, *, cursor: str | None = None, limit: int
         ) -> PaginatedResponse[CollectionMembership]:
             assert (collection_id, limit) == (12, 100)
             return PaginatedResponse(items=(membership,), next_cursor=None, limit=limit)
@@ -2139,9 +2140,7 @@ async def test_collection_editor_loads_every_member_and_watch_order_without_play
 async def test_collection_builder_context_preserves_selected_metadata_choices_bounded(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    visible_item = _library_summary(
-        item_id=1, title="Visible", kind=LibraryItemKind.MOVIE
-    )
+    visible_item = _library_summary(item_id=1, title="Visible", kind=LibraryItemKind.MOVIE)
     artwork_item = _library_summary(
         item_id=99, title="Artwork", kind=LibraryItemKind.MOVIE
     ).model_copy(
@@ -2216,9 +2215,7 @@ async def test_collection_builder_context_preserves_selected_metadata_choices_bo
             yield visible_order
             yield default_order
 
-    monkeypatch.setattr(
-        "kasana.kanvas.services.katalog.KatalogClient", CompactCollectionClient
-    )
+    monkeypatch.setattr("kasana.kanvas.services.katalog.KatalogClient", CompactCollectionClient)
 
     context = await KanvasKatalogService(Kanvas_Settings(), user_id=1).collection_builder_context(
         12
@@ -2543,33 +2540,11 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
             calls.append(("members", cursor))
             return ((CollectionMemberView(poster=poster, kind="episode"),), "member-next")
 
-        async def collection_builder_search_page(
-            self,
-            collection_id: int,
-            *,
-            cursor: str | None,
-            search: str | None,
-            kinds: tuple[LibraryItemKind, ...],
-        ) -> tuple[tuple[CollectionBuilderSearchResultView, ...], str | None]:
-            assert collection_id == 4
-            calls.append(("search", (cursor, search, kinds)))
-            return (
-                (
-                    CollectionBuilderSearchResultView(
-                        poster=poster,
-                        kind="episode",
-                        alreadyMember=True,
-                        relationship="primary",
-                    ),
-                ),
-                "search-next",
-            )
-
         async def batch_collection_memberships(
             self, collection_id: int, request: CollectionMembershipBatchRequest
         ) -> tuple[int, tuple[str, ...]]:
             assert collection_id == 4
-            calls.append(("batch", request.model_dump(mode="json")))
+            calls.append(("batch", request.model_dump(mode="json", exclude={"details"})))
             return 8, ("The item remains in 1 watch-order entry.",)
 
     class JsonRequest:
@@ -2584,19 +2559,6 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
         4,
         Request({"type": "http", "query_string": b"cursor=member-after", "headers": []}),
     )
-    search = await collection_builder_search_data(
-        4,
-        Request(
-            {
-                "type": "http",
-                "query_string": b"cursor=search-after&search=Pilot&kind=episode&kind=movie",
-                "headers": [],
-            }
-        ),
-    )
-    default_search = await collection_builder_search_data(
-        4, Request({"type": "http", "query_string": b"", "headers": []})
-    )
     payload = {
         "expected_revision": 7,
         "additions": [{"library_item_id": 12, "relationship": None}],
@@ -2606,23 +2568,12 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
     saved = await collection_members_batch_action(4, cast(Request, JsonRequest(payload)))
 
     assert json.loads(bytes(members.body))["nextCursor"] == "member-next"
-    assert json.loads(bytes(search.body))["items"][0]["alreadyMember"] is True
-    assert json.loads(bytes(default_search.body))["nextCursor"] == "search-next"
     assert json.loads(bytes(saved.body)) == {
         "revision": 8,
         "warnings": ["The item remains in 1 watch-order entry."],
     }
     assert calls == [
         ("members", "member-after"),
-        (
-            "search",
-            (
-                "search-after",
-                "Pilot",
-                (LibraryItemKind.EPISODE, LibraryItemKind.MOVIE),
-            ),
-        ),
-        ("search", (None, None, (LibraryItemKind.MOVIE, LibraryItemKind.SERIES))),
         (
             "batch",
             {
@@ -2657,32 +2608,6 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
         "currentRevision": 12,
         "reloadUrl": "/collections/4/edit",
     }
-
-
-def test_collection_builder_member_cards_keep_artwork_in_their_grid_cells() -> None:
-    stylesheet = (Path(__file__).parents[1] / "src/kasana/kanvas/static/kanvas.css").read_text(
-        encoding="utf-8"
-    )
-    member_grid_match = re.search(
-        r"^\.k-collection-builder__members \{([^}]*)\}", stylesheet, flags=re.MULTILINE
-    )
-    assert member_grid_match is not None
-    member_grid = member_grid_match.group(1)
-    card = stylesheet.split(
-        ".k-collection-builder__card, .k-collection-builder__member {", maxsplit=1
-    )[1].split("}", maxsplit=1)[0]
-    poster = stylesheet.split(
-        ".k-collection-builder .k-collection-builder__poster {", maxsplit=1
-    )[1].split("}", maxsplit=1)[0]
-
-    assert "grid-template-columns: repeat(auto-fill, minmax(min(136px, 100%), 1fr));" in member_grid
-    assert "align-items: start;" in member_grid
-    assert "align-self: start;" in card
-    assert "align-content: start;" in card
-    assert "width: 100%;" in poster
-    assert "max-width: none;" in poster
-    assert "kanvas-collection-builder { display: block; width: 100%; min-width: 0; }" in stylesheet
-    assert ".k-poster--landscape .k-poster__art { aspect-ratio: 16 / 9; }" in stylesheet
 
 
 async def test_item_collection_targets_are_paged_and_admin_only(monkeypatch: MonkeyPatch) -> None:
@@ -2903,10 +2828,13 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
     )
     generated = await apply_watch_order_generation_action(
         9,
-        cast(Request, FormRequest(revision="3", mode="air", apply_mode="replace")),
+        cast(
+            Request,
+            FormRequest(revision="3", mode="air", apply_mode="replace", preview_token="0" * 64),
+        ),
     )
 
-    assert created.headers["location"] == "/collections/4"
+    assert created.headers["location"] == "/library?editCollection=4"
     assert updated.headers["location"] == "/collections/4"
     assert member.headers["location"] == "/collections/4/edit"
     assert removed.headers["location"] == "/collections/4/edit"
@@ -2993,7 +2921,7 @@ async def test_browser_data_and_entry_actions_are_bounded_and_revision_guarded(
                         position=0,
                         itemId=7,
                         title="Pilot",
-                        kind="episode",
+                        kind=LibraryItemKind.EPISODE,
                         available=True,
                     ),
                 ),
@@ -3251,25 +3179,19 @@ async def test_watch_order_sources_expand_series_seasons_into_contiguous_episode
     ).model_copy(update={"availability": Availability.UNAVAILABLE})
 
     class SourceClient:
-        async def iter_collection_members(
-            self, _collection_id: int, *, limit: int
-        ) -> AsyncIterator[CollectionMembership]:
-            assert limit == 100
-            yield CollectionMembership(id=1, collection_id=4, item=series)
-            yield CollectionMembership(id=2, collection_id=4, item=movie)
-
-        async def list_library_item_children(
-            self, item_id: int, *, cursor: str | None, limit: int
-        ) -> PaginatedResponse[LibraryItemSummary]:
-            assert cursor is None
-            assert limit == 100
-            children_by_parent = {
-                series.id: (season, earlier_season),
-                season.id: (unavailable_episode, first_episode),
-                earlier_season.id: (earlier_episode,),
-            }
-            children = children_by_parent.get(item_id, ())
-            return PaginatedResponse[LibraryItemSummary](items=children, limit=limit)
+        async def iter_collection_sources(
+            self, _collection_id: int
+        ) -> AsyncIterator[LibraryItemSummary]:
+            for item in (
+                series,
+                earlier_season,
+                earlier_episode,
+                season,
+                first_episode,
+                unavailable_episode,
+                movie,
+            ):
+                yield item
 
         async def playback_states(
             self, user_id: int, request: PlaybackStatesRequest
@@ -3317,7 +3239,7 @@ async def test_watch_order_source_addition_uses_one_contiguous_batch(
     source = WatchOrderSourceView(
         id=42,
         title="Season 8",
-        kind="season",
+        kind=LibraryItemKind.SEASON,
         seasonNumber=8,
         entryCount=2,
         addable=True,
@@ -3393,7 +3315,7 @@ async def test_watch_order_source_addition_uses_one_contiguous_batch(
         await service.add_watch_order_source(9, revision=8, source_item_id=42)
 
 
-async def test_watch_order_workspace_removes_sources_represented_by_order_entries(
+async def test_watch_order_workspace_keeps_partially_used_sources(
     monkeypatch: MonkeyPatch,
 ) -> None:
     episode = _library_summary(
@@ -3405,7 +3327,7 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
     season_source = WatchOrderSourceView(
         id=42,
         title="Season 8",
-        kind="season",
+        kind=LibraryItemKind.SEASON,
         entryCount=2,
         addable=True,
         available=True,
@@ -3414,7 +3336,7 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
     series_source = WatchOrderSourceView(
         id=40,
         title="SG-1",
-        kind="series",
+        kind=LibraryItemKind.SERIES,
         entryCount=2,
         addable=True,
         available=True,
@@ -3423,7 +3345,11 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
 
     class WorkspaceClient:
         async def get_watch_order(self, _watch_order_id: int, **_filters: object) -> object:
-            return SimpleNamespace(watch_order=SimpleNamespace(collection_id=4, revision=7))
+            return SimpleNamespace(
+                watch_order=SimpleNamespace(
+                    collection_id=4, revision=7, name="Release", kind=WatchOrderKind.CUSTOM
+                )
+            )
 
         async def iter_watch_order_entries(
             self, _watch_order_id: int, *, limit: int
@@ -3444,7 +3370,7 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
     async def sources(
         _client: object, _collection_id: int, *, include_playback: bool = False
     ) -> tuple[object, ...]:
-        assert include_playback is True
+        assert include_playback is False
         return ((season_source, (43, 44)), (series_source, (43, 44)))
 
     service = KanvasKatalogService(Kanvas_Settings(), user_id=1)
@@ -3457,7 +3383,7 @@ async def test_watch_order_workspace_removes_sources_represented_by_order_entrie
     assert [entry.item_id for entry in workspace.entries] == [episode.id]
     assert workspace.entries[0].poster is not None
     assert workspace.entries[0].poster.id == episode.id
-    assert workspace.sources == ()
+    assert workspace.sources == (season_source, series_source)
 
 
 async def test_watch_order_service_mutation_wrappers_preserve_request_state(
@@ -5267,7 +5193,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
                 position=0,
                 itemId=7,
                 title="Pilot",
-                kind="episode",
+                kind=LibraryItemKind.EPISODE,
                 available=True,
             ),
         ),
@@ -5282,7 +5208,9 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
-        async def collection_detail(self, collection_id: int) -> CollectionDetailView:
+        async def collection_detail(
+            self, collection_id: int, *, cursor: str | None = None
+        ) -> CollectionDetailView:
             assert collection_id == 4
             return collection
 
@@ -5347,19 +5275,19 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             if element.tag == "option"
             and _parent_element(element) is _select_named(client, "artwork_item_id")
         ]
-        generation_entries = next(
-            element
+        assert any(
+            element.tag == BrowserComponent.WATCH_ORDER_WORKSPACE for element in browser_components
+        )
+        assert not any(
+            "k-generation-preview__entries" in _element_classes(element)
             for element in client.elements.values()
-            if "k-generation-preview__entries" in _element_classes(element)
         )
 
-    assert generation_entries.tag == "ol"
     assert browser_components
     assert all(element.tag != "nicegui-html" for element in browser_components)
     assert _element_props(collection_builder) == {
         "collection-id": "4",
         "members-source": "/kanvas/data/collections/4/builder/members",
-        "search-source": "/kanvas/data/collections/4/builder/search",
         "action": "/kanvas/actions/collections/4/members/batch",
         "revision": "3",
     }
@@ -5367,10 +5295,13 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
     assert any(_element_props(element).get("name") == "overview" for element in textareas)
     assert any(_element_props(element).get("value") == "Gate travel" for element in textareas)
     assert any(_element_props(element).get("name") == "revision" for element in hidden_fields)
-    assert sum(
-        _element_props(element).get("data-collection-revision-for") == "4"
-        for element in hidden_fields
-    ) == 2
+    assert (
+        sum(
+            _element_props(element).get("data-collection-revision-for") == "4"
+            for element in hidden_fields
+        )
+        == 1
+    )
     assert [
         (str(_element_props(option)["value"]), "selected" in _element_props(option))
         for option in default_watch_order_options
@@ -5386,7 +5317,9 @@ async def test_collection_routes_share_one_unavailable_state(monkeypatch: Monkey
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
             pass
 
-        async def collection_detail(self, _collection_id: int) -> CollectionDetailView:
+        async def collection_detail(
+            self, _collection_id: int, *, cursor: str | None = None
+        ) -> CollectionDetailView:
             raise KatalogClientError(KatalogClientErrorKind.UNAVAILABLE, "offline")
 
         async def collection_editor(self, _collection_id: int) -> CollectionDetailView:
@@ -5944,6 +5877,8 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     item_editor_javascript_path = tmp_path / "kanvas-item-editor.js"
     libass_path = tmp_path / "libass" / "subtitles-octopus.js"
     playback_javascript_path = tmp_path / "kanvas-playback.js"
+    (tmp_path / "kanvas-collection-mode.js").write_text("window.kanvasMode = {};", encoding="utf-8")
+    (tmp_path / "kanvas-watch-orders.js").write_text("window.kanvasOrders = {};", encoding="utf-8")
     css_path.write_text(".k-app { color: white; }", encoding="utf-8")
     javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
     administration_javascript_path.write_text("window.kanvas = {};", encoding="utf-8")
@@ -5962,6 +5897,9 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
     component_scripts = re.search(r"window\.kanvasComponentScripts = ({.*});", head)
     assert component_scripts is not None
     assert json.loads(component_scripts.group(1)) == {
+        BrowserComponent.COLLECTION_MODE.value: (
+            f"/_kanvas/kanvas-collection-mode.js?v={initial_versions.collection_mode_javascript}"
+        ),
         BrowserComponent.ADMINISTRATION.value: (
             f"/_kanvas/kanvas-administration.js?v={initial_versions.administration_javascript}"
         ),
@@ -5971,6 +5909,15 @@ def test_asset_versions_are_deterministic_content_addresses(tmp_path: Path) -> N
         BrowserComponent.PLAYBACK_PLAYER.value: (
             f"/_kanvas/kanvas-playback.js?v={initial_versions.playback_javascript}"
         ),
+        **{
+            component.value: (
+                f"/_kanvas/kanvas-watch-orders.js?v={initial_versions.watch_orders_javascript}"
+            )
+            for component in (
+                BrowserComponent.WATCH_ORDER_LIST,
+                BrowserComponent.WATCH_ORDER_WORKSPACE,
+            )
+        },
     }
 
     css_path.write_text(".k-app { color: black; }", encoding="utf-8")
@@ -6252,6 +6199,8 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
             (static_root / "kanvas-administration.js").read_text(),
             (static_root / "kanvas-item-editor.js").read_text(),
             (static_root / "kanvas-playback.js").read_text(),
+            (static_root / "kanvas-watch-orders.js").read_text(),
+            (static_root / "kanvas-collection-mode.js").read_text(),
         )
     )
     assert "prefers-reduced-motion: reduce" in css
@@ -6318,15 +6267,10 @@ def test_routes_assets_keyboard_and_reduced_motion_contracts() -> None:
     assert 'name="autoplayOnResume"' in javascript
     assert "/profiles/current/playback-languages" in javascript
     assert "new Intl.DisplayNames" in javascript
-    assert "k-watch-order-poster" in javascript
-    assert "data-insert-before" in javascript
-    assert "isNoopMove" in javascript
     assert "dragstart" in javascript
-    assert "onDrop" in javascript
-    assert "moveBoundary" in javascript
+    assert "moveItems" in javascript
     assert "showConflict" in javascript
     assert "currentRevision" in javascript
-    assert 'data-row-action="play"' in javascript
     assert "<dialog" in javascript
     assert "kanvas-poster" in javascript
     assert "posterMarkup" in javascript
@@ -6390,3 +6334,71 @@ def test_administration_overview_transformation_and_adaptive_polling() -> None:
     state.hidden = True
     assert state.begin() is False
     assert state.interval_seconds(active_jobs=1) is None
+
+
+async def test_collection_mode_endpoint_checks_permissions_and_bounded_memberships(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, tuple[int, ...]]] = []
+
+    class Catalogue:
+        def __init__(self, _settings: Kanvas_Settings, user_id: int) -> None:
+            assert user_id == 1
+
+        async def collection_mode(
+            self, collection_id: int, *, item_ids: tuple[int, ...] = ()
+        ) -> CollectionModeView:
+            calls.append((collection_id, item_ids))
+            return CollectionModeView(
+                id=collection_id,
+                name="Stargate",
+                itemCount=1,
+                revision=8,
+                items=tuple(
+                    CollectionMembershipStateView(
+                        itemId=item_id,
+                        state="inherited",
+                        inheritedFromId=4,
+                        inheritedFromTitle="SG-1",
+                    )
+                    for item_id in item_ids
+                ),
+            )
+
+    class JsonRequest:
+        method = "POST"
+
+        def __init__(self, item_ids: list[int]) -> None:
+            self.item_ids = item_ids
+
+        async def json(self) -> object:
+            return {"library_item_ids": self.item_ids}
+
+    monkeypatch.setattr(api_collections, "KanvasKatalogService", Catalogue)
+    get_request = Request({"type": "http", "method": "GET", "headers": []})
+    identity = await api_collections.collection_mode_data(4, get_request)
+    assert json.loads(bytes(identity.body))["name"] == "Stargate"
+    result = await api_collections.collection_mode_data(4, cast(Request, JsonRequest([7, 8])))
+    payload = json.loads(bytes(result.body))
+    assert payload["revision"] == 8
+    assert payload["items"][0]["inheritedFromId"] == 4
+    assert payload["items"][0]["state"] == "inherited"
+    assert calls == [(4, ()), (4, (7, 8))]
+    for invalid in ([], [7, 7], [0], list(range(1, MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE + 2))):
+        response = await api_collections.collection_mode_data(
+            4, cast(Request, JsonRequest(invalid))
+        )
+        assert response.status_code == 422
+    assert len(calls) == 2
+
+    async def viewer_profile(_request: Request) -> SessionProfile:
+        return SessionProfile(UserSummary(id=2, username="viewer", role=UserRole.USER))
+
+    monkeypatch.setattr(api_collections, "data_profile", viewer_profile)
+    assert (await api_collections.collection_mode_data(4, get_request)).status_code == 403
+
+    async def no_profile(_request: Request) -> None:
+        return None
+
+    monkeypatch.setattr(api_collections, "data_profile", no_profile)
+    assert (await api_collections.collection_mode_data(4, get_request)).status_code == 401

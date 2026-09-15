@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -26,13 +26,14 @@ from kasana.katalog.metadata.refresh import (
     SeasonArtworkProvider,
     provider_for,
 )
-from kasana.katalog.metadata.review import apply_unlocked_overview
+from kasana.katalog.metadata.review import apply_unlocked_overview, locked_fields
 from kasana.katalog.models import (
     CachedArtwork,
     CachedArtworkKind,
     MetadataBinding,
     MetadataCandidate,
     MetadataCandidateStatus,
+    MetadataField,
     MetadataMatchStatus,
     Zaisan,
     ZaisanKind,
@@ -137,12 +138,13 @@ class EpisodeArtworkTarget:
 
 
 @dataclass(frozen=True)
-class EpisodeOverviewUpdate:
-    """An episode overview identified by the local season and episode number."""
+class EpisodeMetadataUpdate:
+    """Episode text and air date identified by local season and episode number."""
 
     library_item_id: int
     episode_number: int
-    overview: str
+    overview: str | None
+    air_date: date | None
 
 
 @dataclass(frozen=True)
@@ -583,23 +585,24 @@ class ArtworkCache:
                     msg = f"Provider {target.provider!r} returned duplicate episode details."
                     raise ValueError(msg)
                 remote_episodes[episode.episode_number] = episode
-            overview_updates: list[EpisodeOverviewUpdate] = []
+            metadata_updates: list[EpisodeMetadataUpdate] = []
             for episode_target in target.episodes:
                 episode = remote_episodes.get(episode_target.episode_number)
-                if episode is None or episode.overview is None:
+                if episode is None:
                     continue
-                overview_updates.append(
-                    EpisodeOverviewUpdate(
+                metadata_updates.append(
+                    EpisodeMetadataUpdate(
                         library_item_id=episode_target.library_item_id,
                         episode_number=episode_target.episode_number,
                         overview=episode.overview,
+                        air_date=episode.air_date,
                     )
                 )
-            if overview_updates:
+            if metadata_updates:
                 await run_blocking(
-                    self._apply_episode_overviews,
+                    self._apply_episode_metadata,
                     target,
-                    tuple(overview_updates),
+                    tuple(metadata_updates),
                 )
             for episode_target in target.episodes:
                 episode = remote_episodes.get(episode_target.episode_number)
@@ -649,12 +652,12 @@ class ArtworkCache:
 
         return tuple(await asyncio.gather(*(resolve(target) for target in targets)))
 
-    def _apply_episode_overviews(
+    def _apply_episode_metadata(
         self,
         target: SeasonArtworkTarget,
-        updates: tuple[EpisodeOverviewUpdate, ...],
+        updates: tuple[EpisodeMetadataUpdate, ...],
     ) -> None:
-        """Persist current-provider episode descriptions without bypassing local locks."""
+        """Persist current-provider episode metadata without bypassing local locks."""
 
         def apply(session: Session) -> None:
             season = session.get(Zaisan, target.library_item_id)
@@ -691,6 +694,10 @@ class ArtworkCache:
                 ):
                     continue
                 apply_unlocked_overview(episode, update.overview)
+                if update.air_date is not None and MetadataField.RELEASE_DATE not in locked_fields(
+                    episode
+                ):
+                    episode.air_date = update.air_date
 
         self.database.run_transaction(apply)
 

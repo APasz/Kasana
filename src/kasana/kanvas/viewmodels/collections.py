@@ -2,9 +2,42 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from kasana.kanvas.viewmodels.library import PosterView
+from kasana.katalog.public import (
+    MAX_WATCH_ORDER_ENTRIES,
+    CollectionRelationship,
+    LibraryItemKind,
+    WatchOrderKind,
+)
+
+
+class CollectionMembershipStateView(BaseModel):
+    """The action available for an item while browsing a collection."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    item_id: int = Field(gt=0, alias="itemId")
+    state: Literal["absent", "direct", "inherited"]
+    relationship: CollectionRelationship | None = None
+    inherited_from_id: int | None = Field(default=None, gt=0, alias="inheritedFromId")
+    inherited_from_title: str | None = Field(default=None, alias="inheritedFromTitle")
+
+
+class CollectionModeView(BaseModel):
+    """Collection identity and a bounded page of membership controls."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    id: int = Field(gt=0)
+    name: str
+    item_count: int = Field(ge=0, alias="itemCount")
+    revision: int = Field(ge=1)
+    artwork_item_id: int | None = Field(default=None, gt=0, alias="artworkItemId")
+    items: tuple[CollectionMembershipStateView, ...] = ()
 
 
 class CollectionTileView(BaseModel):
@@ -85,47 +118,46 @@ class ItemPickerView(BaseModel):
     poster_url: str | None = Field(default=None, alias="posterUrl")
 
 
-class CollectionBuilderSearchResultView(BaseModel):
-    """One searchable library result with its current direct-membership state."""
+class WatchOrderItemView(BaseModel):
+    """Media identity shared by order entries and the source picker."""
 
     model_config = ConfigDict(frozen=True)
 
-    poster: PosterView
-    kind: str = Field(min_length=1, max_length=32)
-    already_member: bool = Field(alias="alreadyMember")
-    relationship: str | None = Field(default=None, max_length=32)
+    title: str = Field(min_length=1, max_length=1_000)
+    kind: LibraryItemKind
+    year: int | None = Field(default=None, ge=1, le=9999)
+    parent_id: int | None = Field(default=None, gt=0, alias="parentId")
+    series_title: str | None = Field(default=None, max_length=1_000, alias="seriesTitle")
+    season_number: int | None = Field(default=None, ge=0, alias="seasonNumber")
+    episode_number: int | None = Field(default=None, ge=0, alias="episodeNumber")
+    episode_end_number: int | None = Field(default=None, ge=0, alias="episodeEndNumber")
+    episode_end_season_number: int | None = Field(
+        default=None, ge=0, alias="episodeEndSeasonNumber"
+    )
+    available: bool
 
 
-class WatchOrderRowView(BaseModel):
-    """One order entry with the shared poster representation used by Kanvas grids."""
-
-    model_config = ConfigDict(frozen=True)
+class WatchOrderRowView(WatchOrderItemView):
+    """One explicit, ordered library item."""
 
     id: int = Field(gt=0)
     position: int = Field(ge=0)
     item_id: int = Field(gt=0, alias="itemId")
-    title: str = Field(min_length=1, max_length=1_000)
-    kind: str = Field(min_length=1, max_length=32)
-    year: int | None = Field(default=None, ge=1, le=9999)
-    available: bool
     poster_url: str | None = Field(default=None, alias="posterUrl")
     poster: PosterView | None = None
 
 
-class WatchOrderSourceView(BaseModel):
+class WatchOrderSourceView(WatchOrderItemView):
     """A collection item that may add itself or its playable descendants as one block."""
 
     model_config = ConfigDict(frozen=True)
 
     id: int = Field(gt=0)
-    title: str = Field(min_length=1, max_length=1_000)
-    kind: str = Field(min_length=1, max_length=32)
-    year: int | None = Field(default=None, ge=1, le=9999)
-    series_title: str | None = Field(default=None, max_length=1_000, alias="seriesTitle")
-    season_number: int | None = Field(default=None, ge=0, alias="seasonNumber")
-    entry_count: int = Field(ge=0, le=5_000, alias="entryCount")
+    entry_count: int = Field(ge=0, le=MAX_WATCH_ORDER_ENTRIES, alias="entryCount")
+    item_ids: tuple[int, ...] = Field(
+        default=(), max_length=MAX_WATCH_ORDER_ENTRIES, alias="itemIds"
+    )
     addable: bool
-    available: bool
     poster: PosterView
 
 
@@ -135,8 +167,12 @@ class WatchOrderWorkspaceView(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     revision: int = Field(ge=1)
-    entries: tuple[WatchOrderRowView, ...] = Field(default=(), max_length=10_000)
-    sources: tuple[WatchOrderSourceView, ...] = Field(default=(), max_length=10_000)
+    name: str = ""
+    kind: WatchOrderKind = WatchOrderKind.CUSTOM
+    kinds: tuple[WatchOrderKind, ...] = tuple(WatchOrderKind)
+    entry_limit: int = Field(default=MAX_WATCH_ORDER_ENTRIES, alias="entryLimit")
+    entries: tuple[WatchOrderRowView, ...] = Field(default=(), max_length=MAX_WATCH_ORDER_ENTRIES)
+    sources: tuple[WatchOrderSourceView, ...] = ()
 
 
 class WatchOrderEditorView(BaseModel):
@@ -164,7 +200,9 @@ class GenerationPreviewView(BaseModel):
     apply_mode: str = Field(min_length=1, max_length=32, alias="applyMode")
     entries: tuple[WatchOrderRowView, ...]
     undated_titles: tuple[str, ...] = Field(default=(), alias="undatedTitles")
+    undated_item_ids: tuple[int, ...] = Field(default=(), alias="undatedItemIds")
     unavailable_titles: tuple[str, ...] = Field(default=(), alias="unavailableTitles")
     duplicate_titles: tuple[str, ...] = Field(default=(), alias="duplicateTitles")
     non_playable_titles: tuple[str, ...] = Field(default=(), alias="nonPlayableTitles")
     removed_entry_titles: tuple[str, ...] = Field(default=(), alias="removedEntryTitles")
+    preview_token: str | None = Field(default=None, alias="previewToken")

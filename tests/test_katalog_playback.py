@@ -17,7 +17,7 @@ from typing import cast
 import httpx
 import pytest
 import uvicorn
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, select
 from starlette.types import Message, Scope
 
 from kasana.katalog.api.app import create_app
@@ -35,6 +35,7 @@ from kasana.katalog.limits import MAX_PLAYBACK_QUEUE_SIZE
 from kasana.katalog.models import (
     AvailabilityState,
     DownloadGrant,
+    KeiroEntry,
     KeiroKind,
     MediaFile,
     PlaybackLaunchToken,
@@ -2152,3 +2153,116 @@ def _write_sparse_media(path: Path, *, prefix: bytes) -> None:
     with path.open("wb") as media_file:
         media_file.write(prefix)
         media_file.truncate(64 * 1024)
+
+
+async def test_long_watch_orders_keep_complete_sessions_with_bounded_browser_responses(
+    playback_fixture: PlaybackFixture, tmp_path: Path
+) -> None:
+    with playback_fixture.database.transaction() as session:
+        movie = session.get(Zaisan, playback_fixture.ids["movie"])
+        assert movie is not None
+        for index in range(998):
+            item = create_library_item(
+                session,
+                library_root_id=movie.library_root_id,
+                item_kind=ZaisanKind.MOVIE,
+                title=f"Long order {index}",
+            )
+            path = tmp_path / "library" / f"long-order-{index}.mkv"
+            path.write_bytes(b"test")
+            attach_media_file(
+                session,
+                library_item_id=item.id,
+                absolute_path=path,
+                size_bytes=4,
+                mtime_ns=path.stat().st_mtime_ns,
+                container="matroska",
+            )
+            session.add(
+                KeiroEntry(
+                    watch_order_id=playback_fixture.ids["watch_order"],
+                    library_item_id=item.id,
+                    position=index + 3,
+                )
+            )
+    response = await playback_fixture.client.post(
+        "/api/v1/playback/plans",
+        json={
+            "user_id": playback_fixture.ids["user"],
+            "context": {
+                "kind": "watch_order",
+                "watch_order_id": playback_fixture.ids["watch_order"],
+            },
+            "response_window_size": 2,
+        },
+    )
+    assert response.status_code == 201, response.text
+    plan = (
+        await playback_fixture.client.get(
+            f"/api/v1/playback/plans/{response.json()['launch_token']}"
+        )
+    ).json()
+    assert plan["total_entry_count"] == 1001
+    assert [entry["position"] for entry in plan["entries"]] == [0, 1]
+    for position in range(1, 4):
+        advanced = await playback_fixture.client.post(
+            f"/api/v1/playback/sessions/{plan['id']}/advance"
+        )
+        assert advanced.status_code == 200, advanced.text
+        state = advanced.json()
+        assert state["current_entry_position"] == position
+        assert [entry["position"] for entry in state["entries"]] == [position - 1, position]
+        assert state["current_item"]["next_entry"]["position"] == position + 1
+    with playback_fixture.database.transaction() as session:
+        saved = session.get(PlaybackSession, plan["id"])
+        assert saved is not None
+        saved.current_entry_position = 999
+    last = await playback_fixture.client.post(f"/api/v1/playback/sessions/{plan['id']}/advance")
+    assert last.status_code == 200, last.text
+    assert last.json()["current_entry_position"] == 1000
+    assert last.json()["current_item"]["next_entry"] is None
+    full = await playback_fixture.client.post(
+        "/api/v1/playback/plans",
+        json={
+            "user_id": playback_fixture.ids["user"],
+            "context": {
+                "kind": "watch_order",
+                "watch_order_id": playback_fixture.ids["watch_order"],
+            },
+        },
+    )
+    assert full.status_code == 201, full.text
+    full_plan = await playback_fixture.client.get(
+        f"/api/v1/playback/plans/{full.json()['launch_token']}"
+    )
+    assert full_plan.status_code == 200, full_plan.text
+    assert len(full_plan.json()["entries"]) == 1001
+    with playback_fixture.database.transaction() as session:
+        saved = session.get(PlaybackSession, plan["id"])
+        assert saved is not None
+        saved.current_entry_position = 1
+        session.execute(
+            delete(KeiroEntry).where(
+                KeiroEntry.watch_order_id == playback_fixture.ids["watch_order"],
+                KeiroEntry.position > 2,
+            )
+        )
+    continuation = await playback_fixture.client.post(
+        "/api/v1/playback/plans",
+        json={
+            "user_id": playback_fixture.ids["user"],
+            "context": {
+                "kind": "watch_order",
+                "watch_order_id": playback_fixture.ids["watch_order"],
+                "source_session_id": plan["id"],
+            },
+        },
+    )
+    assert continuation.status_code == 201, continuation.text
+    continued = await playback_fixture.client.get(
+        f"/api/v1/playback/plans/{continuation.json()['launch_token']}"
+    )
+    assert continued.status_code == 200, continued.text
+    assert len(continued.json()["entries"]) == 1000
+    assert continued.json()["entries"][0]["item_id"] == playback_fixture.ids["episode_one"]
+    assert continued.json()["entries"][-1]["item_id"] == full_plan.json()["entries"][-1]["item_id"]

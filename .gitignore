@@ -24,3 +24,4 @@ configs/users/*
 configs/*
 .local/*
 logs.old/*
+docs/*

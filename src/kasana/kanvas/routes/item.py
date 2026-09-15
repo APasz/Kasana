@@ -115,6 +115,11 @@ async def render_item(
                     playback_session.id if playback_session is not None else None,
                     editor_tab,
                 )
+                if profile.is_administrator:
+                    mount_browser_component(
+                        BrowserComponent.COLLECTION_TOGGLE,
+                        {"item-id": detail.id, "item-title": detail.title},
+                    ).props("hidden")
 
         _included_collections(detail)
 

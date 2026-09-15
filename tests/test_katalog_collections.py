@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from sqlalchemy import select
@@ -9,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from kasana.katalog.api.contracts import (
     CollectionCreate,
+    CollectionDetailsUpdate,
     CollectionMembershipAddition,
     CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
     CollectionMembershipRelationshipUpdate,
     CollectionMembershipUpdate,
     CollectionRelationship,
@@ -24,6 +28,7 @@ from kasana.katalog.api.contracts import (
     WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
     WatchOrderKind,
+    WatchOrderUpdate,
 )
 from kasana.katalog.api.service import (
     CatalogueConflictError,
@@ -248,9 +253,7 @@ def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
         collection.collection_id,
         CollectionMembershipBatchRequest(
             expected_revision=series.revision,
-            additions=(
-                CollectionMembershipAddition(library_item_id=library["first_episode"]),
-            ),
+            additions=(CollectionMembershipAddition(library_item_id=library["first_episode"]),),
             relationship_updates=(
                 CollectionMembershipRelationshipUpdate(
                     library_item_id=library["movie"],
@@ -711,3 +714,329 @@ def test_watch_order_unavailability_distinguishes_non_playable_members(
         )
 
     assert database.run_transaction(availability) == (True, False, True)
+
+
+def test_collection_details_and_titles_save_together(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Original"))
+    result = queries.batch_collection_memberships(
+        collection.collection_id,
+        CollectionMembershipBatchRequest(
+            expected_revision=1,
+            details=CollectionDetailsUpdate(name="Stargate", overview="A complete order"),
+            additions=(CollectionMembershipAddition(library_item_id=library["series"]),),
+        ),
+    )
+    detail = queries.get_collection(collection.collection_id)
+    assert (result.revision, detail.name, detail.overview) == (2, "Stargate", "A complete order")
+    assert [member.item.id for member in detail.members] == [library["series"]]
+    with pytest.raises(CatalogueValidationError):
+        queries.batch_collection_memberships(
+            collection.collection_id,
+            CollectionMembershipBatchRequest(
+                expected_revision=2,
+                details=CollectionDetailsUpdate(name="Invalid", artwork_item_id=library["movie"]),
+                additions=(CollectionMembershipAddition(library_item_id=library["movie"]),),
+            ),
+        )
+    unchanged = queries.get_collection(collection.collection_id)
+    assert unchanged == detail
+
+
+def test_full_order_save_preserves_entry_ids_and_rolls_back_invalid_edits(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(expected_collection_revision=1, name="Draft", kind=WatchOrderKind.CUSTOM),
+    )
+    ids = (library["first_episode"], library["movie"], library["second_episode"])
+    queries.update_watch_order(
+        order.watch_order_id, WatchOrderUpdate(expected_revision=1, item_ids=ids)
+    )
+    first = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+    result = queries.update_watch_order(
+        order.watch_order_id,
+        WatchOrderUpdate(
+            expected_revision=2,
+            name="Recommended",
+            kind=WatchOrderKind.RECOMMENDED,
+            item_ids=tuple(reversed(ids)),
+        ),
+    )
+    saved = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+    assert result.revision == 3
+    assert saved.watch_order.name == "Recommended"
+    assert [entry.item.id for entry in saved.entries.items] == list(reversed(ids))
+    assert [entry.id for entry in saved.entries.items] == [
+        entry.id for entry in reversed(first.entries.items)
+    ]
+    with pytest.raises(CatalogueValidationError, match="playable"):
+        queries.update_watch_order(
+            order.watch_order_id,
+            WatchOrderUpdate(expected_revision=3, name="Bad draft", item_ids=(library["series"],)),
+        )
+    assert queries.get_watch_order(order.watch_order_id, cursor=None, limit=10) == saved
+    queries.update_watch_order(
+        order.watch_order_id, WatchOrderUpdate(expected_revision=3, item_ids=())
+    )
+    assert queries.get_watch_order(order.watch_order_id, cursor=None, limit=10).entries.items == ()
+
+
+def test_generation_preview_matches_merge_and_rejects_changed_collection(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    members = queries.batch_collection_memberships(
+        collection.collection_id,
+        CollectionMembershipBatchRequest(
+            expected_revision=1,
+            additions=(CollectionMembershipAddition(library_item_id=library["series"]),),
+        ),
+    )
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=members.revision,
+            name="Chronological",
+            kind=WatchOrderKind.CHRONOLOGICAL,
+        ),
+    )
+    queries.update_watch_order(
+        order.watch_order_id,
+        WatchOrderUpdate(expected_revision=1, item_ids=(library["second_episode"],)),
+    )
+    request = WatchOrderGenerationRequest(
+        expected_revision=2,
+        mode=WatchOrderGenerationMode.AIR,
+        apply_mode=WatchOrderGenerationApplyMode.MERGE,
+    )
+    preview = queries.preview_watch_order_generation(order.watch_order_id, request)
+    assert [item.id for item in preview.entries] == [
+        library["second_episode"],
+        library["first_episode"],
+    ]
+    applied = queries.apply_watch_order_generation(
+        order.watch_order_id, request.model_copy(update={"preview_token": preview.preview_token})
+    )
+    saved = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+    assert [entry.item.id for entry in saved.entries.items] == [item.id for item in preview.entries]
+    request = request.model_copy(update={"expected_revision": applied.revision})
+    preview = queries.preview_watch_order_generation(order.watch_order_id, request)
+    queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(
+            expected_revision=order.collection_revision, library_item_id=library["movie"]
+        ),
+    )
+    with pytest.raises(CatalogueConflictError, match="preview changed"):
+        queries.apply_watch_order_generation(
+            order.watch_order_id,
+            request.model_copy(update={"preview_token": preview.preview_token}),
+        )
+    assert queries.get_watch_order(order.watch_order_id, cursor=None, limit=10) == saved
+
+
+def test_generated_orders_use_episode_dates_and_natural_ties_and_can_be_copied(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    with database.transaction() as session:
+        for key, title in (("first_episode", "Z title"), ("second_episode", "A title")):
+            item = session.get(Zaisan, library[key])
+            assert item is not None
+            item.title = title
+            item.sort_title = title
+            item.release_date = None
+            item.air_date = date(2010, 1, 1)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    queries.add_collection_membership(
+        collection.collection_id,
+        CollectionMembershipCreate(expected_revision=1, library_item_id=library["series"]),
+    )
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=2,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+            generation_mode=WatchOrderGenerationMode.RELEASE,
+        ),
+    )
+    entries = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10).entries.items
+    assert [entry.item.id for entry in entries] == [
+        library["first_episode"],
+        library["second_episode"],
+    ]
+    preview = queries.preview_watch_order_generation(
+        order.watch_order_id,
+        WatchOrderGenerationRequest(expected_revision=1, mode=WatchOrderGenerationMode.RELEASE),
+    )
+    assert not preview.undated_items
+    copied = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=order.collection_revision,
+            name="Alternative",
+            kind=WatchOrderKind.RECOMMENDED,
+            copy_from_order_id=order.watch_order_id,
+        ),
+    )
+    copied_entries = queries.get_watch_order(
+        copied.watch_order_id, cursor=None, limit=10
+    ).entries.items
+    assert [entry.item.id for entry in copied_entries] == [entry.item.id for entry in entries]
+    assert not {entry.id for entry in copied_entries}.intersection(entry.id for entry in entries)
+    with pytest.raises(CatalogueNotFoundError):
+        queries.create_watch_order(
+            collection.collection_id,
+            WatchOrderCreate(
+                expected_collection_revision=copied.collection_revision,
+                name="Invalid copy",
+                kind=WatchOrderKind.CUSTOM,
+                copy_from_order_id=999_999,
+            ),
+        )
+    assert queries.get_collection(collection.collection_id).watch_order_count == 2
+
+
+def test_collection_sources_page_unique_descendants_and_warn_on_series_removal(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    queries.batch_collection_memberships(
+        collection.collection_id,
+        CollectionMembershipBatchRequest(
+            expected_revision=1,
+            additions=tuple(
+                CollectionMembershipAddition(library_item_id=library[key])
+                for key in ("series", "first_episode")
+            ),
+        ),
+    )
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=2,
+            name="Release",
+            kind=WatchOrderKind.CUSTOM,
+            generation_mode=WatchOrderGenerationMode.AIR,
+        ),
+    )
+    cursor = None
+    ids: list[int] = []
+    while True:
+        page = queries.list_collection_sources(collection.collection_id, cursor=cursor, limit=2)
+        ids.extend(item.id for item in page.items)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    assert len(ids) == len(set(ids)) == 5
+    assert library["first_episode"] in ids and library["second_episode"] in ids
+    assert library["movie"] not in ids
+    removed = queries.remove_collection_membership(
+        collection.collection_id, library["series"], expected_revision=order.collection_revision
+    )
+    assert removed.warnings == ("Series: 2 watch-order entries remain.",)
+    assert (
+        len(queries.get_watch_order(order.watch_order_id, cursor=None, limit=10).entries.items) == 2
+    )
+
+
+def test_simultaneous_order_saves_cannot_share_a_revision(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(
+            expected_collection_revision=1, name="Original", kind=WatchOrderKind.CUSTOM
+        ),
+    )
+    barrier = Barrier(2)
+
+    def save(name: str) -> bool:
+        barrier.wait(timeout=5)
+        try:
+            queries.update_watch_order(
+                order.watch_order_id, WatchOrderUpdate(expected_revision=1, name=name)
+            )
+        except CatalogueConflictError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(save, ("First", "Second")))
+    assert sorted(results) == [False, True]
+    assert (
+        queries.get_watch_order(order.watch_order_id, cursor=None, limit=1).watch_order.revision
+        == 2
+    )
+
+
+def test_membership_lookup_resolves_nearest_ancestor_and_preserves_direct_members(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    ids = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+    collection = queries.create_collection(CollectionCreate(name="Franchise"))
+    episode = ids["first_episode"]
+    season = database.run_transaction(
+        lambda session: session.scalar(select(Zaisan.parent_id).where(Zaisan.id == episode))
+    )
+    assert season is not None
+    revision = collection.revision
+
+    def change(*, add: tuple[int, ...] = (), remove: tuple[int, ...] = ()) -> None:
+        nonlocal revision
+        result = queries.batch_collection_memberships(
+            collection.collection_id,
+            CollectionMembershipBatchRequest(
+                expected_revision=revision,
+                additions=tuple(CollectionMembershipAddition(library_item_id=item) for item in add),
+                removals=remove,
+            ),
+        )
+        revision = result.revision
+
+    request = CollectionMembershipLookupRequest(
+        library_item_ids=(episode, ids["second_episode"], ids["movie"]), include_ancestors=True
+    )
+    change(add=(ids["series"],))
+    inherited = queries.lookup_collection_memberships(collection.collection_id, request)
+    assert inherited.collection.revision == revision
+    assert inherited.collection.item_count == 1
+    assert not inherited.memberships
+    assert {item.ancestor_id for item in inherited.inherited_memberships} == {ids["series"]}
+    assert {item.library_item_id for item in inherited.inherited_memberships} == {
+        episode,
+        ids["second_episode"],
+    }
+    direct_only = queries.lookup_collection_memberships(
+        collection.collection_id, CollectionMembershipLookupRequest(library_item_ids=(episode,))
+    )
+    assert not direct_only.inherited_memberships
+
+    change(add=(season, episode))
+    overlap = queries.lookup_collection_memberships(collection.collection_id, request)
+    assert [member.item.id for member in overlap.memberships] == [episode]
+    assert {item.ancestor_id for item in overlap.inherited_memberships} == {season}
+    change(remove=(episode, season))
+    fallback = queries.lookup_collection_memberships(collection.collection_id, request)
+    assert {item.ancestor_id for item in fallback.inherited_memberships} == {ids["series"]}
+    change(remove=(ids["series"],))
+    empty = queries.lookup_collection_memberships(collection.collection_id, request)
+    assert not empty.memberships and not empty.inherited_memberships
+    assert empty.collection.item_count == 0

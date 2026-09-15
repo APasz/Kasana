@@ -28,6 +28,7 @@ from kasana.kanvas.viewmodels.library import (
     PosterState,
     PosterView,
 )
+from kasana.katalog.public import LibraryItemKind
 
 from .runtime import runtime
 
@@ -138,7 +139,7 @@ async def design_page() -> None:
                         position=0,
                         itemId=1,
                         title="Pilot",
-                        kind="episode",
+                        kind=LibraryItemKind.EPISODE,
                         available=True,
                     ),
                 ),

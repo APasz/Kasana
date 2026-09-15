@@ -180,7 +180,13 @@ def watch_order_row(
         position=entry.position,
         itemId=item.id,
         title=item.title,
-        kind=item.kind.value,
+        parentId=item.parent_id,
+        seriesTitle=item.series_title,
+        seasonNumber=item.season_number,
+        episodeNumber=item.episode_number,
+        episodeEndNumber=item.episode_end_number,
+        episodeEndSeasonNumber=item.episode_end_season_number,
+        kind=item.kind,
         year=item.year,
         available=item.availability is Availability.AVAILABLE,
         posterUrl=primary_artwork_url(item),
@@ -195,16 +201,7 @@ def watch_order_row(
 def generated_row(item: LibraryItemSummary, position: int) -> WatchOrderRowView:
     """Render a generated item with a stable preview-only row identity."""
 
-    return WatchOrderRowView(
-        id=position + 1,
-        position=position,
-        itemId=item.id,
-        title=item.title,
-        kind=item.kind.value,
-        year=item.year,
-        available=item.availability is Availability.AVAILABLE,
-        posterUrl=primary_artwork_url(item),
-    )
+    return watch_order_row(WatchOrderEntryDetail(id=position + 1, position=position, item=item))
 
 
 def artwork_proxy_from_api_url(url: str) -> str | None:

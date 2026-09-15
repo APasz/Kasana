@@ -757,6 +757,7 @@ def _episode_details(
     *,
     still: ArtworkReference | None,
     overview: str | None = None,
+    air_date: date | None = None,
 ) -> EpisodeDetails:
     return EpisodeDetails(
         reference=ProviderReference(provider="fake", raw_id=episode_provider_id),
@@ -765,6 +766,7 @@ def _episode_details(
         episode_number=episode_number,
         title=f"Episode {episode_number}",
         overview=overview,
+        air_date=air_date,
         still=still,
     )
 
@@ -1016,7 +1018,10 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
                 season_number=1,
                 episode_number=2,
                 overview="Keep this local description.",
-                locked_metadata_fields=frozenset((MetadataField.OVERVIEW,)),
+                locked_metadata_fields=frozenset(
+                    (MetadataField.OVERVIEW, MetadataField.RELEASE_DATE)
+                ),
+                air_date=date(1999, 1, 1),
             )
             return root.id, series.id, season.id, first_episode.id, second_episode.id
 
@@ -1044,6 +1049,7 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
                         1,
                         still=first_still,
                         overview="A strange signal reaches Earth.",
+                        air_date=date(2000, 1, 1),
                     ),
                     _episode_details(
                         "series-1",
@@ -1052,6 +1058,7 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
                         2,
                         still=second_still,
                         overview="The crew prepares for departure.",
+                        air_date=date(2000, 1, 2),
                     ),
                 ),
             )
@@ -1082,6 +1089,13 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
         second_episode_id: "Keep this local description.",
     }
 
+    with database.transaction() as session:
+        first = session.get(Zaisan, first_episode_id)
+        second = session.get(Zaisan, second_episode_id)
+        assert first is not None and second is not None
+        assert first.air_date == date(2000, 1, 1)
+        assert second.air_date == date(1999, 1, 1)
+
     selected = await workflow.fetch_posters(
         (provider,), item_id=first_episode_id, include_variants=True
     )
@@ -1098,11 +1112,18 @@ async def test_artwork_cache_fetches_episode_stills_from_a_matched_series(
         1,
         poster=None,
         episodes=(
-            _episode_details("series-1", "episode-1", 1, 1, still=fresh_still),
+            _episode_details(
+                "series-1", "episode-1", 1, 1, still=fresh_still, air_date=date(2000, 2, 1)
+            ),
             _episode_details("series-1", "episode-2", 1, 2, still=second_still),
         ),
     )
     await workflow.fetch_posters((provider,), item_id=first_episode_id)
+    with database.transaction() as session:
+        first = session.get(Zaisan, first_episode_id)
+        assert first is not None
+        assert first.air_date == date(2000, 2, 1)
+        assert first.overview == "A strange signal reaches Earth."
 
     def records(session: Session) -> tuple[CachedArtwork, ...]:
         return tuple(session.scalars(select(CachedArtwork).order_by(CachedArtwork.id)))

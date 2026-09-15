@@ -744,11 +744,13 @@ def test_browser_player_and_watch_order_controls_explain_explicit_unavailable_sk
     collection_route = (repository_root / "src/kasana/kanvas/routes/collections.py").read_text(
         encoding="utf-8"
     )
-    script = (repository_root / "src/kasana/kanvas/static/kanvas.js").read_text(encoding="utf-8")
+    script = (repository_root / "src/kasana/kanvas/static/kanvas-watch-orders.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "Skipped unavailable entries" in player
     assert "Play available entries" in collection_route
-    assert "Use Play available entries to skip it" in script
+    assert 'class="k-watch-row__warning">Unavailable' in script
 
 
 def test_browser_playback_card_contains_a_source_less_compatibility_player() -> None:

@@ -13,12 +13,13 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.katalog.public import (
     CollectionMembershipBatchRequest,
+    CollectionMembershipLookupRequest,
     KatalogClientError,
     KatalogClientErrorKind,
-    LibraryItemKind,
     WatchOrderGenerationApplyMode,
     WatchOrderGenerationMode,
     WatchOrderKind,
+    WatchOrderUpdate,
 )
 
 from .common import (
@@ -42,6 +43,7 @@ from .common import (
     require_administrator,
     require_confirmation,
     require_profile,
+    string,
     toast_redirect,
     watch_order_mutation_error,
 )
@@ -102,6 +104,37 @@ async def collection_picker_data(collection_id: int, request: Request) -> JSONRe
     )
 
 
+@app.api_route(
+    "/kanvas/data/collections/{collection_id}/mode",
+    methods=["GET", "POST"],
+    include_in_schema=False,
+)
+async def collection_mode_data(collection_id: int, request: Request) -> JSONResponse:
+    """Return collection identity and bounded direct or inherited membership state."""
+
+    profile = await data_profile(request)
+    if profile is None:
+        return JSONResponse({"error": "Select a profile."}, status_code=401)
+    if forbidden := administration_forbidden(profile):
+        return forbidden
+    try:
+        item_ids = (
+            CollectionMembershipLookupRequest.model_validate(
+                await json_object(request)
+            ).library_item_ids
+            if request.method == "POST"
+            else ()
+        )
+        state = await KanvasKatalogService(runtime.settings, profile.user.id).collection_mode(
+            collection_id, item_ids=item_ids
+        )
+    except (ValidationError, ValueError) as error:
+        return invalid_action(str(error))
+    except KatalogClientError as error:
+        return katalog_data_error(error, "Could not load this collection.")
+    return JSONResponse(state.model_dump(by_alias=True, mode="json"))
+
+
 @app.get("/kanvas/data/collections/{collection_id}/builder/members", include_in_schema=False)
 async def collection_builder_members_data(collection_id: int, request: Request) -> JSONResponse:
     """Return one virtualised collection-pane member page for the staged builder."""
@@ -121,40 +154,6 @@ async def collection_builder_members_data(collection_id: int, request: Request) 
     return JSONResponse(
         {
             "items": [member.model_dump(by_alias=True, mode="json") for member in members],
-            "nextCursor": next_cursor,
-        }
-    )
-
-
-@app.get("/kanvas/data/collections/{collection_id}/builder/search", include_in_schema=False)
-async def collection_builder_search_data(collection_id: int, request: Request) -> JSONResponse:
-    """Return one kind-filtered library page with direct-membership state for the builder."""
-
-    profile = await data_profile(request)
-    if profile is None:
-        return JSONResponse({"error": "Select a profile."}, status_code=401)
-    if forbidden := administration_forbidden(profile):
-        return forbidden
-    search = query_text(request, "search", maximum_length=250)
-    cursor = query_text(request, "cursor", maximum_length=500)
-    try:
-        kinds = _collection_builder_kinds(request)
-    except ValueError as error:
-        return invalid_action(str(error))
-    try:
-        items, next_cursor = await KanvasKatalogService(
-            runtime.settings, profile.user.id
-        ).collection_builder_search_page(
-            collection_id,
-            cursor=cursor,
-            search=search,
-            kinds=kinds,
-        )
-    except KatalogClientError as error:
-        return katalog_data_error(error, "Katalog could not load library items.")
-    return JSONResponse(
-        {
-            "items": [item.model_dump(by_alias=True, mode="json") for item in items],
             "nextCursor": next_cursor,
         }
     )
@@ -251,7 +250,7 @@ async def collection_members_batch_action(collection_id: int, request: Request) 
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}/entries", include_in_schema=False)
 async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSONResponse:
-    """Apply add, move, or remove entry intents from the bounded row component."""
+    """Save a complete draft or apply an explicit entry operation."""
 
     profile = await require_profile(request)
     require_administrator(profile)
@@ -260,7 +259,27 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
     try:
         revision = integer(payload, "revision")
         service = KanvasKatalogService(runtime.settings, profile.user.id)
-        if operation == "add":
+        if operation == "save":
+            next_revision = await service.save_watch_order(
+                watch_order_id,
+                WatchOrderUpdate.model_validate(
+                    {
+                        "expected_revision": revision,
+                        "name": payload.get("name"),
+                        "kind": payload.get("kind"),
+                        "item_ids": payload.get("itemIds"),
+                    }
+                ),
+            )
+        elif operation == "preview":
+            preview = await service.generation_preview(
+                watch_order_id,
+                revision=revision,
+                mode=WatchOrderGenerationMode(string(payload, "mode", maximum_length=32)),
+                apply_mode=WatchOrderGenerationApplyMode.REPLACE,
+            )
+            return JSONResponse(preview.model_dump(mode="json", by_alias=True))
+        elif operation == "add":
             next_revision = await service.add_watch_order_entry(
                 watch_order_id,
                 revision=revision,
@@ -340,7 +359,7 @@ async def create_collection_action(request: Request) -> RedirectResponse:
     collection_id = await KanvasKatalogService(runtime.settings, profile.user.id).create_collection(
         name=form_required(form, "name"), overview=form_optional(form, "overview")
     )
-    return toast_redirect(request, f"/collections/{collection_id}", "Collection created")
+    return toast_redirect(request, f"/library?editCollection={collection_id}", "Collection created")
 
 
 @app.post("/kanvas/actions/collections/{collection_id}", include_in_schema=False)
@@ -416,13 +435,18 @@ async def remove_collection_member_action(
 
 @app.post("/kanvas/actions/collections/{collection_id}/watch-orders", include_in_schema=False)
 async def create_watch_order_action(collection_id: int, request: Request) -> RedirectResponse:
-    """Create an intentionally empty watch order inside the selected collection."""
+    """Create an order atomically from its chosen starting point."""
 
     profile = await require_profile(request)
     require_administrator(profile)
     form = await request.form()
     try:
         kind = WatchOrderKind(form_required(form, "kind"))
+        start = form_optional(form, "start") or "empty"
+        generation_mode = WatchOrderGenerationMode(start) if start in {"air", "release"} else None
+        copy_from_order_id = int(start.removeprefix("copy:")) if start.startswith("copy:") else None
+        if start != "empty" and generation_mode is None and copy_from_order_id is None:
+            raise ValueError("Invalid starting point.")
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Invalid watch-order kind.") from error
     watch_order_id = await KanvasKatalogService(
@@ -432,6 +456,8 @@ async def create_watch_order_action(collection_id: int, request: Request) -> Red
         collection_revision=form_integer(form, "collection_revision"),
         name=form_required(form, "name"),
         kind=kind,
+        generation_mode=generation_mode,
+        copy_from_order_id=copy_from_order_id,
     )
     return toast_redirect(request, f"/watch-orders/{watch_order_id}/edit", "Watch order created")
 
@@ -502,27 +528,11 @@ async def apply_watch_order_generation_action(
         revision=form_integer(form, "revision"),
         mode=mode,
         apply_mode=apply_mode,
+        preview_token=form_required(form, "preview_token"),
     )
     return toast_redirect(
         request, f"/watch-orders/{watch_order_id}/edit", "Generated order applied"
     )
-
-
-def _collection_builder_kinds(request: Request) -> tuple[LibraryItemKind, ...]:
-    """Parse explicit builder kind filters, defaulting to the two top-level media kinds."""
-
-    raw_kinds = tuple(request.query_params.getlist("kind"))
-    if not raw_kinds:
-        return (LibraryItemKind.MOVIE, LibraryItemKind.SERIES)
-    if len(raw_kinds) > len(LibraryItemKind):
-        raise ValueError("Too many collection builder kind filters.")
-    try:
-        kinds = tuple(LibraryItemKind(raw_kind) for raw_kind in raw_kinds)
-    except ValueError as error:
-        raise ValueError("Invalid collection builder kind filter.") from error
-    if len(set(kinds)) != len(kinds):
-        raise ValueError("Collection builder kind filters must not repeat.")
-    return kinds
 
 
 @app.get("/kanvas/artwork/{item_id}/{artwork_id}", include_in_schema=False)

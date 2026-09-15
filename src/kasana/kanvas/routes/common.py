@@ -10,6 +10,7 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 
+from kasana.kanvas.katalog_clients import katalog_client_context
 from kasana.kanvas.notifications import queue_toast
 from kasana.kanvas.profiles import ProfileSessions, SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
@@ -533,9 +534,9 @@ async def watch_order_mutation_error(
         return katalog_data_error(error, "Watch-order change could not be applied.")
     current_revision: int | None = None
     try:
-        _, _, current_revision = await KanvasKatalogService(runtime.settings).watch_order_page(
-            watch_order_id, cursor=None
-        )
+        async with katalog_client_context(runtime.settings) as client:
+            detail = await client.get_watch_order(watch_order_id, limit=1)
+        current_revision = detail.watch_order.revision
     except KatalogClientError:
         pass
     return JSONResponse(

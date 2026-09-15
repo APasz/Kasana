@@ -289,7 +289,9 @@ async def collection_detail_page(collection_id: int, request: Request) -> Respon
     profile = await page_profile(request)
     if isinstance(profile, RedirectResponse):
         return profile
-    await render_collection_detail(runtime.settings, profile, collection_id)
+    await render_collection_detail(
+        runtime.settings, profile, collection_id, cursor=request.query_params.get("cursor")
+    )
 
 
 async def collection_edit_page(collection_id: int, request: Request) -> Response | None:

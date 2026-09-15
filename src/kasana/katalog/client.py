@@ -586,6 +586,24 @@ class KatalogClient:
                 return
             cursor = page.next_cursor
 
+    async def iter_collection_sources(
+        self, collection_id: int
+    ) -> AsyncIterator[LibraryItemSummary]:
+        """Load collection descendants in bounded pages, without per-item requests."""
+
+        cursor: str | None = None
+        while True:
+            page = await self._get_model(
+                f"/api/v1/collections/{collection_id}/sources",
+                PaginatedResponse[LibraryItemSummary],
+                params=_params(cursor=cursor, limit=100),
+            )
+            for item in page.items:
+                yield item
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
     async def add_collection_member(
         self, collection_id: int, request: CollectionMembershipCreate
     ) -> CollectionMutationResult:
@@ -606,6 +624,7 @@ class KatalogClient:
             f"/api/v1/collections/{collection_id}/items/batch",
             request,
             CollectionMutationResult,
+            exclude_unset=True,
         )
 
     async def lookup_collection_memberships(
@@ -615,13 +634,22 @@ class KatalogClient:
 
         if not library_item_ids:
             return ()
-        response = await self._send_model(
-            "POST",
-            f"/api/v1/collections/{collection_id}/items/lookup",
-            CollectionMembershipLookupRequest(library_item_ids=library_item_ids),
-            CollectionMembershipLookupResponse,
+        response = await self.lookup_collection_membership_state(
+            collection_id, CollectionMembershipLookupRequest(library_item_ids=library_item_ids)
         )
         return response.memberships
+
+    async def lookup_collection_membership_state(
+        self, collection_id: int, request: CollectionMembershipLookupRequest
+    ) -> CollectionMembershipLookupResponse:
+        """Read membership, ancestry, and revision for a bounded library page."""
+
+        return await self._send_model(
+            "POST",
+            f"/api/v1/collections/{collection_id}/items/lookup",
+            request,
+            CollectionMembershipLookupResponse,
+        )
 
     async def update_collection_member(
         self, collection_id: int, library_item_id: int, request: CollectionMembershipUpdate

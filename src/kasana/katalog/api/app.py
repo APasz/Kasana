@@ -697,6 +697,22 @@ def create_app(
             limit=limit,
         )
 
+    @app.get(
+        "/api/v1/collections/{collection_id}/sources",
+        response_model=PaginatedResponse[LibraryItemSummary],
+        operation_id="v1_list_collection_sources",
+        responses=_ERROR_RESPONSES,
+    )
+    async def list_collection_sources(
+        collection_id: Annotated[int, Path(gt=0)],
+        cursor: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 100,
+        runtime: KatalogApiRuntime = Depends(_runtime),
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        return await run_blocking(
+            runtime.queries.list_collection_sources, collection_id, cursor=cursor, limit=limit
+        )
+
     @app.post(
         "/api/v1/collections/{collection_id}/items",
         response_model=CollectionMutationResult,

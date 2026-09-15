@@ -126,7 +126,7 @@ async def test_native_collection_action_queues_its_redirect_toast(monkeypatch: M
 
     response = await dashboard.create_collection_action(cast(Request, request))
 
-    assert response.headers["location"] == "/collections/4"
+    assert response.headers["location"] == "/library?editCollection=4"
     assert consume_toasts(cast(Request, request)) == (_toast("Collection created"),)
 
 

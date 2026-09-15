@@ -73,7 +73,7 @@ def collection_members(title: str, members: tuple[CollectionMemberView, ...]) ->
         .props(f'aria-label="{escape(title, quote=True)}"')
     ):
         section_title(title)
-        with ui.element("div").classes("k-child-grid"):
+        with ui.element("div").classes("k-child-grid k-child-grid--portrait"):
             for member in members:
                 poster_card(member.poster)
 
@@ -121,8 +121,17 @@ def item_picker_overlay(
     mount_browser_component(BrowserComponent.ITEM_PICKER, attributes)
 
 
+def collection_add_titles(collection_id: int) -> None:
+    """Enter collection mode through the normal library route."""
+
+    with (
+        ui.element("a").classes("k-button").props(f'href="/library?editCollection={collection_id}"')
+    ):
+        ui.label("Add titles").classes("k-button__label")
+
+
 def collection_builder_workspace(
-    *, collection_id: int, members_source: str, search_source: str, action: str, revision: int
+    *, collection_id: int, members_source: str, action: str, revision: int
 ) -> None:
     """Mount the staged, paged membership workspace used only by collection editing."""
 
@@ -131,7 +140,6 @@ def collection_builder_workspace(
         {
             "collection-id": collection_id,
             "members-source": members_source,
-            "search-source": search_source,
             "action": action,
             "revision": revision,
         },
@@ -197,10 +205,11 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
             hidden_input(name="revision", value=str(preview.revision))
             hidden_input(name="mode", value=preview.mode)
             hidden_input(name="apply_mode", value=preview.apply_mode)
+            hidden_input(name="preview_token", value=preview.preview_token or "")
             action_button("Apply generated order", primary=True, button_type=ButtonType.SUBMIT)
 
 
-def watch_order_header(editor: WatchOrderEditorView) -> None:
+def watch_order_header(editor: WatchOrderEditorView, *, show_facts: bool = True) -> None:
     """Render a quiet editor identity line shared by detail and edit routes."""
 
     with ui.element("div").classes("k-watch-order-header"):
@@ -210,9 +219,10 @@ def watch_order_header(editor: WatchOrderEditorView) -> None:
             .props(f'href="/collections/{editor.collection_id}"')
         ):
             ui.label(editor.collection_name)
-        ui.label(f"{editor.entry_count} entries · {editor.kind}").classes(
-            "k-watch-order-header__facts"
-        )
+        if show_facts:
+            ui.label(f"{editor.entry_count} entries · {editor.kind}").classes(
+                "k-watch-order-header__facts"
+            ).props("data-watch-order-facts")
 
 
 def collection_form_query(*, search: str | None) -> str:

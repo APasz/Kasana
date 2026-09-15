@@ -16,6 +16,7 @@ from kasana.katalog.limits import (
     MAX_PLAYBACK_QUEUE_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    MAX_WATCH_ORDER_ENTRIES,
 )
 from kasana.shared.profile_rules import (
     PROFILE_ACCENT_COLOUR_DEFAULT,
@@ -729,8 +730,9 @@ class CollectionCreate(APIModel):
         return normalised
 
 
-class CollectionUpdate(APIModel):
-    expected_revision: int = Field(ge=1)
+class CollectionDetailsUpdate(APIModel):
+    """Editable collection details, shared by metadata and membership saves."""
+
     name: str | None = Field(default=None, min_length=1, max_length=1_000)
     overview: str | None = Field(default=None, max_length=20_000)
     artwork_item_id: int | None = Field(default=None, gt=0)
@@ -758,6 +760,10 @@ class CollectionUpdate(APIModel):
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("Collection name cannot be null.")
         return self
+
+
+class CollectionUpdate(CollectionDetailsUpdate):
+    expected_revision: int = Field(ge=1)
 
 
 class CollectionMembership(APIModel):
@@ -802,6 +808,7 @@ class CollectionMembershipBatchRequest(APIModel):
     """Apply a staged collection membership edit under one collection revision."""
 
     expected_revision: int = Field(ge=1)
+    details: CollectionDetailsUpdate | None = None
     additions: tuple[CollectionMembershipAddition, ...] = Field(
         default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
     )
@@ -824,12 +831,18 @@ class CollectionMembershipBatchRequest(APIModel):
             ("relationship_updates", relationship_update_ids),
             ("removals", removal_ids),
         )
-        if not addition_ids and not relationship_update_ids and not removal_ids:
+        if (
+            not addition_ids
+            and not relationship_update_ids
+            and not removal_ids
+            and self.details is None
+        ):
             raise ValueError("Collection membership batch must include a change.")
-        if sum(len(item_ids) for _, item_ids in operation_ids) > MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE:
-            raise ValueError(
-                "Collection membership batch exceeds the maximum number of changes."
-            )
+        if (
+            sum(len(item_ids) for _, item_ids in operation_ids)
+            > MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+        ):
+            raise ValueError("Collection membership batch exceeds the maximum number of changes.")
         for label, item_ids in operation_ids:
             if len(set(item_ids)) != len(item_ids):
                 raise ValueError(f"Collection membership batch {label} must not repeat items.")
@@ -846,7 +859,9 @@ class CollectionMembershipBatchRequest(APIModel):
 
 
 class CollectionMembershipLookupRequest(APIModel):
-    """Bounded lookup used to mark a searched library page's direct memberships."""
+    """Bounded membership lookup, optionally including the closest member ancestor."""
+
+    include_ancestors: bool = False
 
     library_item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(
         min_length=1, max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
@@ -860,10 +875,22 @@ class CollectionMembershipLookupRequest(APIModel):
         return values
 
 
-class CollectionMembershipLookupResponse(APIModel):
-    """The direct memberships among a caller-provided, bounded item set."""
+class InheritedCollectionMembership(APIModel):
+    """An item included through a directly collected parent."""
 
+    library_item_id: int = Field(gt=0)
+    ancestor_id: int = Field(gt=0)
+    ancestor_title: str
+
+
+class CollectionMembershipLookupResponse(APIModel):
+    """Membership and collection revision read from the same snapshot."""
+
+    collection: CollectionSummary
     memberships: tuple[CollectionMembership, ...] = Field(
+        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
+    )
+    inherited_memberships: tuple[InheritedCollectionMembership, ...] = Field(
         default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
     )
 
@@ -898,6 +925,14 @@ class WatchOrderCreate(APIModel):
     expected_collection_revision: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=1_000)
     kind: WatchOrderKind
+    generation_mode: WatchOrderGenerationMode | None = None
+    copy_from_order_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_start(self) -> WatchOrderCreate:
+        if self.generation_mode is not None and self.copy_from_order_id is not None:
+            raise ValueError("Choose dates or an existing order as the starting point.")
+        return self
 
     @field_validator("name")
     @classmethod
@@ -912,6 +947,9 @@ class WatchOrderUpdate(APIModel):
     expected_revision: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=1_000)
     kind: WatchOrderKind | None = None
+    item_ids: tuple[Annotated[int, Field(gt=0)], ...] | None = Field(
+        default=None, max_length=MAX_WATCH_ORDER_ENTRIES
+    )
 
     @field_validator("name")
     @classmethod
@@ -925,10 +963,14 @@ class WatchOrderUpdate(APIModel):
 
     @model_validator(mode="after")
     def require_change(self) -> Self:
-        if not {"name", "kind"}.intersection(self.model_fields_set):
-            raise ValueError("Watch-order update must include name or kind.")
+        if not {"name", "kind", "item_ids"}.intersection(self.model_fields_set):
+            raise ValueError("Watch-order update must include a change.")
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("Watch-order name cannot be null.")
+        if "item_ids" in self.model_fields_set and self.item_ids is None:
+            raise ValueError("Watch-order entries cannot be null.")
+        if self.item_ids is not None and len(set(self.item_ids)) != len(self.item_ids):
+            raise ValueError("A watch order cannot contain duplicate items.")
         return self
 
 
@@ -949,7 +991,9 @@ class WatchOrderEntriesCreate(APIModel):
     """Insert a contiguous block of playable items into a watch order."""
 
     expected_revision: int = Field(ge=1)
-    library_item_ids: tuple[int, ...] = Field(min_length=1, max_length=5_000)
+    library_item_ids: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1, max_length=MAX_WATCH_ORDER_ENTRIES
+    )
     insert_before_entry_id: int | None = Field(default=None, gt=0)
     insert_after_entry_id: int | None = Field(default=None, gt=0)
 
@@ -978,6 +1022,7 @@ class WatchOrderGenerationRequest(APIModel):
     expected_revision: int = Field(ge=1)
     mode: WatchOrderGenerationMode
     apply_mode: WatchOrderGenerationApplyMode = WatchOrderGenerationApplyMode.REPLACE
+    preview_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class WatchOrderEntryDetail(APIModel):
@@ -995,6 +1040,7 @@ class WatchOrderGenerationPreview(APIModel):
     unavailable_items: tuple[LibraryItemSummary, ...] = ()
     duplicate_items: tuple[LibraryItemSummary, ...] = ()
     non_playable_items: tuple[LibraryItemSummary, ...] = ()
+    preview_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class CollectionMutationResult(APIModel):
@@ -1245,6 +1291,9 @@ class SeriesPlaybackContext(APIModel):
 class WatchOrderPlaybackContext(APIModel):
     kind: Literal[PlaybackContextKind.WATCH_ORDER] = PlaybackContextKind.WATCH_ORDER
     watch_order_id: int = Field(gt=0)
+    source_session_id: str | None = Field(
+        default=None, min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"
+    )
     start_item_id: int | None = Field(default=None, gt=0)
     resume: bool = False
     skip_unavailable: bool = False
@@ -1254,6 +1303,10 @@ class WatchOrderPlaybackContext(APIModel):
         if self.resume and self.start_item_id is not None:
             msg = "A watch-order context cannot combine resume with start_item_id."
             raise ValueError(msg)
+        if self.source_session_id is not None and (
+            self.resume or self.start_item_id is not None or self.skip_unavailable
+        ):
+            raise ValueError("A session continuation uses its saved position and sequence.")
         return self
 
 
@@ -1281,6 +1334,7 @@ type PlaybackPlanContext = Annotated[
 class PlaybackPlanRequest(APIModel):
     user_id: int = Field(gt=0)
     context: PlaybackPlanContext
+    response_window_size: int | None = Field(default=None, ge=2, le=MAX_PLAYBACK_QUEUE_SIZE)
 
 
 class PlaybackPlanLaunch(APIModel):
@@ -1363,13 +1417,14 @@ class PlaybackSessionResponse(APIModel):
     context: PlaybackContext
     current_entry_position: int = Field(ge=0)
     current_item: PlaybackPlanEntry | None = None
-    entries: tuple[PlaybackPlanEntry, ...] = Field(min_length=1, max_length=MAX_PLAYBACK_QUEUE_SIZE)
+    entries: tuple[PlaybackPlanEntry, ...] = Field(min_length=1, max_length=MAX_WATCH_ORDER_ENTRIES)
+    total_entry_count: int | None = Field(default=None, ge=1, le=MAX_WATCH_ORDER_ENTRIES)
     created_at: datetime
     expires_at: datetime
     closed_at: datetime | None
     last_event: PlaybackSessionEvent | None = None
     skipped_unavailable_titles: tuple[str, ...] = Field(
-        default=(), max_length=MAX_PLAYBACK_QUEUE_SIZE
+        default=(), max_length=MAX_WATCH_ORDER_ENTRIES
     )
 
 

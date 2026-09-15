@@ -50,9 +50,10 @@ from kasana.kanvas.viewmodels.administration import (
     overview_from_status,
 )
 from kasana.kanvas.viewmodels.collections import (
-    CollectionBuilderSearchResultView,
     CollectionDetailView,
+    CollectionMembershipStateView,
     CollectionMemberView,
+    CollectionModeView,
     CollectionTileView,
     GenerationPreviewView,
     ItemPickerView,
@@ -101,6 +102,7 @@ from kasana.katalog.public import (
     CollectionMembership,
     CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
+    CollectionMembershipLookupRequest,
     CollectionMembershipUpdate,
     CollectionRelationship,
     CollectionSummary,
@@ -150,6 +152,7 @@ from kasana.katalog.public import (
     WatchOrderGenerationRequest,
     WatchOrderKind,
     WatchOrderSummary,
+    WatchOrderUpdate,
 )
 from kasana.katalog.public import (
     SystemIncidentCode as KatalogSystemIncidentCode,
@@ -166,7 +169,6 @@ _COLLECTION_MEMBER_PAGE_SIZE = 100
 _COLLECTION_BUILDER_PAGE_SIZE = 48
 _COLLECTION_WATCH_ORDER_PAGE_SIZE = 100
 _WATCH_ORDER_ENTRY_PAGE_SIZE = 100
-_WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE = 100
 _PICKER_PAGE_SIZE = 48
 _LOGGER = logging.getLogger(__name__)
 
@@ -886,14 +888,18 @@ class KanvasKatalogService:
             details = await gather(*(client.get_collection(summary.id) for summary in page.items))
         return tuple(collection_tile(detail) for detail in details), page.next_cursor
 
-    async def collection_detail(self, collection_id: int) -> CollectionDetailView:
+    async def collection_detail(
+        self, collection_id: int, *, cursor: str | None = None
+    ) -> CollectionDetailView:
         """Build a direct-member detail view with complete watch-order cards."""
 
         user_id = self._required_user_id()
         async with self._client() as client:
             detail, members_page = await gather(
                 client.get_collection(collection_id, user_id=user_id),
-                client.list_collection_members(collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE),
+                client.list_collection_members(
+                    collection_id, cursor=cursor, limit=_COLLECTION_MEMBER_PAGE_SIZE
+                ),
             )
             watch_orders = (
                 detail.watch_orders
@@ -926,6 +932,48 @@ class KanvasKatalogService:
                 playback_user_id=None,
                 member_next_cursor=None,
             )
+
+    async def collection_mode(
+        self, collection_id: int, *, item_ids: tuple[int, ...] = ()
+    ) -> CollectionModeView:
+        """Read collection state and membership for the currently mounted library items."""
+
+        states: list[CollectionMembershipStateView] = []
+        async with self._client() as client:
+            if item_ids:
+                result = await client.lookup_collection_membership_state(
+                    collection_id,
+                    CollectionMembershipLookupRequest(
+                        library_item_ids=item_ids, include_ancestors=True
+                    ),
+                )
+                collection = result.collection
+                direct = {member.item.id: member for member in result.memberships}
+                inherited = {
+                    member.library_item_id: member for member in result.inherited_memberships
+                }
+                for item_id in item_ids:
+                    member = direct.get(item_id)
+                    ancestor = inherited.get(item_id)
+                    states.append(
+                        CollectionMembershipStateView(
+                            itemId=item_id,
+                            state="direct" if member else "inherited" if ancestor else "absent",
+                            relationship=member.relationship if member else None,
+                            inheritedFromId=ancestor.ancestor_id if ancestor else None,
+                            inheritedFromTitle=ancestor.ancestor_title if ancestor else None,
+                        )
+                    )
+            else:
+                collection = await client.get_collection(collection_id)
+        return CollectionModeView(
+            id=collection.id,
+            name=collection.name,
+            itemCount=collection.item_count,
+            revision=collection.revision,
+            artworkItemId=collection.artwork_item_id,
+            items=tuple(states),
+        )
 
     async def collection_builder_context(self, collection_id: int) -> CollectionDetailView:
         """Load a bounded member context while preserving separate watch-order editing."""
@@ -966,45 +1014,6 @@ class KanvasKatalogService:
             tuple(
                 collection_member(membership.item, membership.relationship)
                 for membership in page.items
-            ),
-            page.next_cursor,
-        )
-
-    async def collection_builder_search_page(
-        self,
-        collection_id: int,
-        *,
-        cursor: str | None,
-        search: str | None,
-        kinds: tuple[LibraryItemKind, ...],
-    ) -> tuple[tuple[CollectionBuilderSearchResultView, ...], str | None]:
-        """Search one library page and look up membership state only for its results."""
-
-        async with self._client() as client:
-            page = await client.list_library_items(
-                cursor=cursor,
-                limit=_COLLECTION_BUILDER_PAGE_SIZE,
-                kinds=kinds,
-                search=search,
-            )
-            memberships = await client.lookup_collection_memberships(
-                collection_id, tuple(item.id for item in page.items)
-            )
-        relationships_by_item_id = {
-            membership.item.id: (
-                membership.relationship.value if membership.relationship is not None else None
-            )
-            for membership in memberships
-        }
-        return (
-            tuple(
-                CollectionBuilderSearchResultView(
-                    poster=poster_from_summary(item),
-                    kind=item.kind.value,
-                    alreadyMember=item.id in relationships_by_item_id,
-                    relationship=relationships_by_item_id.get(item.id),
-                )
-                for item in page.items
             ),
             page.next_cursor,
         )
@@ -1058,42 +1067,21 @@ class KanvasKatalogService:
     async def watch_order_workspace(self, watch_order_id: int) -> WatchOrderWorkspaceView:
         """Load one order and all collection-backed sources eligible to extend it."""
 
-        user_id = self._required_user_id()
         async with self._client() as client:
-            detail = await client.get_watch_order(watch_order_id, limit=1, user_id=user_id)
+            detail = await client.get_watch_order(watch_order_id, limit=1)
             entry_list: list[WatchOrderEntryDetail] = []
             async for entry in client.iter_watch_order_entries(
                 watch_order_id, limit=_WATCH_ORDER_ENTRY_PAGE_SIZE
             ):
                 entry_list.append(entry)
             existing_entries = tuple(entry_list)
-            entry_playback_states, sources = await gather(
-                _poster_playback_states(
-                    client,
-                    user_id,
-                    (entry.item.id for entry in existing_entries),
-                ),
-                self._watch_order_sources(
-                    client,
-                    detail.watch_order.collection_id,
-                    include_playback=True,
-                ),
-            )
-        existing_item_ids = frozenset(entry.item.id for entry in existing_entries)
-        available_sources = tuple(
-            source for source, item_ids in sources if not existing_item_ids.intersection(item_ids)
-        )
+            sources = await self._watch_order_sources(client, detail.watch_order.collection_id)
         return WatchOrderWorkspaceView(
             revision=detail.watch_order.revision,
-            entries=tuple(
-                watch_order_row(
-                    entry,
-                    playback=entry_playback_states.state_for(entry.item.id),
-                    partially_watched=entry_playback_states.is_partially_watched(entry.item.id),
-                )
-                for entry in existing_entries
-            ),
-            sources=available_sources,
+            name=detail.watch_order.name,
+            kind=detail.watch_order.kind,
+            entries=tuple(watch_order_row(entry) for entry in existing_entries),
+            sources=tuple(source for source, _ in sources),
         )
 
     async def item_picker_page(
@@ -1214,13 +1202,24 @@ class KanvasKatalogService:
         return result.revision, result.warnings
 
     async def create_watch_order(
-        self, collection_id: int, *, collection_revision: int, name: str, kind: WatchOrderKind
+        self,
+        collection_id: int,
+        *,
+        collection_revision: int,
+        name: str,
+        kind: WatchOrderKind,
+        generation_mode: WatchOrderGenerationMode | None = None,
+        copy_from_order_id: int | None = None,
     ) -> int:
         async with self._client() as client:
             result = await client.create_collection_watch_order(
                 collection_id,
                 WatchOrderCreate(
-                    expected_collection_revision=collection_revision, name=name, kind=kind
+                    expected_collection_revision=collection_revision,
+                    name=name,
+                    kind=kind,
+                    generation_mode=generation_mode,
+                    copy_from_order_id=copy_from_order_id,
                 ),
             )
         return result.watch_order_id
@@ -1229,6 +1228,13 @@ class KanvasKatalogService:
         self, watch_order_id: int, *, revision: int, name: str | None, kind: WatchOrderKind | None
     ) -> int:
         request = watch_order_update_request(revision=revision, name=name, kind=kind)
+        async with self._client() as client:
+            result = await client.update_watch_order(watch_order_id, request)
+        return result.revision
+
+    async def save_watch_order(self, watch_order_id: int, request: WatchOrderUpdate) -> int:
+        """Commit the reviewed name, kind and complete sequence in one revision."""
+
         async with self._client() as client:
             result = await client.update_watch_order(watch_order_id, request)
         return result.revision
@@ -1408,10 +1414,12 @@ class KanvasKatalogService:
             revision=preview.revision,
             mode=preview.mode.value,
             applyMode=apply_mode.value,
+            previewToken=preview.preview_token,
             entries=tuple(
                 generated_row(item, position) for position, item in enumerate(preview.entries)
             ),
             undatedTitles=tuple(item.title for item in preview.undated_items),
+            undatedItemIds=tuple(item.id for item in preview.undated_items),
             unavailableTitles=tuple(item.title for item in preview.unavailable_items),
             duplicateTitles=tuple(item.title for item in preview.duplicate_items),
             nonPlayableTitles=tuple(item.title for item in preview.non_playable_items),
@@ -1429,12 +1437,16 @@ class KanvasKatalogService:
         revision: int,
         mode: WatchOrderGenerationMode,
         apply_mode: WatchOrderGenerationApplyMode,
+        preview_token: str | None = None,
     ) -> int:
         async with self._client() as client:
             result = await client.apply_watch_order_generation(
                 watch_order_id,
                 WatchOrderGenerationRequest(
-                    expected_revision=revision, mode=mode, apply_mode=apply_mode
+                    expected_revision=revision,
+                    mode=mode,
+                    apply_mode=apply_mode,
+                    preview_token=preview_token,
                 ),
             )
         return result.revision
@@ -1446,47 +1458,25 @@ class KanvasKatalogService:
         *,
         include_playback: bool = False,
     ) -> tuple[tuple[WatchOrderSourceView, tuple[int, ...]], ...]:
-        """Expose direct members and every recursive child as one source card each."""
+        """Load the collection hierarchy in pages and derive playable ranges in memory."""
 
-        membership_list: list[CollectionMembership] = []
-        async for membership in client.iter_collection_members(
-            collection_id, limit=_COLLECTION_MEMBER_PAGE_SIZE
-        ):
-            membership_list.append(membership)
-        memberships = tuple(membership_list)
-        children_by_parent: dict[int, tuple[LibraryItemSummary, ...]] = {}
+        candidates = {item.id: item async for item in client.iter_collection_sources(collection_id)}
+        children_by_parent: dict[int, list[LibraryItemSummary]] = {}
+        for item in candidates.values():
+            if item.parent_id is not None:
+                children_by_parent.setdefault(item.parent_id, []).append(item)
+        for children in children_by_parent.values():
+            children.sort(key=_watch_order_child_sort_key)
 
-        async def children(item_id: int) -> tuple[LibraryItemSummary, ...]:
-            cached = children_by_parent.get(item_id)
-            if cached is not None:
-                return cached
-            loaded = tuple(
-                sorted(
-                    await self._library_children(client, item_id),
-                    key=_watch_order_child_sort_key,
-                )
-            )
-            children_by_parent[item_id] = loaded
-            return loaded
-
-        async def source_tree(item: LibraryItemSummary) -> tuple[LibraryItemSummary, ...]:
-            descendants: list[LibraryItemSummary] = [item]
-            for child in await children(item.id):
-                descendants.extend(await source_tree(child))
-            return tuple(descendants)
-
-        async def source_items(item: LibraryItemSummary) -> tuple[LibraryItemSummary, ...]:
+        def source_items(item: LibraryItemSummary) -> tuple[LibraryItemSummary, ...]:
             if item.kind in PLAYABLE_KINDS:
                 return (item,)
-            targets: list[LibraryItemSummary] = []
-            for child in await children(item.id):
-                targets.extend(await source_items(child))
-            return tuple(targets)
+            return tuple(
+                target
+                for child in children_by_parent.get(item.id, ())
+                for target in source_items(child)
+            )
 
-        candidates: dict[int, LibraryItemSummary] = {}
-        for membership in memberships:
-            for item in await source_tree(membership.item):
-                candidates.setdefault(item.id, item)
         playback_states = (
             await _poster_playback_states(
                 client,
@@ -1498,7 +1488,7 @@ class KanvasKatalogService:
         )
         sources: list[tuple[WatchOrderSourceView, tuple[int, ...]]] = []
         for item in candidates.values():
-            target_items = await source_items(item)
+            target_items = source_items(item)
             item_ids = tuple(target.id for target in target_items)
             available = (
                 all(target.availability is Availability.AVAILABLE for target in target_items)
@@ -1510,11 +1500,16 @@ class KanvasKatalogService:
                     WatchOrderSourceView(
                         id=item.id,
                         title=item.title,
-                        kind=item.kind.value,
+                        kind=item.kind,
                         year=item.year,
                         seriesTitle=item.series_title,
                         seasonNumber=item.season_number,
+                        parentId=item.parent_id,
+                        episodeNumber=item.episode_number,
+                        episodeEndNumber=item.episode_end_number,
+                        episodeEndSeasonNumber=item.episode_end_season_number,
                         entryCount=len(item_ids),
+                        itemIds=item_ids,
                         addable=bool(item_ids),
                         available=available,
                         poster=poster_from_summary(
@@ -1530,20 +1525,6 @@ class KanvasKatalogService:
                 )
             )
         return tuple(sources)
-
-    async def _library_children(
-        self, client: KatalogClient, item_id: int
-    ) -> tuple[LibraryItemSummary, ...]:
-        children: list[LibraryItemSummary] = []
-        cursor: str | None = None
-        while True:
-            page = await client.list_library_item_children(
-                item_id, cursor=cursor, limit=_WATCH_ORDER_SOURCE_CHILD_PAGE_SIZE
-            )
-            children.extend(page.items)
-            if page.next_cursor is None:
-                return tuple(children)
-            cursor = page.next_cursor
 
 
 def _administrator_system_alert_feed(

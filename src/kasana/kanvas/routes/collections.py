@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from nicegui import ui
 
 from kasana.kanvas.components.collections import (
+    collection_add_titles,
     collection_artwork,
     collection_builder_workspace,
     collection_form_query,
     collection_grid,
     collection_members,
-    generation_preview,
     watch_order_card,
     watch_order_header,
     watch_order_rows,
@@ -30,12 +32,9 @@ from kasana.kanvas.components.typography import page_title, quiet_copy, section_
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.settings import Kanvas_Settings
-from kasana.kanvas.viewmodels.collections import WatchOrderEditorView
 from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
-    WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
     WatchOrderKind,
 )
 
@@ -82,21 +81,24 @@ async def render_collection_new(settings: Kanvas_Settings, profile: SessionProfi
             text_input(
                 name="name", aria_label="Collection name", placeholder="Stargate", autofocus=True
             )
-            textarea_input(name="overview", aria_label="Overview")
             with ui.element("div").classes("k-action-row"):
                 action_button("Create", primary=True, button_type=ButtonType.SUBMIT)
                 action_button("Cancel", lambda: ui.navigate.to("/collections"))
 
 
 async def render_collection_detail(
-    settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
+    settings: Kanvas_Settings,
+    profile: SessionProfile,
+    collection_id: int,
+    *,
+    cursor: str | None = None,
 ) -> None:
     """Render bounded collection media and derived watch-order cards."""
 
     with page_shell(settings, "/collections", "Collection", profile):
         try:
             detail = await KanvasKatalogService(settings, profile.user.id).collection_detail(
-                collection_id
+                collection_id, cursor=cursor
             )
         except KatalogClientError as error:
             _collection_error(error)
@@ -128,8 +130,9 @@ async def render_collection_detail(
             with ui.element("div").classes("k-watch-order-grid"):
                 for card in detail.watch_orders:
                     watch_order_card(card)
-        else:
+        if profile.is_administrator:
             with ui.element("div").classes("k-action-row"):
+                collection_add_titles(detail.id)
                 action_button(
                     "Create watch order",
                     lambda: ui.navigate.to(f"/collections/{detail.id}/watch-orders/new"),
@@ -138,13 +141,22 @@ async def render_collection_detail(
         collection_members("Series", detail.series)
         collection_members("Other", detail.other_members)
         if detail.member_next_cursor is not None:
-            quiet_copy("More direct members are available in the editor.")
+            next_page = urlencode({"cursor": detail.member_next_cursor})
+            with (
+                ui.element("a")
+                .classes("k-button")
+                .props(f'href="/collections/{detail.id}?{next_page}"')
+            ):
+                ui.label("More titles")
+        if cursor:
+            with ui.element("a").classes("k-button").props(f'href="/collections/{detail.id}"'):
+                ui.label("First page")
 
 
 async def render_collection_edit(
     settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
 ) -> None:
-    """Render collection metadata plus the separately staged direct-member workspace."""
+    """Render one draft for collection details and titles."""
 
     with page_shell(settings, "/collections", "Edit collection", profile):
         if not profile.is_administrator:
@@ -157,50 +169,47 @@ async def render_collection_edit(
         except KatalogClientError as error:
             _collection_error(error)
             return
-        page_title(f"Edit · {detail.name}")
+        with ui.element("div").classes("k-collection-page-heading"):
+            page_title(detail.name)
+            collection_add_titles(detail.id)
         with (
-            ui.element("form")
-            .classes("k-editor-form")
-            .props(action_form_props(f"/kanvas/actions/collections/{detail.id}"))
+            ui.element("div")
+            .classes("k-collection-details")
+            .props(f'data-collection-details-for="{detail.id}"')
         ):
-            hidden_input(name="revision", value=str(detail.revision)).props(
-                f'data-collection-revision-for="{detail.id}"'
-            )
             text_input(name="name", aria_label="Collection name", value=detail.name)
-            textarea_input(name="overview", aria_label="Overview", value=detail.overview)
-            select_input(
-                name="default_watch_order_id",
-                aria_label="Default watch order",
-                options=(
-                    *(SelectOption(str(order.id), order.name) for order in detail.watch_orders),
-                )
-                if detail.watch_orders
-                else (SelectOption("", "No watch orders yet"),),
-                value=(
-                    str(detail.default_watch_order_id)
+            with ui.element("details").classes("k-collection-options"):
+                with ui.element("summary"):
+                    ui.label("Details")
+                textarea_input(name="overview", aria_label="Overview", value=detail.overview)
+                select_input(
+                    name="default_watch_order_id",
+                    aria_label="Default watch order",
+                    options=(
+                        *(SelectOption(str(order.id), order.name) for order in detail.watch_orders),
+                    )
+                    if detail.watch_orders
+                    else (SelectOption("", "No orders yet"),),
+                    value=str(detail.default_watch_order_id)
                     if detail.default_watch_order_id is not None
-                    else ""
-                ),
-            )
-            select_input(
-                name="artwork_item_id",
-                aria_label="Collection artwork",
-                options=(
-                    SelectOption("", "Poster mosaic"),
-                    *(
-                        SelectOption(str(member.poster.id), member.poster.title)
-                        for member in detail.movies + detail.series + detail.other_members
-                        if member.poster.poster_url is not None
+                    else "",
+                )
+                select_input(
+                    name="artwork_item_id",
+                    aria_label="Collection artwork",
+                    options=(
+                        SelectOption("", "Poster mosaic"),
+                        *(
+                            SelectOption(str(member.poster.id), member.poster.title)
+                            for member in detail.movies + detail.series + detail.other_members
+                            if member.poster.poster_url is not None
+                        ),
                     ),
-                ),
-                value=(str(detail.artwork_item_id) if detail.artwork_item_id is not None else ""),
-            ).props(f'data-collection-artwork-for="{detail.id}"')
-            action_button("Save", primary=True, button_type=ButtonType.SUBMIT)
-        section_title("Collection builder")
+                    value=str(detail.artwork_item_id) if detail.artwork_item_id is not None else "",
+                ).props(f'data-collection-artwork-for="{detail.id}"')
         collection_builder_workspace(
             collection_id=detail.id,
             members_source=f"/kanvas/data/collections/{detail.id}/builder/members",
-            search_source=f"/kanvas/data/collections/{detail.id}/builder/search",
             action=f"/kanvas/actions/collections/{detail.id}/members/batch",
             revision=detail.revision,
         )
@@ -213,27 +222,34 @@ async def render_collection_edit(
             with ui.element("div").classes("k-watch-order-grid"):
                 for card in detail.watch_orders:
                     watch_order_card(card, href=f"/watch-orders/{card.id}/edit")
-        with (
-            ui.element("form")
-            .classes("k-danger-zone")
-            .props(action_form_props(f"/kanvas/actions/collections/{detail.id}/delete"))
-        ):
-            hidden_input(name="revision", value=str(detail.revision)).props(
-                f'data-collection-revision-for="{detail.id}"'
-            )
-            quiet_copy("Deleting a collection keeps every library item.")
-            text_input(
-                name="confirm",
-                aria_label="Type delete to confirm collection deletion",
-                placeholder="Type delete to confirm",
-            )
-            action_button("Delete collection", button_type=ButtonType.SUBMIT)
+        with ui.element("details").classes("k-collection-options"):
+            with ui.element("summary"):
+                ui.label("Delete collection")
+            _collection_delete_form(detail.id, detail.revision)
+
+
+def _collection_delete_form(collection_id: int, revision: int) -> None:
+    with (
+        ui.element("form")
+        .classes("k-danger-zone")
+        .props(action_form_props(f"/kanvas/actions/collections/{collection_id}/delete"))
+    ):
+        hidden_input(name="revision", value=str(revision)).props(
+            f'data-collection-revision-for="{collection_id}"'
+        )
+        quiet_copy("Deleting a collection keeps every library item.")
+        text_input(
+            name="confirm",
+            aria_label="Type delete to confirm collection deletion",
+            placeholder="Type delete to confirm",
+        )
+        action_button("Delete collection", button_type=ButtonType.SUBMIT)
 
 
 async def render_watch_order_new(
     settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
 ) -> None:
-    """Render an empty watch-order creation form tied to the collection revision."""
+    """Choose dates, an existing order, or an empty starting point."""
 
     with page_shell(settings, "/collections", "New watch order", profile):
         if not profile.is_administrator:
@@ -268,7 +284,22 @@ async def render_watch_order_new(
                 ),
                 value=WatchOrderKind.CUSTOM.value,
             )
-            action_button("Create empty order", primary=True, button_type=ButtonType.SUBMIT)
+            select_input(
+                name="start",
+                aria_label="Start with",
+                options=(
+                    SelectOption("release", "Release dates"),
+                    SelectOption("air", "Air dates"),
+                    SelectOption("empty", "Empty order"),
+                    *(
+                        SelectOption(f"copy:{order.id}", f"Copy · {order.name}")
+                        for order in detail.watch_orders
+                    ),
+                ),
+                value="release",
+            )
+            quiet_copy("Dates are a starting point. You can arrange episodes and films next.")
+            action_button("Create", primary=True, button_type=ButtonType.SUBMIT)
 
 
 async def render_watch_order(
@@ -280,7 +311,7 @@ async def render_watch_order(
     preview_mode: str | None = None,
     apply_mode: str | None = None,
 ) -> None:
-    """Render a virtualised order detail/editor with optional explicit generation review."""
+    """Render the saved order or its separate draft editor."""
 
     with page_shell(settings, "/collections", "Watch order", profile):
         if editable and not profile.is_administrator:
@@ -292,11 +323,9 @@ async def render_watch_order(
         except KatalogClientError as error:
             _collection_error(error)
             return
-        page_title(editor.name)
-        watch_order_header(editor)
-        _watch_order_playback_actions(editor.id)
+        page_title(editor.name).props("data-watch-order-title")
+        watch_order_header(editor, show_facts=not editable)
         if editable:
-            _watch_order_edit_form(editor)
             watch_order_workspace(
                 source=f"/kanvas/data/watch-orders/{editor.id}/workspace",
                 action=f"/kanvas/actions/watch-orders/{editor.id}/entries",
@@ -304,6 +333,11 @@ async def render_watch_order(
                 revision=editor.revision,
             )
         else:
+            _watch_order_playback_actions(editor.id)
+            if profile.is_administrator:
+                action_button(
+                    "Edit order", lambda: ui.navigate.to(f"/watch-orders/{editor.id}/edit")
+                )
             watch_order_rows(
                 source=f"/kanvas/data/watch-orders/{editor.id}",
                 action=f"/kanvas/actions/watch-orders/{editor.id}/entries",
@@ -311,28 +345,26 @@ async def render_watch_order(
                 revision=editor.revision,
             )
         if editable:
-            _generation_controls(editor.id, editor.revision, preview_mode, apply_mode)
-            preview = await _generation_preview(
-                catalogue, editor.id, editor.revision, preview_mode, apply_mode
-            )
-            if preview is not None:
-                generation_preview(
-                    preview,
-                    apply_action=f"/kanvas/actions/watch-orders/{editor.id}/apply-generation",
-                )
-            with (
-                ui.element("form")
-                .classes("k-danger-zone")
-                .props(action_form_props(f"/kanvas/actions/watch-orders/{editor.id}/delete"))
-            ):
-                hidden_input(name="revision", value=str(editor.revision))
-                hidden_input(name="collection_id", value=str(editor.collection_id))
-                text_input(
-                    name="confirm",
-                    aria_label="Type delete to confirm watch-order deletion",
-                    placeholder="Type delete to confirm",
-                )
-                action_button("Delete watch order", button_type=ButtonType.SUBMIT)
+            with ui.element("a").classes("k-button").props(f'href="/watch-orders/{editor.id}"'):
+                ui.label("View order")
+            with ui.element("details").classes("k-collection-options"):
+                with ui.element("summary"):
+                    ui.label("Delete order")
+                with (
+                    ui.element("form")
+                    .classes("k-danger-zone")
+                    .props(action_form_props(f"/kanvas/actions/watch-orders/{editor.id}/delete"))
+                ):
+                    hidden_input(name="revision", value=str(editor.revision)).props(
+                        "data-watch-order-revision"
+                    )
+                    hidden_input(name="collection_id", value=str(editor.collection_id))
+                    text_input(
+                        name="confirm",
+                        aria_label="Type delete to confirm",
+                        placeholder="Type delete to confirm",
+                    )
+                    action_button("Delete order", button_type=ButtonType.SUBMIT)
 
 
 def _watch_order_playback_actions(watch_order_id: int) -> None:
@@ -350,78 +382,6 @@ def _watch_order_playback_actions(watch_order_id: int) -> None:
             "Play available entries",
             lambda: launch(resume=False, skip_unavailable=True),
         )
-
-
-def _watch_order_edit_form(detail: WatchOrderEditorView) -> None:
-    with (
-        ui.element("form")
-        .classes("k-editor-form k-editor-form--compact")
-        .props(action_form_props(f"/kanvas/actions/watch-orders/{detail.id}"))
-    ):
-        hidden_input(name="revision", value=str(detail.revision))
-        text_input(name="name", aria_label="Watch-order name", value=detail.name)
-        select_input(
-            name="kind",
-            aria_label="Watch-order kind",
-            options=tuple(
-                SelectOption(kind.value, kind.value.replace("_", " ").title())
-                for kind in WatchOrderKind
-            ),
-            value=detail.kind,
-        )
-        action_button("Save", button_type=ButtonType.SUBMIT)
-
-
-def _generation_controls(
-    watch_order_id: int, revision: int, preview_mode: str | None, apply_mode: str | None
-) -> None:
-    section_title("Generate")
-    with (
-        ui.element("form")
-        .classes("k-generation-controls")
-        .props(f'method="get" action="/watch-orders/{watch_order_id}/edit"')
-    ):
-        select_input(
-            name="preview",
-            aria_label="Generation date",
-            options=tuple(
-                SelectOption(mode.value, mode.value.title()) for mode in WatchOrderGenerationMode
-            ),
-            value=preview_mode or WatchOrderGenerationMode.AIR.value,
-        )
-        select_input(
-            name="apply",
-            aria_label="Generation application",
-            options=tuple(
-                SelectOption(mode.value, mode.value.title())
-                for mode in WatchOrderGenerationApplyMode
-            ),
-            value=apply_mode or WatchOrderGenerationApplyMode.REPLACE.value,
-        )
-        hidden_input(name="revision", value=str(revision))
-        action_button("Preview", button_type=ButtonType.SUBMIT)
-
-
-async def _generation_preview(
-    catalogue: KanvasKatalogService,
-    watch_order_id: int,
-    revision: int,
-    preview_mode: str | None,
-    apply_mode: str | None,
-):
-    if preview_mode is None:
-        return None
-    try:
-        mode = WatchOrderGenerationMode(preview_mode)
-        target = WatchOrderGenerationApplyMode(apply_mode or "replace")
-    except ValueError:
-        return None
-    try:
-        return await catalogue.generation_preview(
-            watch_order_id, revision=revision, mode=mode, apply_mode=target
-        )
-    except KatalogClientError:
-        return None
 
 
 def _collection_error(error: KatalogClientError) -> None:

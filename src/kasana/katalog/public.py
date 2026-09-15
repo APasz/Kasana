@@ -13,6 +13,7 @@ from kasana.katalog.api.contracts import (
     BackgroundJob,
     CollectionCreate,
     CollectionDetail,
+    CollectionDetailsUpdate,
     CollectionMembership,
     CollectionMembershipAddition,
     CollectionMembershipBatchRequest,
@@ -160,6 +161,7 @@ from kasana.katalog.limits import (
     MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE,
     MAX_PLAYBACK_STATE_BATCH_SIZE,
     MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS,
+    MAX_WATCH_ORDER_ENTRIES,
 )
 from kasana.katalog.numerals import NUMERAL_TOKEN_PATTERN, parse_numeral
 
@@ -167,6 +169,7 @@ __all__ = [
     "MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE",
     "MAX_PLAYBACK_STATE_BATCH_SIZE",
     "MAX_SUBTITLE_TIMING_OFFSET_MILLISECONDS",
+    "MAX_WATCH_ORDER_ENTRIES",
     "NUMERAL_TOKEN_PATTERN",
     "APIError",
     "ArtworkContent",
@@ -177,6 +180,7 @@ __all__ = [
     "BackgroundJob",
     "CollectionCreate",
     "CollectionDetail",
+    "CollectionDetailsUpdate",
     "CollectionMembership",
     "CollectionMembershipAddition",
     "CollectionMembershipBatchRequest",

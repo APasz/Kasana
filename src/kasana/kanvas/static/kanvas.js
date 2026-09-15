@@ -15,6 +15,7 @@
     : null;
 
   const changeProfileSession = (destination) => {
+    window.dispatchEvent(new Event('kanvas:profile-changed'));
     const message = {type: 'profile-session-changed', destination};
     profileSessionChannel?.postMessage(message);
     try {
@@ -27,6 +28,7 @@
 
   const receiveProfileSessionChange = (message) => {
     if (!message || message.type !== 'profile-session-changed') return;
+    window.dispatchEvent(new Event('kanvas:profile-changed'));
     const destination = message.destination === '/profiles' ? '/profiles' : '/';
     window.location.replace(destination);
   };
@@ -1584,10 +1586,14 @@
     const actionClass = actionView ? ` k-poster--has-action k-poster--action-${poster.action}` : '';
     const posterLabel = poster.artworkLabel ? `${poster.title} — ${poster.artworkLabel}` : poster.title;
     const accessibleLabel = actionView ? `${actionView.label} ${posterLabel}` : posterLabel;
+    const itemId = /^\/(?:item|play\/item)\/(\d+)(?:\?|$)/.exec(poster.href)?.[1];
+    const membership = itemId
+      ? `<kanvas-collection-toggle item-id="${itemId}" item-title="${escapeHtml(poster.title)}" hidden></kanvas-collection-toggle>`
+      : '';
     return `<a class="k-poster k-poster--${escapeHtml(poster.state)}${artworkShapeClass}${actionClass}" href="${escapeHtml(poster.href)}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(poster.title)}" data-kanvas-poster="${poster.id}">
       <span class="k-poster__art">${artwork}${artworkLabel}${progress}${status}${action}</span>
       ${metadata}
-    </a>`;
+    </a>${membership}`;
   };
 
   class KanvasPoster extends HTMLElement {
@@ -2886,16 +2892,6 @@
   const COLLECTION_BUILDER_KINDS = [
     'movie', 'series', 'season', 'episode', 'special', 'extra'
   ];
-  const COLLECTION_BUILDER_KIND_LABELS = {
-    movie: 'Movies',
-    series: 'Series',
-    season: 'Seasons',
-    episode: 'Episodes',
-    special: 'Specials',
-    extra: 'Extras'
-  };
-  const collectionBuilderKindLabel = (kind) => COLLECTION_BUILDER_KIND_LABELS[kind] || kind;
-
   const normaliseCollectionBuilderMember = (value) => {
     if (!value || typeof value !== 'object') return null;
     const member = value;
@@ -2903,21 +2899,6 @@
     if (!poster || typeof member.kind !== 'string' || !COLLECTION_BUILDER_KINDS.includes(member.kind)) return null;
     if (member.relationship != null && typeof member.relationship !== 'string') return null;
     return {poster, kind: member.kind, relationship: member.relationship ?? null};
-  };
-
-  const normaliseCollectionBuilderSearchResult = (value) => {
-    if (!value || typeof value !== 'object') return null;
-    const result = value;
-    const poster = normalisePoster(result.poster);
-    if (!poster || typeof result.kind !== 'string' || !COLLECTION_BUILDER_KINDS.includes(result.kind)) return null;
-    if (typeof result.alreadyMember !== 'boolean') return null;
-    if (result.relationship != null && typeof result.relationship !== 'string') return null;
-    return {
-      poster,
-      kind: result.kind,
-      alreadyMember: result.alreadyMember,
-      relationship: result.relationship ?? null
-    };
   };
 
   const collectionBuilderRelationshipSelect = (itemId, relationship, title) => {
@@ -2944,6 +2925,18 @@
     return label;
   };
 
+  const collectionBuilderIdentity = (poster) => {
+    const identity = document.createElement('div');
+    identity.className = 'k-order-identity';
+    const title = document.createElement('a');
+    title.href = poster.href;
+    title.textContent = poster.title;
+    const detail = document.createElement('small');
+    detail.textContent = poster.detail || '';
+    identity.append(title, detail);
+    return identity;
+  };
+
   class KanvasCollectionBuilder extends HTMLElement {
     constructor() {
       super();
@@ -2955,68 +2948,83 @@
       this.memberGeneration = 0;
       this.currentMembers = new Map();
       this.memberOrder = [];
-      this.additions = new Map();
       this.removals = new Set();
       this.relationshipUpdates = new Map();
-      this.searchCursor = null;
-      this.searchLoaded = false;
-      this.searchDone = false;
-      this.searchLoading = false;
-      this.searchGeneration = 0;
-      this.searchRows = [];
-      this.searchKinds = new Set(['movie', 'series']);
-      this.searchTimer = null;
       this.saving = false;
       this.conflict = null;
       this.memberResults = null;
-      this.searchResults = null;
       this.memberStatus = null;
-      this.searchStatus = null;
       this.summary = null;
       this.conflictState = null;
+      this.details = null;
+      this.initialDetails = {};
+      this.onMembershipChange = (event) => this.membershipChanged(event.detail);
+      this.beforeUnload = (event) => {
+        if (!this.stagedChangeCount()) return;
+        event.preventDefault();
+        event.returnValue = '';
+      };
     }
 
     connectedCallback() {
       this.collectionRevision = this.currentRevision() || 0;
+      this.details = document.querySelector(`[data-collection-details-for="${this.getAttribute('collection-id')}"]`);
+      this.initialDetails = this.detailValues();
+      this.details?.addEventListener('input', () => this.renderSummary());
+      this.details?.addEventListener('change', () => this.renderSummary());
+      window.addEventListener('beforeunload', this.beforeUnload);
+      window.addEventListener('kanvas:collection-changed', this.onMembershipChange);
       this.innerHTML = `<section class="k-collection-builder" aria-label="Collection builder">
-        <section class="k-collection-builder__pane k-collection-builder__pane--find" aria-label="Find media">
-          <div class="k-collection-builder__heading"><div><h2>Find media</h2><p>Search the library and stage several additions before saving.</p></div></div>
-          <label class="k-control-shell k-input-shell"><span class="k-sr-only">Search media</span><input class="k-input" type="search" data-builder-search aria-label="Search media" placeholder="Search movies and series"></label>
-          <fieldset class="k-collection-builder__filters"><legend>Media types</legend>${COLLECTION_BUILDER_KINDS.map((kind) => `<label class="k-check"><input type="checkbox" value="${kind}" data-builder-kind${this.searchKinds.has(kind) ? ' checked' : ''}> ${escapeHtml(collectionBuilderKindLabel(kind))}</label>`).join('')}</fieldset>
-          <div class="k-collection-builder__status" data-builder-search-status aria-live="polite"></div>
-          <div class="k-collection-builder__results" data-builder-search-results></div>
-          <button type="button" class="k-button" data-builder-action="load-search">Load more results</button>
-        </section>
         <section class="k-collection-builder__pane k-collection-builder__pane--collection" aria-label="Collection">
-          <div class="k-collection-builder__heading"><div><h2>Collection</h2><p>Membership and relationship changes stay local until you save.</p></div><button type="button" class="k-button k-button--primary" data-builder-action="save">Save changes</button></div>
+          <div class="k-collection-builder__heading"><div><h2>Titles</h2></div><button type="button" class="k-button k-button--primary" data-builder-action="save">Save</button></div>
           <div class="k-collection-builder__summary" data-builder-summary></div>
           <div class="k-collection-builder__status" data-builder-member-status aria-live="polite"></div>
           <div class="k-collection-builder__members" data-builder-members></div>
-          <button type="button" class="k-button" data-builder-action="load-members">Load more members</button>
+          <button type="button" class="k-button" data-builder-action="load-members">More titles</button>
           <div class="k-conflict-state" data-builder-conflict hidden aria-live="assertive"></div>
         </section>
       </section>`;
       this.memberResults = this.querySelector('[data-builder-members]');
-      this.searchResults = this.querySelector('[data-builder-search-results]');
       this.memberStatus = this.querySelector('[data-builder-member-status]');
-      this.searchStatus = this.querySelector('[data-builder-search-status]');
       this.summary = this.querySelector('[data-builder-summary]');
       this.conflictState = this.querySelector('[data-builder-conflict]');
+      this.renderSummary();
       this.addEventListener('click', (event) => this.onClick(event));
       this.addEventListener('change', (event) => this.onChange(event));
-      this.querySelector('[data-builder-search]')?.addEventListener('input', () => {
-        if (this.saving) return;
-        window.clearTimeout(this.searchTimer);
-        this.searchTimer = window.setTimeout(() => { void this.resetSearch(); }, 220);
-      });
       void this.resetMembers();
-      void this.resetSearch();
     }
 
     disconnectedCallback() {
-      window.clearTimeout(this.searchTimer);
+      window.removeEventListener('beforeunload', this.beforeUnload);
+      window.removeEventListener('kanvas:collection-changed', this.onMembershipChange);
       this.memberGeneration += 1;
-      this.searchGeneration += 1;
+    }
+
+    membershipChanged(change) {
+      if (!change || change.source === this || change.collectionId !== Number(this.getAttribute('collection-id'))) return;
+      if (change.previousRevision === this.collectionRevision) {
+        this.collectionRevision = change.revision;
+        this.setAttribute('revision', String(change.revision));
+        this.syncPageRevision();
+      }
+      if (change.itemId) {
+        if (change.member) this.removals.delete(change.itemId);
+        else {
+          this.removals.add(change.itemId);
+          this.relationshipUpdates.delete(change.itemId);
+        }
+        if ('artworkItemId' in change) {
+          const artwork = this.details?.querySelector('[name="artwork_item_id"]');
+          if (artwork) {
+            const edited = 'artwork_item_id' in this.detailChanges();
+            if (!edited || (!change.member && Number(artwork.value) === change.itemId)) {
+              artwork.value = change.artworkItemId ? String(change.artworkItemId) : '';
+            }
+            this.initialDetails.artwork_item_id = change.artworkItemId;
+          }
+        }
+      }
+      this.renderWorkspace();
     }
 
     currentRevision() {
@@ -3049,34 +3057,16 @@
       if (!(button instanceof HTMLButtonElement)) return;
       if (this.saving) return;
       const action = button.dataset.builderAction;
-      if (action === 'load-search') void this.loadSearch();
       if (action === 'load-members') void this.loadMembers();
       if (action === 'save') void this.save();
       if (action === 'retry') this.retryConflict();
       if (action === 'discard') window.location.reload();
-      if (action === 'select') this.toggleSearchResult(Number(button.dataset.builderItem));
-      if (action === 'select-all') this.selectAllShown(button.dataset.builderKind || '');
-      if (action === 'remove-member') this.toggleMemberRemoval(Number(button.dataset.builderItem));
     }
 
     onChange(event) {
       if (this.saving) return;
       const target = event.target;
       if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
-      if (target instanceof HTMLInputElement && target.matches('[data-builder-kind]')) {
-        const selectedKinds = new Set(
-          Array.from(this.querySelectorAll('[data-builder-kind]'))
-            .filter((input) => input instanceof HTMLInputElement && input.checked)
-            .map((input) => input.value)
-        );
-        if (!selectedKinds.size) {
-          target.checked = true;
-          selectedKinds.add(target.value);
-        }
-        this.searchKinds = selectedKinds;
-        void this.resetSearch();
-        return;
-      }
       if (target instanceof HTMLSelectElement && target.matches('[data-builder-relationship]')) {
         this.changeRelationship(Number(target.dataset.builderRelationship), target.value || null);
       }
@@ -3100,7 +3090,7 @@
       if (!source || !this.memberResults || !this.memberStatus) return;
       const generation = this.memberGeneration;
       this.memberLoading = true;
-      this.memberStatus.textContent = this.memberLoaded ? 'Loading more members…' : 'Loading members…';
+      this.memberStatus.textContent = this.memberLoaded ? 'Loading…' : 'Loading…';
       try {
         const url = new URL(source, window.location.origin);
         if (this.memberCursor) url.searchParams.set('cursor', this.memberCursor);
@@ -3120,8 +3110,7 @@
         this.memberDone = this.memberCursor === null;
         this.memberStatus.textContent = members.length || this.memberOrder.length
           ? ''
-          : 'This collection has no direct members yet.';
-        this.trimMemberCache();
+          : 'Add movies and series to get started.';
         this.renderMembers();
       } catch (_) {
         if (generation === this.memberGeneration) this.memberStatus.textContent = 'Could not load collection members.';
@@ -3130,204 +3119,60 @@
       }
     }
 
-    async resetSearch() {
-      this.searchGeneration += 1;
-      this.searchCursor = null;
-      this.searchLoaded = false;
-      this.searchDone = false;
-      this.searchLoading = false;
-      this.searchRows = [];
-      this.renderSearch();
-      await this.loadSearch();
-    }
-
-    async loadSearch() {
-      if (this.searchLoading || (this.searchLoaded && this.searchDone)) return;
-      const source = this.getAttribute('search-source');
-      if (!source || !this.searchResults || !this.searchStatus) return;
-      const generation = this.searchGeneration;
-      this.searchLoading = true;
-      this.searchStatus.textContent = this.searchLoaded ? 'Loading more results…' : 'Searching library…';
-      try {
-        const url = new URL(source, window.location.origin);
-        const search = this.querySelector('[data-builder-search]');
-        if (search instanceof HTMLInputElement && search.value.trim()) {
-          url.searchParams.set('search', search.value.trim());
-        }
-        for (const kind of this.searchKinds) url.searchParams.append('kind', kind);
-        if (this.searchCursor) url.searchParams.set('cursor', this.searchCursor);
-        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
-        if (!response.ok) throw new Error('Search request failed');
-        const payload = await response.json();
-        if (generation !== this.searchGeneration) return;
-        const rows = Array.isArray(payload.items)
-          ? payload.items.map(normaliseCollectionBuilderSearchResult).filter(Boolean)
-          : [];
-        const knownIds = new Set(this.searchRows.map((row) => row.poster.id));
-        for (const row of rows) {
-          if (knownIds.has(row.poster.id)) continue;
-          knownIds.add(row.poster.id);
-          this.searchRows.push(row);
-          if (row.alreadyMember && !this.currentMembers.has(row.poster.id)) {
-            this.currentMembers.set(row.poster.id, {
-              poster: row.poster,
-              kind: row.kind,
-              relationship: row.relationship
-            });
-          }
-        }
-        if (this.searchRows.length > MAX_MOUNTED_POSTERS) {
-          this.searchRows.splice(0, this.searchRows.length - MAX_MOUNTED_POSTERS);
-        }
-        this.searchCursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
-        this.searchLoaded = true;
-        this.searchDone = this.searchCursor === null;
-        this.searchStatus.textContent = this.searchRows.length ? '' : 'No media matches these filters.';
-        this.trimMemberCache();
-        this.renderSearch();
-      } catch (_) {
-        if (generation === this.searchGeneration) this.searchStatus.textContent = 'Could not load library results.';
-      } finally {
-        if (generation === this.searchGeneration) this.searchLoading = false;
-      }
-    }
-
     ensureMemberVisible(itemId) {
       if (!this.memberOrder.includes(itemId)) this.memberOrder.push(itemId);
     }
 
-    trimMemberCache() {
-      while (this.memberOrder.length > MAX_MOUNTED_POSTERS) {
-        const removableIndex = this.memberOrder.findIndex((itemId) => (
-          !this.additions.has(itemId)
-          && !this.removals.has(itemId)
-          && !this.relationshipUpdates.has(itemId)
-        ));
-        if (removableIndex < 0) break;
-        const [itemId] = this.memberOrder.splice(removableIndex, 1);
-        this.currentMembers.delete(itemId);
-      }
-      const retainedIds = new Set([
-        ...this.memberOrder,
-        ...this.additions.keys(),
-        ...this.removals,
-        ...this.relationshipUpdates.keys()
-      ]);
-      for (const itemId of this.currentMembers.keys()) {
-        if (!retainedIds.has(itemId)) this.currentMembers.delete(itemId);
-      }
-    }
-
-    searchState(result) {
-      const itemId = result.poster.id;
-      if (this.additions.has(itemId)) return 'selected';
-      if (this.removals.has(itemId)) return 'removing';
-      if (this.currentMembers.has(itemId) || result.alreadyMember) return 'existing';
-      return 'normal';
-    }
-
     relationshipFor(itemId) {
-      if (this.additions.has(itemId)) return this.additions.get(itemId).relationship;
       if (this.relationshipUpdates.has(itemId)) return this.relationshipUpdates.get(itemId);
       return this.currentMembers.get(itemId)?.relationship || null;
     }
 
-    toggleSearchResult(itemId) {
-      if (this.saving) return;
-      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
-      const result = this.searchRows.find((row) => row.poster.id === itemId);
-      if (!result) return;
-      let member = this.currentMembers.get(itemId);
-      if (!member && result.alreadyMember) {
-        member = {poster: result.poster, kind: result.kind, relationship: result.relationship};
-        this.currentMembers.set(itemId, member);
-      }
-      if (this.additions.has(itemId)) {
-        this.additions.delete(itemId);
-      } else if (member) {
-        this.ensureMemberVisible(itemId);
-        if (this.removals.has(itemId)) {
-          this.removals.delete(itemId);
-        } else {
-          this.relationshipUpdates.delete(itemId);
-          this.removals.add(itemId);
-        }
-      } else {
-        this.additions.set(itemId, {poster: result.poster, kind: result.kind, relationship: null});
-        this.ensureMemberVisible(itemId);
-      }
-      this.renderWorkspace();
-    }
-
-    selectAllShown(kind) {
-      if (this.saving) return;
-      if (!COLLECTION_BUILDER_KINDS.includes(kind)) return;
-      for (const result of this.searchRows) {
-        if (result.kind !== kind || this.searchState(result) !== 'normal') continue;
-        this.additions.set(result.poster.id, {
-          poster: result.poster,
-          kind: result.kind,
-          relationship: null
-        });
-        this.ensureMemberVisible(result.poster.id);
-      }
-      this.renderWorkspace();
-    }
-
-    toggleMemberRemoval(itemId) {
-      if (this.saving) return;
-      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
-      if (this.additions.has(itemId)) {
-        this.additions.delete(itemId);
-      } else if (this.currentMembers.has(itemId)) {
-        if (this.removals.has(itemId)) {
-          this.removals.delete(itemId);
-        } else {
-          this.relationshipUpdates.delete(itemId);
-          this.removals.add(itemId);
-        }
-      }
-      this.renderWorkspace();
-    }
-
     changeRelationship(itemId, relationship) {
-      if (this.saving) return;
-      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
-      if (this.additions.has(itemId)) {
-        this.additions.get(itemId).relationship = relationship;
-      } else {
-        const member = this.currentMembers.get(itemId);
-        if (!member) return;
-        if (member.relationship === relationship) this.relationshipUpdates.delete(itemId);
-        else this.relationshipUpdates.set(itemId, relationship);
-      }
-      this.renderWorkspace();
+      if (this.saving || this.removals.has(itemId)) return;
+      const member = this.currentMembers.get(itemId);
+      if (!member) return;
+      if (member.relationship === relationship) this.relationshipUpdates.delete(itemId);
+      else this.relationshipUpdates.set(itemId, relationship);
+      this.renderSummary();
     }
 
     stagedChangeCount() {
-      return this.additions.size + this.removals.size + this.relationshipUpdates.size;
+      return this.relationshipUpdates.size + Object.keys(this.detailChanges()).length;
+    }
+
+    detailValues() {
+      if (!this.details) return {};
+      const value = (name) => this.details.querySelector(`[name="${name}"]`)?.value || '';
+      return {
+        name: value('name').trim(), overview: value('overview').trim() || null,
+        default_watch_order_id: Number(value('default_watch_order_id')) || null,
+        artwork_item_id: Number(value('artwork_item_id')) || null,
+      };
+    }
+
+    detailChanges() {
+      return Object.fromEntries(Object.entries(this.detailValues()).filter(([name, value]) => this.initialDetails[name] !== value));
     }
 
     batchPayload() {
       return {
         expected_revision: this.collectionRevision,
-        additions: Array.from(this.additions, ([libraryItemId, member]) => ({
-          library_item_id: libraryItemId,
-          relationship: member.relationship
-        })),
+        ...(Object.keys(this.detailChanges()).length ? {details: this.detailChanges()} : {}),
         relationship_updates: Array.from(this.relationshipUpdates, ([libraryItemId, relationship]) => ({
           library_item_id: libraryItemId,
           relationship
-        })),
-        removals: Array.from(this.removals)
+        }))
       };
     }
 
     async save() {
       if (this.saving) return;
+      const name = this.details?.querySelector('[name="name"]');
+      if (name && !name.value.trim()) { name.focus(); this.memberStatus.textContent = 'Enter a collection name.'; return; }
       const changes = this.stagedChangeCount();
       if (!changes) {
-        if (this.memberStatus) this.memberStatus.textContent = 'There are no staged collection changes.';
+        if (this.memberStatus) this.memberStatus.textContent = 'No changes to save.';
         return;
       }
       const mountedRevision = this.currentRevision();
@@ -3343,7 +3188,7 @@
       if (!action) return;
       this.saving = true;
       this.renderWorkspace();
-      if (this.memberStatus) this.memberStatus.textContent = 'Saving staged collection changes…';
+      if (this.memberStatus) this.memberStatus.textContent = 'Saving…';
       try {
         const response = await fetch(action, {
           method: 'POST',
@@ -3357,7 +3202,7 @@
           this.conflict = {
             revision: Number.isInteger(payload?.currentRevision) ? payload.currentRevision : null
           };
-          if (this.memberStatus) this.memberStatus.textContent = 'This collection changed elsewhere. Your staged changes are still here.';
+          if (this.memberStatus) this.memberStatus.textContent = 'This collection changed elsewhere. Your draft is here.';
           this.renderConflict();
           return;
         }
@@ -3368,16 +3213,19 @@
         this.setAttribute('revision', String(this.collectionRevision));
         this.syncPageRevision();
         this.syncPageMembershipState();
-        this.additions.clear();
+        this.initialDetails = this.detailValues();
         this.removals.clear();
         this.relationshipUpdates.clear();
         this.conflict = null;
+        publishKanvasToast({severity: 'success', title: 'Collection saved'});
+        window.dispatchEvent(new CustomEvent('kanvas:collection-changed', {detail: {
+          source: this, collectionId: Number(this.getAttribute('collection-id')), revision: this.collectionRevision
+        }}));
+        await this.resetMembers();
         if (this.memberStatus) {
           const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter((warning) => typeof warning === 'string') : [];
-          this.memberStatus.textContent = warnings.length ? warnings.join(' ') : 'Collection changes saved.';
+          this.memberStatus.textContent = warnings.length ? warnings.join(' ') : 'Saved';
         }
-        publishKanvasToast({severity: 'success', title: 'Collection changes saved'});
-        await Promise.all([this.resetMembers(), this.resetSearch()]);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Collection changes could not be saved.';
         if (this.memberStatus) this.memberStatus.textContent = message;
@@ -3398,107 +3246,29 @@
     }
 
     renderWorkspace() {
-      this.trimMemberCache();
       this.renderSummary();
       this.renderMembers();
-      this.renderSearch();
       this.renderConflict();
     }
 
     renderSummary() {
       if (!this.summary) return;
       const parts = [];
-      if (this.additions.size) parts.push(`${this.additions.size} to add`);
+      if (Object.keys(this.detailChanges()).length) parts.push("Details changed");
       if (this.relationshipUpdates.size) parts.push(`${this.relationshipUpdates.size} relationship update${this.relationshipUpdates.size === 1 ? '' : 's'}`);
-      if (this.removals.size) parts.push(`${this.removals.size} to remove`);
-      this.summary.textContent = parts.length ? `${parts.join(' · ')} staged` : 'No staged changes.';
+      this.summary.textContent = parts.length ? parts.join(' · ') : '';
+      this.details?.querySelectorAll('input, textarea, select').forEach((input) => { input.disabled = this.saving; });
       const save = this.querySelector('[data-builder-action="save"]');
       if (save instanceof HTMLButtonElement) save.disabled = this.saving || !parts.length;
-      for (const input of this.querySelectorAll('[data-builder-kind]')) {
-        if (input instanceof HTMLInputElement) input.disabled = this.saving;
-      }
-    }
-
-    renderSearch() {
-      if (!this.searchResults) return;
-      this.searchResults.replaceChildren();
-      const rowsByKind = new Map(COLLECTION_BUILDER_KINDS.map((kind) => [kind, []]));
-      for (const row of this.searchRows) rowsByKind.get(row.kind)?.push(row);
-      for (const kind of COLLECTION_BUILDER_KINDS) {
-        const rows = rowsByKind.get(kind) || [];
-        if (!rows.length) continue;
-        const group = document.createElement('section');
-        group.className = 'k-collection-builder__group';
-        const header = document.createElement('div');
-        header.className = 'k-collection-builder__group-heading';
-        const title = document.createElement('h3');
-        title.textContent = collectionBuilderKindLabel(kind);
-        const selectAll = document.createElement('button');
-        selectAll.type = 'button';
-        selectAll.className = 'k-button';
-        selectAll.dataset.builderAction = 'select-all';
-        selectAll.dataset.builderKind = kind;
-        const normalCount = rows.filter((row) => this.searchState(row) === 'normal').length;
-        selectAll.disabled = this.saving || !normalCount;
-        selectAll.textContent = normalCount ? 'Select all shown' : 'No available items';
-        header.append(title, selectAll);
-        const grid = document.createElement('div');
-        grid.className = 'k-collection-builder__card-grid';
-        for (const row of rows) grid.append(this.searchCard(row));
-        group.append(header, grid);
-        this.searchResults.append(group);
-      }
-      const more = this.querySelector('[data-builder-action="load-search"]');
-      if (more instanceof HTMLButtonElement) {
-        more.hidden = !this.searchLoaded || this.searchDone;
-        more.disabled = this.saving;
-      }
-    }
-
-    searchCard(result) {
-      const itemId = result.poster.id;
-      const state = this.searchState(result);
-      const card = document.createElement('article');
-      card.className = `k-collection-builder__card k-collection-builder__card--${state}`;
-      const poster = posterElement({...result.poster, state: state === 'selected' ? 'selected' : result.poster.state});
-      poster.classList.add('k-collection-builder__poster');
-      const footer = document.createElement('div');
-      footer.className = 'k-collection-builder__card-footer';
-      const status = document.createElement('span');
-      status.className = 'k-collection-builder__membership-state';
-      status.textContent = {
-        existing: 'Already in collection',
-        selected: 'Selected to add',
-        removing: 'Staged for removal',
-        normal: 'Available to add'
-      }[state];
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'k-button';
-      action.dataset.builderAction = 'select';
-      action.dataset.builderItem = String(itemId);
-      action.textContent = {
-        existing: 'Remove',
-        selected: 'Unselect',
-        removing: 'Keep',
-        normal: 'Select'
-      }[state];
-      action.disabled = this.saving;
-      footer.append(status, action);
-      card.append(poster, footer);
-      return card;
     }
 
     renderMembers() {
       if (!this.memberResults) return;
       this.memberResults.replaceChildren();
       const memberIds = this.memberOrder.filter((itemId) => (
-        this.currentMembers.has(itemId) || this.additions.has(itemId)
+        this.currentMembers.has(itemId)
       ));
-      const visibleIds = memberIds.length > MAX_MOUNTED_POSTERS
-        ? memberIds.slice(memberIds.length - MAX_MOUNTED_POSTERS)
-        : memberIds;
-      for (const itemId of visibleIds) this.memberResults.append(this.memberCard(itemId));
+      for (const itemId of memberIds) this.memberResults.append(this.memberCard(itemId));
       const more = this.querySelector('[data-builder-action="load-members"]');
       if (more instanceof HTMLButtonElement) {
         more.hidden = !this.memberLoaded || this.memberDone;
@@ -3507,36 +3277,30 @@
     }
 
     memberCard(itemId) {
-      const stagedAddition = this.additions.get(itemId);
-      const member = stagedAddition || this.currentMembers.get(itemId);
-      const state = stagedAddition ? 'selected' : this.removals.has(itemId) ? 'removing' : 'current';
+      const member = this.currentMembers.get(itemId);
+      const removed = this.removals.has(itemId);
       const card = document.createElement('article');
-      card.className = `k-collection-builder__member k-collection-builder__member--${state}`;
-      const poster = posterElement({...member.poster, state: stagedAddition ? 'selected' : member.poster.state});
-      poster.classList.add('k-collection-builder__poster');
+      card.className = `k-collection-builder__member${removed ? ' k-collection-builder__member--removed' : ''}`;
+      const poster = collectionBuilderIdentity(member.poster);
       const controls = document.createElement('div');
       controls.className = 'k-collection-builder__member-controls';
-      const stateLabel = document.createElement('span');
-      stateLabel.className = 'k-collection-builder__membership-state';
-      stateLabel.textContent = stagedAddition
-        ? 'Staged add'
-        : this.removals.has(itemId)
-          ? 'Staged removal'
-          : 'Current member';
       const relationship = collectionBuilderRelationshipSelect(
         itemId, this.relationshipFor(itemId), member.poster.title
       );
       relationship.querySelector('select')?.toggleAttribute(
         'disabled', this.saving || this.removals.has(itemId)
       );
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'k-button';
-      action.dataset.builderAction = 'remove-member';
-      action.dataset.builderItem = String(itemId);
-      action.textContent = stagedAddition ? 'Unselect' : this.removals.has(itemId) ? 'Keep' : 'Remove';
-      action.disabled = this.saving;
-      controls.append(stateLabel, relationship, action);
+      const action = document.createElement('kanvas-collection-toggle');
+      action.setAttribute('collection-id', this.getAttribute('collection-id'));
+      action.setAttribute('item-id', String(itemId));
+      action.setAttribute('item-title', member.poster.title);
+      action.toggleAttribute('disabled', this.saving);
+      const options = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Relationship';
+      options.append(summary, relationship);
+      options.hidden = removed;
+      controls.append(options, action);
       card.append(poster, controls);
       return card;
     }
@@ -3550,13 +3314,13 @@
       }
       this.conflictState.hidden = false;
       const copy = document.createElement('span');
-      copy.textContent = 'This collection changed elsewhere. Your staged changes have not been discarded.';
+      copy.textContent = 'This collection changed elsewhere. Your draft is here.';
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'k-button';
       retry.dataset.builderAction = 'retry';
       retry.disabled = !Number.isInteger(this.conflict.revision);
-      retry.textContent = 'Retry staged changes';
+      retry.textContent = 'Apply my changes';
       const discard = document.createElement('button');
       discard.type = 'button';
       discard.className = 'k-button';
@@ -3840,694 +3604,10 @@
     }
   }
 
-  const normaliseWatchRow = (value) => {
-    if (!value || typeof value !== 'object') return null;
-    const row = value;
-    if (!Number.isSafeInteger(row.id) || row.id <= 0 || !Number.isSafeInteger(row.itemId) || row.itemId <= 0) return null;
-    if (!Number.isInteger(row.position) || row.position < 0 || typeof row.title !== 'string' || !row.title) return null;
-    if (typeof row.kind !== 'string' || typeof row.available !== 'boolean') return null;
-    if (row.year != null && (!Number.isInteger(row.year) || row.year < 1)) return null;
-    if (row.posterUrl != null && !localArtworkUrl(row.posterUrl)) return null;
-    const fallbackPoster = {
-      id: row.itemId,
-      title: row.title,
-      href: `/item/${row.itemId}`,
-      posterUrl: row.posterUrl ?? null,
-      artworkShape: row.kind === 'episode' ? 'landscape' : 'portrait',
-      artworkLabel: row.kind,
-      placeholder: {lines: [row.title]},
-      detail: [row.year, row.kind].filter(Boolean).join(' · ') || null,
-      state: row.available ? (row.posterUrl ? 'normal' : 'missing_artwork') : 'unavailable',
-      available: row.available
-    };
-    const poster = normalisePoster(row.poster) || normalisePoster(fallbackPoster);
-    return poster ? {...row, poster} : null;
-  };
-
-  class KanvasWatchOrderList extends HTMLElement {
-    constructor() {
-      super();
-      this.cursor = null;
-      this.revision = Number(this.getAttribute('revision')) || 0;
-      this.loading = false;
-      this.done = false;
-      this.list = null;
-      this.status = null;
-      this.pendingIntent = null;
-      this.draggedId = null;
-    }
-
-    connectedCallback() {
-      this.innerHTML = '<div class="k-watch-list-status" aria-live="polite"></div><div class="k-watch-order-list" role="list" aria-label="Watch order"></div><button type="button" class="k-button k-watch-list-more">Load more</button><div class="k-conflict-state" hidden aria-live="assertive"></div>';
-      this.list = this.querySelector('.k-watch-order-list');
-      this.status = this.querySelector('.k-watch-list-status');
-      this.querySelector('.k-watch-list-more')?.addEventListener('click', () => this.loadNext());
-      this.list?.addEventListener('click', (event) => this.onClick(event));
-      this.list?.addEventListener('keydown', (event) => this.onKeydown(event));
-      this.list?.addEventListener('dragstart', (event) => this.onDragStart(event));
-      this.list?.addEventListener('dragover', (event) => event.preventDefault());
-      this.list?.addEventListener('drop', (event) => this.onDrop(event));
-      this.loadNext();
-    }
-
-    async loadNext() {
-      const source = this.getAttribute('source');
-      if (!source || !this.list || !this.status || this.loading || this.done) return;
-      this.loading = true;
-      this.status.textContent = this.list.children.length ? 'Loading more…' : 'Loading entries…';
-      try {
-        const url = new URL(source, window.location.origin);
-        if (this.cursor) url.searchParams.set('cursor', this.cursor);
-        const response = await fetch(url, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
-        if (!response.ok) throw new Error('Watch order request failed');
-        const payload = await response.json();
-        const rows = Array.isArray(payload.items) ? payload.items.map(normaliseWatchRow).filter(Boolean) : [];
-        if (Number.isInteger(payload.revision)) this.revision = payload.revision;
-        this.list.insertAdjacentHTML('beforeend', rows.map((row) => this.rowMarkup(row)).join(''));
-        this.trimRows();
-        this.cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : null;
-        this.done = this.cursor === null;
-        this.status.textContent = rows.length ? '' : 'This watch order is empty.';
-        const more = this.querySelector('.k-watch-list-more');
-        if (more instanceof HTMLButtonElement) more.hidden = this.done;
-      } catch (_) {
-        this.status.textContent = 'Could not load watch-order entries.';
-      } finally {
-        this.loading = false;
-      }
-    }
-
-    rowMarkup(row) {
-      const year = row.year ? ` · ${row.year}` : '';
-      const unavailable = row.available ? '' : '<span class="k-watch-row__warning">Unavailable</span>';
-      return `<div class="k-watch-row" role="listitem" tabindex="0" draggable="true" data-entry-id="${row.id}" data-item-id="${row.itemId}"><span class="k-watch-row__position">${row.position + 1}</span><a class="k-watch-row__detail" href="/item/${row.itemId}"><span class="k-watch-row__title">${escapeHtml(row.title)}</span><span class="k-watch-row__facts">${escapeHtml(row.kind)}${year}</span></a>${unavailable}<span class="k-watch-row__actions"><button type="button" class="k-row-button" data-row-action="up" aria-label="Move entry up">↑</button><button type="button" class="k-row-button" data-row-action="down" aria-label="Move entry down">↓</button><button type="button" class="k-row-button" data-row-action="start" aria-label="Move entry to start">⇤</button><button type="button" class="k-row-button" data-row-action="end" aria-label="Move entry to end">⇥</button><button type="button" class="k-row-button" data-row-action="play" aria-label="Play from here">▶</button><button type="button" class="k-row-button" data-row-action="remove" aria-label="Remove entry">×</button></span></div>`;
-    }
-
-    trimRows() {
-      if (!this.list) return;
-      while (this.list.children.length > 120) {
-        const first = this.list.firstElementChild;
-        if (!first || first.contains(document.activeElement)) return;
-        first.remove();
-      }
-    }
-
-    onClick(event) {
-      const target = event.target instanceof Element ? event.target.closest('[data-row-action]') : null;
-      if (!(target instanceof HTMLButtonElement)) return;
-      const row = target.closest('.k-watch-row');
-      if (!(row instanceof HTMLElement)) return;
-      const action = target.dataset.rowAction;
-      if (action === 'up') this.moveRelative(row, -1);
-      if (action === 'down') this.moveRelative(row, 1);
-      if (action === 'start' || action === 'end') this.moveBoundary(row, action);
-      if (action === 'remove') this.removeRow(row);
-      if (action === 'play') this.playFromHere(row);
-    }
-
-    onKeydown(event) {
-      const target = event.target;
-      const row = target instanceof Element ? target.closest('.k-watch-row') : null;
-      if (!(row instanceof HTMLElement) || target instanceof HTMLButtonElement) return;
-      if (event.key === 'ArrowUp') { event.preventDefault(); this.moveRelative(row, -1); }
-      if (event.key === 'ArrowDown') { event.preventDefault(); this.moveRelative(row, 1); }
-      if (event.key === 'Home') { event.preventDefault(); this.moveBoundary(row, 'start'); }
-      if (event.key === 'End') { event.preventDefault(); this.moveBoundary(row, 'end'); }
-      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.removeRow(row); }
-      if (event.key === 'Enter') { event.preventDefault(); window.location.assign(`/item/${row.dataset.itemId}`); }
-    }
-
-    onDragStart(event) {
-      const row = event.target instanceof Element ? event.target.closest('.k-watch-row') : null;
-      if (!(row instanceof HTMLElement)) return;
-      this.draggedId = row.dataset.entryId || null;
-      event.dataTransfer?.setData('text/plain', this.draggedId || '');
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-    }
-
-    onDrop(event) {
-      event.preventDefault();
-      const target = event.target instanceof Element ? event.target.closest('.k-watch-row') : null;
-      if (!(target instanceof HTMLElement) || !this.draggedId || !this.list) return;
-      const source = this.list.querySelector(`[data-entry-id="${CSS.escape(this.draggedId)}"]`);
-      if (!(source instanceof HTMLElement) || source === target) return;
-      const rows = Array.from(this.list.children);
-      const targetIndex = rows.indexOf(target);
-      if (targetIndex >= 0) this.moveToIndex(source, targetIndex);
-      this.draggedId = null;
-    }
-
-    moveRelative(row, offset) {
-      if (!this.list) return;
-      const rows = Array.from(this.list.children);
-      const index = rows.indexOf(row);
-      const targetIndex = index + offset;
-      if (index < 0 || targetIndex < 0 || targetIndex >= rows.length) return;
-      this.moveToIndex(row, targetIndex);
-    }
-
-    async moveToIndex(row, targetIndex) {
-      if (!this.list) return;
-      const previousRows = Array.from(this.list.children);
-      const sourceIndex = previousRows.indexOf(row);
-      if (sourceIndex < 0 || sourceIndex === targetIndex) return;
-      const reordered = [...previousRows];
-      reordered.splice(sourceIndex, 1);
-      reordered.splice(targetIndex, 0, row);
-      this.list.replaceChildren(...reordered);
-      const before = reordered[targetIndex + 1];
-      const intent = {operation: 'move', entryId: Number(row.dataset.entryId), beforeEntryId: before ? Number(before.dataset.entryId) : null, afterEntryId: null, revision: this.revision};
-      const success = await this.mutate(intent);
-      if (!success && !this.pendingIntent) this.list.replaceChildren(...previousRows);
-    }
-
-    async moveBoundary(row, boundary) {
-      const intent = {operation: 'move', entryId: Number(row.dataset.entryId), boundary, revision: this.revision};
-      const success = await this.mutate(intent);
-      if (success) window.location.reload();
-    }
-
-    async removeRow(row) {
-      if (!this.list) return;
-      const previousSibling = row.previousElementSibling;
-      const nextSibling = row.nextElementSibling;
-      row.remove();
-      const success = await this.mutate({operation: 'remove', entryId: Number(row.dataset.entryId), revision: this.revision});
-      if (!success && !this.pendingIntent) {
-        if (nextSibling) this.list.insertBefore(row, nextSibling);
-        else if (previousSibling) previousSibling.after(row);
-        else this.list.append(row);
-      }
-    }
-
-    async playFromHere(row) {
-      const action = this.getAttribute('launch-action');
-      if (!action || !this.status) return;
-      if (row.querySelector('.k-watch-row__warning')) {
-        this.status.textContent = 'This entry is unavailable. Use Play available entries to skip it.';
-        return;
-      }
-      this.status.textContent = 'Opening player…';
-      try {
-        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({itemId: Number(row.dataset.itemId)})});
-        const payload = await response.json();
-        if (!response.ok || typeof payload.playbackUrl !== 'string' || !payload.playbackUrl.startsWith('/play/watch-orders/')) throw new Error('Launch failed');
-        window.location.assign(payload.playbackUrl);
-      } catch (_) {
-        this.status.textContent = 'Could not start browser playback.';
-      }
-    }
-
-    async mutate(intent) {
-      const action = this.getAttribute('action');
-      if (!action || !this.status) return false;
-      this.setAttribute('aria-busy', 'true');
-      this.status.textContent = 'Saving change…';
-      try {
-        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify(intent)});
-        const payload = await response.json();
-        if (response.status === 409) {
-          this.showConflict(payload, intent);
-          return false;
-        }
-        if (!response.ok || !Number.isInteger(payload.revision)) throw new Error(payload.error || 'Action failed');
-        this.revision = payload.revision;
-        this.status.textContent = '';
-        return true;
-      } catch (_) {
-        this.status.textContent = 'Could not save this change.';
-        return false;
-      } finally {
-        this.removeAttribute('aria-busy');
-      }
-    }
-
-    showConflict(payload, intent) {
-      this.pendingIntent = intent;
-      const state = this.querySelector('.k-conflict-state');
-      if (!state) return;
-      const revision = Number.isInteger(payload.currentRevision) ? payload.currentRevision : null;
-      state.hidden = false;
-      state.innerHTML = '<span>This watch order changed elsewhere. Your local operation is still ready.</span><button type="button" class="k-button" data-conflict-reload>Reload</button><button type="button" class="k-button" data-conflict-reapply>Reapply</button>';
-      state.querySelector('[data-conflict-reload]')?.addEventListener('click', () => window.location.reload());
-      state.querySelector('[data-conflict-reapply]')?.addEventListener('click', async () => {
-        if (!this.pendingIntent || revision === null) return;
-        const replay = {...this.pendingIntent, revision};
-        if (await this.mutate(replay)) window.location.reload();
-      });
-    }
-  }
-
-  const normaliseWatchSource = (value) => {
-    if (!value || typeof value !== 'object') return null;
-    const source = value;
-    if (!Number.isSafeInteger(source.id) || source.id <= 0 || typeof source.title !== 'string' || !source.title) return null;
-    if (typeof source.kind !== 'string' || !Number.isInteger(source.entryCount) || source.entryCount < 0 || typeof source.addable !== 'boolean' || typeof source.available !== 'boolean') return null;
-    if (source.year != null && (!Number.isInteger(source.year) || source.year < 1)) return null;
-    if (source.seriesTitle != null && typeof source.seriesTitle !== 'string') return null;
-    if (source.seasonNumber != null && (!Number.isInteger(source.seasonNumber) || source.seasonNumber < 0)) return null;
-    const poster = normalisePoster(source.poster);
-    return poster ? {...source, poster} : null;
-  };
-
-  class KanvasWatchOrderWorkspace extends HTMLElement {
-    constructor() {
-      super();
-      this.revision = Number(this.getAttribute('revision')) || 0;
-      this.entries = [];
-      this.sources = [];
-      this.selectedSourceIds = new Set();
-      this.status = null;
-      this.order = null;
-      this.pool = null;
-      this.pendingIntent = null;
-      this.activeSlot = null;
-      this.isDragging = false;
-      this.dragScrollDirection = 0;
-      this.dragScrollFrame = null;
-      this.windowWheelListener = (event) => this.onOrderWheel(event);
-    }
-
-    connectedCallback() {
-      this.innerHTML = '<section class="k-watch-workspace" aria-label="Watch-order editor"><div class="k-watch-list-status" aria-live="polite"></div><section><div class="k-watch-workspace__heading"><h2 class="k-section-title">Play order</h2><span class="k-watch-workspace__hint">The leftmost poster plays first. Drag posters onto the spaces between them; shows and seasons stay together.</span></div><div class="k-watch-workspace__dropzone" data-order-dropzone><div class="k-watch-order-list k-watch-workspace__order" role="list" aria-label="Play order, leftmost plays first"></div></div></section><section class="k-watch-workspace__sources"><div class="k-watch-workspace__heading"><h2 class="k-section-title">Collection items</h2><label class="k-control-shell k-input-shell"><span class="k-sr-only">Filter collection items</span><input class="k-input" type="search" placeholder="Filter movies, shows, seasons, episodes" aria-label="Filter collection items" data-source-filter></label></div><div class="k-watch-workspace__pool" role="list" aria-label="Available collection items"></div></section><div class="k-conflict-state" hidden aria-live="assertive"></div></section>';
-      this.status = this.querySelector('.k-watch-list-status');
-      this.order = this.querySelector('.k-watch-workspace__order');
-      this.pool = this.querySelector('.k-watch-workspace__pool');
-      this.order?.addEventListener('click', (event) => this.onOrderClick(event));
-      this.order?.addEventListener('keydown', (event) => this.onOrderKeydown(event));
-      this.order?.addEventListener('dragstart', (event) => this.onOrderDragStart(event));
-      this.order?.addEventListener('dragend', () => this.clearDragState());
-      const dropzone = this.querySelector('[data-order-dropzone]');
-      dropzone?.addEventListener('dragover', (event) => this.onOrderDragOver(event));
-      dropzone?.addEventListener('dragleave', (event) => this.onOrderDragLeave(event));
-      dropzone?.addEventListener('drop', (event) => this.onOrderDrop(event));
-      window.addEventListener('wheel', this.windowWheelListener, {capture: true, passive: false});
-      this.pool?.addEventListener('click', (event) => this.onPoolClick(event));
-      this.pool?.addEventListener('keydown', (event) => this.onPoolKeydown(event));
-      this.pool?.addEventListener('dragstart', (event) => this.onPoolDragStart(event));
-      this.pool?.addEventListener('dragend', () => this.clearDragState());
-      this.querySelector('[data-source-filter]')?.addEventListener('input', () => this.renderSources());
-      this.load();
-    }
-
-    disconnectedCallback() {
-      window.removeEventListener('wheel', this.windowWheelListener, {capture: true});
-    }
-
-    async load() {
-      const source = this.getAttribute('source');
-      if (!source || !this.status) return;
-      this.status.textContent = 'Loading watch-order workspace…';
-      try {
-        const response = await fetch(source, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
-        if (!response.ok) throw new Error('Workspace request failed');
-        const payload = await response.json();
-        const entries = Array.isArray(payload.entries) ? payload.entries.map(normaliseWatchRow).filter(Boolean) : [];
-        const sources = Array.isArray(payload.sources) ? payload.sources.map(normaliseWatchSource).filter(Boolean) : [];
-        if (!Number.isInteger(payload.revision)) throw new Error('Invalid workspace revision');
-        this.revision = payload.revision;
-        this.entries = entries;
-        this.sources = sources;
-        this.selectedSourceIds = new Set(
-          [...this.selectedSourceIds].filter((id) => sources.some((source) => source.id === id))
-        );
-        this.renderOrder();
-        this.renderSources();
-        this.status.textContent = entries.length ? '' : 'Drop a collection item here to start this order.';
-      } catch (_) {
-        this.status.textContent = 'Could not load the watch-order workspace.';
-      }
-    }
-
-    renderOrder() {
-      if (!this.order) return;
-      const previousPositions = new Map(
-        Array.from(this.order.querySelectorAll('[data-entry-id]')).map((element) => [
-          element.dataset.entryId,
-          element.getBoundingClientRect(),
-        ])
-      );
-      this.order.innerHTML = this.entries.length
-        ? this.entries.map((row, index) => `${this.insertionSlot(this.entries[index]?.id ?? null)}${this.rowMarkup(row)}`).join('') + this.insertionSlot(null)
-        : '';
-      this.animateOrderLayout(previousPositions);
-    }
-
-    renderSources() {
-      if (!this.pool) return;
-      const input = this.querySelector('[data-source-filter]');
-      const query = input instanceof HTMLInputElement ? input.value.trim().toLocaleLowerCase() : '';
-      const matches = this.sources.filter((source) => this.sourceText(source).includes(query));
-      this.pool.innerHTML = matches.map((source) => this.sourceMarkup(source)).join('') || '<p class="k-watch-workspace__empty">No collection items match this filter.</p>';
-    }
-
-    sourceText(source) {
-      return [source.title, source.kind, source.seriesTitle || '', source.seasonNumber == null ? '' : `season ${source.seasonNumber}`].join(' ').toLocaleLowerCase();
-    }
-
-    rowMarkup(row) {
-      const unavailable = row.available ? '' : '<span class="k-watch-order-poster__warning">Unavailable</span>';
-      return `<article class="k-watch-order-poster" role="listitem" tabindex="0" draggable="true" data-entry-id="${row.id}" data-item-id="${row.itemId}" aria-label="${escapeHtml(`${row.position + 1}. ${row.title}`)}"><span class="k-watch-order-poster__position">${row.position + 1}</span>${posterMarkup(row.poster)}${unavailable}<span class="k-watch-order-poster__actions"><button type="button" class="k-row-button" data-row-action="back" aria-label="Move ${escapeHtml(row.title)} earlier; Shift-click to move to the start" title="Move earlier · Shift-click for start">←</button><button type="button" class="k-row-button" data-row-action="forward" aria-label="Move ${escapeHtml(row.title)} later; Shift-click to move to the end" title="Move later · Shift-click for end">→</button><button type="button" class="k-row-button" data-row-action="play" aria-label="Play ${escapeHtml(row.title)} from here">▶</button><button type="button" class="k-row-button" data-row-action="remove" aria-label="Remove ${escapeHtml(row.title)}">×</button></span></article>`;
-    }
-
-    insertionSlot(beforeEntryId) {
-      const before = beforeEntryId == null ? '' : String(beforeEntryId);
-      const label = beforeEntryId == null ? 'Add to end of order' : 'Insert before this poster';
-      return `<div class="k-watch-order-slot" data-insert-before="${before}" aria-label="${label}" role="presentation"><span></span></div>`;
-    }
-
-    animateOrderLayout(previousPositions) {
-      if (!this.order || !previousPositions.size) return;
-      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-      for (const element of this.order.querySelectorAll('[data-entry-id]')) {
-        const previous = previousPositions.get(element.dataset.entryId);
-        if (!previous) continue;
-        const current = element.getBoundingClientRect();
-        const x = previous.left - current.left;
-        const y = previous.top - current.top;
-        if ((x || y) && typeof element.animate === 'function') {
-          element.animate(
-            [{transform: `translate(${x}px, ${y}px)`}, {transform: 'translate(0, 0)'}],
-            {duration: 220, easing: 'cubic-bezier(.2,.75,.25,1)'}
-          );
-        }
-      }
-    }
-
-    sourceMarkup(source) {
-      const unavailable = source.available ? '' : '<span class="k-watch-row__warning">Includes unavailable media</span>';
-      const action = source.addable
-        ? `<button type="button" class="k-row-button" data-source-add aria-label="Add ${escapeHtml(source.title)} to watch order">+</button>`
-        : '<span class="k-watch-source__note">No playable descendants</span>';
-      const selected = this.selectedSourceIds.has(source.id);
-      const selectedClass = selected ? ' k-watch-source--selected' : '';
-      return `<article class="k-watch-source${selectedClass}" role="listitem" aria-selected="${selected}" tabindex="${source.addable ? '0' : '-1'}" draggable="${source.addable}" data-source-item-id="${source.id}">${posterMarkup(source.poster)}${unavailable}${action}</article>`;
-    }
-
-    onPoolClick(event) {
-      const button = event.target instanceof Element ? event.target.closest('[data-source-add]') : null;
-      const source = button instanceof Element ? button.closest('.k-watch-source') : null;
-      if (source instanceof HTMLElement) {
-        event.preventDefault();
-        this.addSource(source.dataset.sourceItemId, null);
-        return;
-      }
-      const poster = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
-      if (poster instanceof HTMLElement) {
-        event.preventDefault();
-        this.toggleSourceSelection(poster.dataset.sourceItemId);
-      }
-    }
-
-    onPoolKeydown(event) {
-      const source = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
-      if (!(source instanceof HTMLElement) || event.target instanceof HTMLButtonElement) return;
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        this.toggleSourceSelection(source.dataset.sourceItemId);
-      }
-    }
-
-    toggleSourceSelection(sourceItemId) {
-      const sourceId = Number(sourceItemId);
-      const source = this.sources.find((candidate) => candidate.id === sourceId);
-      if (!source?.addable) return;
-      if (this.selectedSourceIds.has(sourceId)) this.selectedSourceIds.delete(sourceId);
-      else this.selectedSourceIds.add(sourceId);
-      this.renderSources();
-    }
-
-    onPoolDragStart(event) {
-      const source = event.target instanceof Element ? event.target.closest('.k-watch-source') : null;
-      if (!(source instanceof HTMLElement) || source.getAttribute('draggable') !== 'true' || !source.dataset.sourceItemId) return;
-      this.isDragging = true;
-      source.classList.add('k-watch-source--dragging');
-      const sourceId = Number(source.dataset.sourceItemId);
-      const selectedSourceIds = this.selectedSourceIds.has(sourceId)
-        ? this.sources
-          .filter((candidate) => this.selectedSourceIds.has(candidate.id))
-          .map((candidate) => candidate.id)
-        : [sourceId];
-      event.dataTransfer?.setData('application/x-kanvas-watch-sources', JSON.stringify(selectedSourceIds));
-      event.dataTransfer?.setData('application/x-kanvas-watch-source', source.dataset.sourceItemId);
-      event.dataTransfer?.setData('text/plain', `kanvas-watch-sources:${selectedSourceIds.join(',')}`);
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
-    }
-
-    onOrderDragStart(event) {
-      const poster = event.target instanceof Element ? event.target.closest('.k-watch-order-poster') : null;
-      if (!(poster instanceof HTMLElement) || !poster.dataset.entryId) return;
-      this.isDragging = true;
-      poster.classList.add('k-watch-order-poster--dragging');
-      event.dataTransfer?.setData('application/x-kanvas-watch-entry', poster.dataset.entryId);
-      event.dataTransfer?.setData('text/plain', poster.dataset.entryId);
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-    }
-
-    onOrderDragOver(event) {
-      event.preventDefault();
-      this.setActiveSlot(this.insertionSlotForTarget(event.target, event.clientX));
-      this.updateDragScroll(event.clientX);
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = Array.from(event.dataTransfer.types).includes('application/x-kanvas-watch-source') ? 'copy' : 'move';
-      }
-    }
-
-    onOrderDragLeave(event) {
-      const related = event.relatedTarget;
-      const dropzone = this.querySelector('[data-order-dropzone]');
-      if (dropzone instanceof Element && related instanceof Node && dropzone.contains(related)) return;
-      this.setActiveSlot(null);
-      this.stopDragScroll();
-    }
-
-    onOrderDrop(event) {
-      event.preventDefault();
-      const slot = this.insertionSlotForTarget(event.target, event.clientX);
-      const beforeEntryId = slot?.dataset.insertBefore || null;
-      const plainText = event.dataTransfer?.getData('text/plain') || '';
-      const sourceIds = this.sourceIdsFromDrop(event.dataTransfer, plainText);
-      if (sourceIds.length) {
-        this.addSources(sourceIds, beforeEntryId);
-        this.clearDragState();
-        return;
-      }
-      const entryId = event.dataTransfer?.getData('application/x-kanvas-watch-entry');
-      if (entryId && !this.isNoopMove(entryId, beforeEntryId)) this.moveEntry(entryId, beforeEntryId);
-      this.clearDragState();
-    }
-
-    sourceIdsFromDrop(dataTransfer, plainText) {
-      const encoded = dataTransfer?.getData('application/x-kanvas-watch-sources');
-      let values = [];
-      try {
-        values = encoded ? JSON.parse(encoded) : plainText.startsWith('kanvas-watch-sources:')
-          ? plainText.slice('kanvas-watch-sources:'.length).split(',').map(Number)
-          : [Number(dataTransfer?.getData('application/x-kanvas-watch-source'))];
-      } catch (_) {
-        return [];
-      }
-      if (!Array.isArray(values)) return [];
-      const sourceIds = values.filter((id) => Number.isSafeInteger(id) && id > 0);
-      return sourceIds.length === values.length && new Set(sourceIds).size === sourceIds.length ? sourceIds : [];
-    }
-
-    updateDragScroll(clientX) {
-      if (!this.order) return;
-      const bounds = this.order.getBoundingClientRect();
-      const edgeWidth = Math.min(72, bounds.width / 3);
-      const leftDistance = clientX - bounds.left;
-      const rightDistance = bounds.right - clientX;
-      this.dragScrollDirection = leftDistance < edgeWidth
-        ? -(1 - leftDistance / edgeWidth)
-        : rightDistance < edgeWidth
-          ? 1 - rightDistance / edgeWidth
-          : 0;
-      if (this.dragScrollDirection && this.dragScrollFrame === null) this.runDragScroll();
-    }
-
-    runDragScroll() {
-      if (!this.order || !this.dragScrollDirection) {
-        this.dragScrollFrame = null;
-        return;
-      }
-      this.order.scrollLeft += this.dragScrollDirection * 18;
-      this.dragScrollFrame = requestAnimationFrame(() => this.runDragScroll());
-    }
-
-    stopDragScroll() {
-      this.dragScrollDirection = 0;
-      if (this.dragScrollFrame !== null) cancelAnimationFrame(this.dragScrollFrame);
-      this.dragScrollFrame = null;
-    }
-
-    onOrderWheel(event) {
-      if (!this.order || !this.isDragging || this.activeSlot === null) return;
-      const delta = event.deltaX || event.deltaY;
-      if (!delta) return;
-      event.preventDefault();
-      this.order.scrollLeft += delta;
-    }
-
-    insertionSlotForTarget(target, clientX) {
-      const element = target instanceof Element ? target : null;
-      const slot = element?.closest('.k-watch-order-slot');
-      if (slot instanceof HTMLElement) return slot;
-      const poster = element?.closest('.k-watch-order-poster');
-      if (poster instanceof HTMLElement) {
-        const bounds = poster.getBoundingClientRect();
-        const insertBefore = clientX < bounds.left + bounds.width / 2;
-        const adjacent = insertBefore ? poster.previousElementSibling : poster.nextElementSibling;
-        if (adjacent instanceof HTMLElement && adjacent.classList.contains('k-watch-order-slot')) return adjacent;
-      }
-      return this.order?.querySelector('.k-watch-order-slot:last-child') ?? null;
-    }
-
-    setActiveSlot(slot) {
-      if (this.activeSlot === slot) return;
-      this.activeSlot?.classList.remove('k-watch-order-slot--active');
-      this.activeSlot = slot instanceof HTMLElement ? slot : null;
-      this.activeSlot?.classList.add('k-watch-order-slot--active');
-      this.order?.classList.toggle('k-watch-workspace__order--dragging', this.activeSlot !== null);
-    }
-
-    clearDragState() {
-      this.setActiveSlot(null);
-      this.isDragging = false;
-      this.stopDragScroll();
-      this.querySelectorAll('.k-watch-order-poster--dragging, .k-watch-source--dragging').forEach((element) => {
-        element.classList.remove('k-watch-order-poster--dragging', 'k-watch-source--dragging');
-      });
-    }
-
-    isNoopMove(entryId, beforeEntryId) {
-      const sourceIndex = this.entries.findIndex((entry) => entry.id === Number(entryId));
-      const beforeIndex = beforeEntryId == null
-        ? this.entries.length
-        : this.entries.findIndex((entry) => entry.id === Number(beforeEntryId));
-      return sourceIndex < 0 || beforeIndex < 0 || sourceIndex === beforeIndex || sourceIndex + 1 === beforeIndex;
-    }
-
-    onOrderClick(event) {
-      const button = event.target instanceof Element ? event.target.closest('[data-row-action]') : null;
-      const poster = button instanceof Element ? button.closest('.k-watch-order-poster') : null;
-      if (!(button instanceof HTMLButtonElement) || !(poster instanceof HTMLElement)) return;
-      const index = this.entries.findIndex((entry) => entry.id === Number(poster.dataset.entryId));
-      if (index < 0) return;
-      if (button.dataset.rowAction === 'back' && index > 0) {
-        if (event.shiftKey) this.moveBoundary(poster.dataset.entryId, 'start');
-        else this.moveEntry(poster.dataset.entryId, String(this.entries[index - 1].id));
-      }
-      if (button.dataset.rowAction === 'forward' && index < this.entries.length - 1) {
-        if (event.shiftKey) this.moveBoundary(poster.dataset.entryId, 'end');
-        else this.moveEntry(poster.dataset.entryId, index + 2 < this.entries.length ? String(this.entries[index + 2].id) : null);
-      }
-      if (button.dataset.rowAction === 'remove') this.mutate({operation: 'remove', entryId: Number(poster.dataset.entryId), revision: this.revision});
-      if (button.dataset.rowAction === 'play') this.playFromHere(poster);
-    }
-
-    onOrderKeydown(event) {
-      const poster = event.target instanceof Element ? event.target.closest('.k-watch-order-poster') : null;
-      if (!(poster instanceof HTMLElement) || event.target instanceof HTMLButtonElement) return;
-      const index = this.entries.findIndex((entry) => entry.id === Number(poster.dataset.entryId));
-      if (index < 0) return;
-      if ((event.key === 'ArrowLeft' || event.key === 'ArrowUp') && index > 0) { event.preventDefault(); this.moveEntry(poster.dataset.entryId, String(this.entries[index - 1].id)); }
-      if ((event.key === 'ArrowRight' || event.key === 'ArrowDown') && index < this.entries.length - 1) { event.preventDefault(); this.moveEntry(poster.dataset.entryId, index + 2 < this.entries.length ? String(this.entries[index + 2].id) : null); }
-      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.mutate({operation: 'remove', entryId: Number(poster.dataset.entryId), revision: this.revision}); }
-      if (event.key === 'Enter') { event.preventDefault(); window.location.assign(`/item/${poster.dataset.itemId}`); }
-    }
-
-    addSource(sourceItemId, beforeEntryId) {
-      const sourceId = Number(sourceItemId);
-      const beforeId = beforeEntryId == null ? null : Number(beforeEntryId);
-      if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId <= 0))) return;
-      this.mutate({operation: 'add_source', sourceItemId: sourceId, beforeEntryId: beforeId, revision: this.revision});
-    }
-
-    addSources(sourceItemIds, beforeEntryId) {
-      const sourceIds = sourceItemIds.map(Number);
-      const beforeId = beforeEntryId == null ? null : Number(beforeEntryId);
-      if (!sourceIds.length || sourceIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) return;
-      if (new Set(sourceIds).size !== sourceIds.length) return;
-      if (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId <= 0)) return;
-      this.mutate({operation: 'add_sources', sourceItemIds: sourceIds, beforeEntryId: beforeId, revision: this.revision});
-    }
-
-    moveEntry(entryId, beforeEntryId) {
-      const id = Number(entryId);
-      const before = beforeEntryId == null ? null : Number(beforeEntryId);
-      if (!Number.isSafeInteger(id) || id <= 0 || (before !== null && (!Number.isSafeInteger(before) || before <= 0))) return;
-      this.mutate({operation: 'move', entryId: id, beforeEntryId: before, afterEntryId: null, revision: this.revision});
-    }
-
-    moveBoundary(entryId, boundary) {
-      const id = Number(entryId);
-      if (!Number.isSafeInteger(id) || id <= 0 || (boundary !== 'start' && boundary !== 'end')) return;
-      this.mutate({operation: 'move', entryId: id, boundary, revision: this.revision});
-    }
-
-    async playFromHere(row) {
-      const action = this.getAttribute('launch-action');
-      if (!action || !this.status) return;
-      if (row.querySelector('.k-watch-row__warning, .k-watch-order-poster__warning')) { this.status.textContent = 'This entry is unavailable. Use Play available entries to skip it.'; return; }
-      this.status.textContent = 'Opening player…';
-      try {
-        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify({itemId: Number(row.dataset.itemId)})});
-        const payload = await response.json();
-        if (!response.ok || typeof payload.playbackUrl !== 'string' || !payload.playbackUrl.startsWith('/play/watch-orders/')) throw new Error('Launch failed');
-        window.location.assign(payload.playbackUrl);
-      } catch (_) { this.status.textContent = 'Could not start browser playback.'; }
-    }
-
-    async mutate(intent) {
-      const action = this.getAttribute('action');
-      if (!action || !this.status) return;
-      this.setAttribute('aria-busy', 'true');
-      this.status.textContent = 'Saving change…';
-      try {
-        const response = await fetch(action, {method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, credentials: 'same-origin', body: JSON.stringify(intent)});
-        const payload = await response.json();
-        if (response.status === 409) { this.showConflict(payload, intent); return; }
-        if (!response.ok || !Number.isInteger(payload.revision)) throw new Error(payload.error || 'Action failed');
-        this.revision = payload.revision;
-        this.syncWatchOrderFormRevisions();
-        await this.load();
-      } catch (_) { this.status.textContent = 'Could not save this change.'; }
-      finally { this.removeAttribute('aria-busy'); }
-    }
-
-    syncWatchOrderFormRevisions() {
-      const entryAction = this.getAttribute('action');
-      const actionPrefix = entryAction?.replace(/\/entries$/, '');
-      if (!actionPrefix) return;
-      document.querySelectorAll('form').forEach((form) => {
-        if (!form.getAttribute('action')?.startsWith(actionPrefix)) return;
-        form.querySelectorAll('input[name="revision"]').forEach((input) => {
-          input.value = String(this.revision);
-        });
-      });
-    }
-
-    showConflict(payload, intent) {
-      this.pendingIntent = intent;
-      const state = this.querySelector('.k-conflict-state');
-      if (!state) return;
-      const revision = Number.isInteger(payload.currentRevision) ? payload.currentRevision : null;
-      state.hidden = false;
-      state.innerHTML = '<span>This watch order changed elsewhere.</span><button type="button" class="k-button" data-conflict-reload>Reload</button><button type="button" class="k-button" data-conflict-reapply>Reapply</button>';
-      state.querySelector('[data-conflict-reload]')?.addEventListener('click', () => this.load());
-      state.querySelector('[data-conflict-reapply]')?.addEventListener('click', () => {
-        if (this.pendingIntent && revision !== null) this.mutate({...this.pendingIntent, revision});
-      });
-    }
-  }
-
   if (!customElements.get('kanvas-collection-grid')) customElements.define('kanvas-collection-grid', KanvasCollectionGrid);
   if (!customElements.get('kanvas-collection-builder')) customElements.define('kanvas-collection-builder', KanvasCollectionBuilder);
   if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);
   if (!customElements.get('kanvas-item-picker')) customElements.define('kanvas-item-picker', KanvasItemPicker);
-  if (!customElements.get('kanvas-watch-order-list')) customElements.define('kanvas-watch-order-list', KanvasWatchOrderList);
-  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);
 
   window.kanvasInternals = {
     escapeHtml,

@@ -16,6 +16,7 @@ from kasana.katalog.public import (
     LibraryItemDetail,
     LibraryItemKind,
     ManualQueuePlaybackContext,
+    PlaybackContextKind,
     PlaybackPlanRequest,
     PlaybackSessionCloseResult,
     PlaybackSessionCompletionRequest,
@@ -109,7 +110,7 @@ class KanvasPlaybackService:
                     start_item_id=start_item_id,
                     resume=resume,
                     skip_unavailable=skip_unavailable,
-                )
+                ).model_copy(update={"response_window_size": 100})
             )
             return await client.launch_playback_plan(launch.launch_token)
 
@@ -180,14 +181,26 @@ class KanvasPlaybackService:
         """Create a Kestrel launch for the unplayed tail of an owned browser queue."""
 
         owned_session = self._owned_session(session)
-        remaining_entries = owned_session.entries[owned_session.current_entry_position :]
+        remaining_entries = tuple(
+            entry
+            for entry in owned_session.entries
+            if entry.position >= owned_session.current_entry_position
+        )
         entry_ids = tuple(entry.item_id for entry in remaining_entries)
         if not entry_ids:
             msg = "Playback sessions must contain a current media item."
             raise ValueError(msg)
         request = PlaybackPlanRequest(
             user_id=self._user_id,
-            context=ManualQueuePlaybackContext(item_ids=entry_ids),
+            context=(
+                WatchOrderPlaybackContext(
+                    watch_order_id=owned_session.context.watch_order_id,
+                    source_session_id=owned_session.id,
+                )
+                if owned_session.context.kind is PlaybackContextKind.WATCH_ORDER
+                and owned_session.context.watch_order_id is not None
+                else ManualQueuePlaybackContext(item_ids=entry_ids)
+            ),
         )
         async with self._client() as client:
             launch = await client.create_playback_plan(request)

@@ -57,6 +57,7 @@ from kasana.katalog.models import (
     UserRole as ModelUserRole,
 )
 from kasana.katalog.public import (
+    CollectionDetailsUpdate,
     CollectionMembershipAddition,
     CollectionMembershipBatchRequest,
     CollectionMembershipUpdate,
@@ -2296,6 +2297,26 @@ async def test_typed_aiohttp_client_round_trip_and_cancellation(
                 ),
             )
             assert membership_batch.revision == collection.revision + 1
+            renamed = await client.batch_collection_memberships(
+                1,
+                CollectionMembershipBatchRequest(
+                    expected_revision=membership_batch.revision,
+                    details=CollectionDetailsUpdate(name="Renamed collection"),
+                ),
+            )
+            renamed_detail = await client.get_collection(1)
+            assert renamed_detail.name == "Renamed collection"
+            assert renamed_detail.default_watch_order_id == collection.default_watch_order_id
+            assert renamed_detail.overview == collection.overview
+            assert renamed_detail.artwork_item_id == collection.artwork_item_id
+            await client.batch_collection_memberships(
+                1,
+                CollectionMembershipBatchRequest(
+                    expected_revision=renamed.revision,
+                    details=CollectionDetailsUpdate(artwork_item_id=None),
+                ),
+            )
+            assert (await client.get_collection(1)).name == "Renamed collection"
             looked_up_memberships = await client.lookup_collection_memberships(1, (1, 2))
             assert [membership.item.id for membership in looked_up_memberships] == [1, 2]
             initial_state = await client.playback_state(1, 1)

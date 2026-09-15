@@ -15,6 +15,7 @@ from kasana.kanvas.components.browser import BrowserComponent, mount_browser_com
 from kasana.kanvas.components.navigation import primary_navigation
 from kasana.kanvas.profiles import SessionProfile
 from kasana.kanvas.settings import Kanvas_Settings
+from kasana.katalog.public import MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,8 @@ class KanvasAssetVersions:
     item_editor_javascript: str
     libass_javascript: str
     playback_javascript: str
+    watch_orders_javascript: str
+    collection_mode_javascript: str
 
 
 def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
@@ -39,6 +42,8 @@ def kanvas_asset_versions(static_directory: Path) -> KanvasAssetVersions:
         item_editor_javascript=_asset_version(static_directory / "kanvas-item-editor.js"),
         libass_javascript=_asset_version(static_directory / "libass" / "subtitles-octopus.js"),
         playback_javascript=_asset_version(static_directory / "kanvas-playback.js"),
+        watch_orders_javascript=_asset_version(static_directory / "kanvas-watch-orders.js"),
+        collection_mode_javascript=_asset_version(static_directory / "kanvas-collection-mode.js"),
     )
 
 
@@ -51,6 +56,9 @@ def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
 
     component_scripts = dumps(
         {
+            BrowserComponent.COLLECTION_MODE.value: (
+                f"/_kanvas/kanvas-collection-mode.js?v={asset_versions.collection_mode_javascript}"
+            ),
             BrowserComponent.ADMINISTRATION.value: (
                 f"/_kanvas/kanvas-administration.js?v={asset_versions.administration_javascript}"
             ),
@@ -60,6 +68,15 @@ def kanvas_head_html(asset_versions: KanvasAssetVersions) -> str:
             BrowserComponent.PLAYBACK_PLAYER.value: (
                 f"/_kanvas/kanvas-playback.js?v={asset_versions.playback_javascript}"
             ),
+            **{
+                component.value: (
+                    f"/_kanvas/kanvas-watch-orders.js?v={asset_versions.watch_orders_javascript}"
+                )
+                for component in (
+                    BrowserComponent.WATCH_ORDER_LIST,
+                    BrowserComponent.WATCH_ORDER_WORKSPACE,
+                )
+            },
         },
         separators=(",", ":"),
     ).replace("</", "<\\/")
@@ -110,5 +127,13 @@ def page_shell(
             )
         main_classes = "k-main k-main--home" if active_route == "/" else "k-main"
         with ui.element("main").classes(main_classes).props(f'aria-label="{title}"'):
+            mount_browser_component(
+                BrowserComponent.COLLECTION_MODE,
+                {
+                    "profile-id": profile.user.id if profile is not None else 0,
+                    "enabled": profile is not None and profile.is_administrator,
+                    "lookup-limit": MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE,
+                },
+            ).props("hidden")
             with ui.element("div").classes("k-page-content"):
                 yield

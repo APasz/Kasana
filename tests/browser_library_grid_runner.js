@@ -262,6 +262,7 @@ global.sessionStorage = {
     storage.delete(key);
   }
 };
+window.sessionStorage = global.sessionStorage;
 global.IntersectionObserver = class {
   observe() {}
   disconnect() {}
@@ -272,7 +273,8 @@ console.error = (...values) => consoleErrors.push(values);
 const source = [
   fs.readFileSync('src/kasana/kanvas/static/kanvas.js', 'utf8'),
   fs.readFileSync('src/kasana/kanvas/static/kanvas-administration.js', 'utf8'),
-  fs.readFileSync('src/kasana/kanvas/static/kanvas-item-editor.js', 'utf8')
+  fs.readFileSync('src/kasana/kanvas/static/kanvas-item-editor.js', 'utf8'),
+  fs.readFileSync('src/kasana/kanvas/static/kanvas-collection-mode.js', 'utf8')
 ].join('\n');
 const exposed = source.replace(
   "if (!customElements.get('kanvas-toasts')) {\n    customElements.define('kanvas-toasts', KanvasToasts);\n  }",
@@ -292,9 +294,6 @@ const exposed = source.replace(
 ).replace(
   "if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);",
   "globalThis.__itemCollectionPickerTest = {KanvasItemCollectionPicker};\n  if (!customElements.get('kanvas-item-collection-picker')) customElements.define('kanvas-item-collection-picker', KanvasItemCollectionPicker);"
-).replace(
-  "if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);",
-  "globalThis.__watchOrderTest = {KanvasWatchOrderWorkspace};\n  if (!customElements.get('kanvas-watch-order-workspace')) customElements.define('kanvas-watch-order-workspace', KanvasWatchOrderWorkspace);"
 ).replace(
   "if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);",
   "globalThis.__administrationTest = {KanvasAdministration};\n  if (!customElements.get('kanvas-administration')) customElements.define('kanvas-administration', KanvasAdministration);"
@@ -999,7 +998,7 @@ function testLibraryGridStylesUseResponsiveGeometryWithoutCardSpans() {
   assert.match(stylesheet, /\.k-grid--landscape \{/);
   assert.match(stylesheet, /\.k-grid--portrait \.k-poster__art \{ aspect-ratio: 2 \/ 3; \}/);
   assert.match(stylesheet, /\.k-grid--landscape \.k-poster__art \{ aspect-ratio: 16 \/ 9; \}/);
-  assert.match(stylesheet, /\.k-grid > kanvas-poster:has\(.k-poster--landscape\) \{ width: 100%; \}/);
+  assert.match(stylesheet, /\.k-grid > kanvas-poster:has\(.k-poster--landscape\)(?:,\s*[^{}]+)? \{ width: 100%; \}/);
   assert.match(stylesheet, /@media \(max-width: 700px\)/);
   assert.match(stylesheet, /@media \(max-width: 440px\)/);
   assert.doesNotMatch(
@@ -1105,42 +1104,6 @@ function testPosterNormalisationAllowsOnlySafeItemAndResumeLinks() {
   );
 }
 
-function testWatchOrderInsertionSlotsRejectOnlyNoOpMoves() {
-  const workspace = new globalThis.__watchOrderTest.KanvasWatchOrderWorkspace();
-  workspace.entries = [{id: 1}, {id: 2}, {id: 3}];
-
-  assert.equal(workspace.isNoopMove('1', '2'), true);
-  assert.equal(workspace.isNoopMove('1', '3'), false);
-  assert.equal(workspace.isNoopMove('3', null), true);
-  assert.equal(workspace.isNoopMove('2', '1'), false);
-  assert.match(workspace.insertionSlot(2), /data-insert-before="2"/);
-  assert.match(workspace.insertionSlot(null), /Add to end of order/);
-
-  workspace.order = {scrollLeft: 12};
-  workspace.activeSlot = {};
-  workspace.isDragging = true;
-  let prevented = false;
-  workspace.onOrderWheel({
-    deltaX: 0,
-    deltaY: 28,
-    preventDefault() { prevented = true; }
-  });
-  assert.equal(workspace.order.scrollLeft, 40);
-  assert.equal(prevented, true);
-
-  workspace.revision = 9;
-  let boundaryIntent = null;
-  workspace.mutate = (intent) => { boundaryIntent = intent; };
-  workspace.moveBoundary('2', 'start');
-  assert.deepEqual(boundaryIntent, {
-    operation: 'move', entryId: 2, boundary: 'start', revision: 9
-  });
-
-  workspace.addSources([4, 5], 2);
-  assert.deepEqual(boundaryIntent, {
-    operation: 'add_sources', sourceItemIds: [4, 5], beforeEntryId: 2, revision: 9
-  });
-}
 async function testCategorisedFailureAndRetry() {
   const instance = grid();
   const initial = globalThis.__libraryTest.LibraryPageDirection.INITIAL;
@@ -2525,52 +2488,17 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
 function testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry() {
   const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
   const builder = new KanvasCollectionBuilder();
-  assert.equal('revision' in builder, false);
   builder.collectionRevision = 7;
-  const existing = {poster: validPoster(7), kind: 'movie', relationship: 'primary'};
-  builder.currentMembers.set(7, existing);
-  builder.memberOrder = [7];
-  builder.searchRows = [
-    {...existing, alreadyMember: true},
-    {poster: validPoster(8), kind: 'movie', alreadyMember: false, relationship: null},
-    {poster: validPoster(9), kind: 'series', alreadyMember: false, relationship: null}
-  ];
-
+  builder.currentMembers.set(7, {poster: validPoster(7), kind: 'movie', relationship: 'primary'});
   builder.changeRelationship(7, 'related');
-  builder.toggleMemberRemoval(7);
-  builder.toggleSearchResult(8);
-  builder.selectAllShown('series');
-
-  assert.deepEqual(builder.batchPayload(), {
-    expected_revision: 7,
-    additions: [
-      {library_item_id: 8, relationship: null},
-      {library_item_id: 9, relationship: null}
-    ],
-    relationship_updates: [],
-    removals: [7]
-  });
-  assert.equal(builder.searchState(builder.searchRows[0]), 'removing');
-  assert.equal(builder.searchState(builder.searchRows[1]), 'selected');
-  assert.equal(builder.searchState(builder.searchRows[2]), 'selected');
-
+  assert.deepEqual(builder.batchPayload(), {expected_revision: 7, relationship_updates: [{library_item_id: 7, relationship: 'related'}]});
   let retried = false;
   builder.conflict = {revision: 12};
   builder.save = () => { retried = true; };
   builder.retryConflict();
-
   assert.equal(retried, true);
   assert.equal(builder.collectionRevision, 12);
-  assert.equal(builder.conflict, null);
-  assert.deepEqual(builder.batchPayload(), {
-    expected_revision: 12,
-    additions: [
-      {library_item_id: 8, relationship: null},
-      {library_item_id: 9, relationship: null}
-    ],
-    relationship_updates: [],
-    removals: [7]
-  });
+  assert.equal(builder.batchPayload().relationship_updates[0].relationship, 'related');
 }
 
 async function testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave() {
@@ -2579,11 +2507,10 @@ async function testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave() {
   assert.equal('revision' in builder, false);
   builder.setAttribute('revision', '7');
   builder.setAttribute('action', '/kanvas/actions/collections/4/members/batch');
-  builder.additions.set(8, {poster: validPoster(8), kind: 'movie', relationship: null});
+  builder.relationshipUpdates.set(8, 'related');
   builder.memberStatus = new FakeHTMLElement('div');
   builder.renderWorkspace = () => {};
   builder.resetMembers = async () => {};
-  builder.resetSearch = async () => {};
   const originalFetch = global.fetch;
   let request = null;
   try {
@@ -2600,9 +2527,7 @@ async function testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave() {
     url: '/kanvas/actions/collections/4/members/batch',
     body: {
       expected_revision: 7,
-      additions: [{library_item_id: 8, relationship: null}],
-      relationship_updates: [],
-      removals: []
+      relationship_updates: [{library_item_id: 8, relationship: 'related'}]
     }
   });
   assert.equal(builder.collectionRevision, 8);
@@ -2640,21 +2565,14 @@ function testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightE
 
   const existing = {poster: validPoster(7), kind: 'movie', relationship: 'primary'};
   builder.currentMembers.set(7, existing);
-  builder.searchRows = [
-    {...existing, alreadyMember: true},
-    {poster: validPoster(8), kind: 'movie', alreadyMember: false, relationship: null}
-  ];
   builder.saving = true;
-  builder.toggleSearchResult(8);
-  builder.toggleMemberRemoval(7);
   builder.changeRelationship(7, 'related');
 
-  assert.equal(builder.additions.size, 0);
   assert.equal(builder.removals.size, 0);
   assert.equal(builder.relationshipUpdates.size, 0);
 }
 
-function testCollectionBuilderBoundsMemberCacheWithoutDroppingStagedChanges() {
+function testCollectionBuilderKeepsPreviouslyLoadedMembersReachable() {
   const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
   const builder = new KanvasCollectionBuilder();
   for (let itemId = 1; itemId <= 145; itemId += 1) {
@@ -2663,12 +2581,15 @@ function testCollectionBuilderBoundsMemberCacheWithoutDroppingStagedChanges() {
   }
   builder.removals.add(1);
 
-  builder.trimMemberCache();
+  builder.memberResults = new FakeHTMLElement('div');
+  builder.memberCard = (id) => { const row = new FakeHTMLElement('div'); row.textContent = String(id); return row; };
+  builder.renderMembers();
 
-  assert.equal(builder.memberOrder.length, 144);
-  assert.equal(builder.currentMembers.size, 144);
+  assert.equal(builder.memberOrder.length, 145);
+  assert.equal(builder.currentMembers.size, 145);
   assert.equal(builder.currentMembers.has(1), true);
-  assert.equal(builder.currentMembers.has(2), false);
+  assert.equal(builder.currentMembers.has(2), true);
+  assert.equal(builder.memberResults.children.length, 145);
   assert.equal(builder.removals.has(1), true);
 }
 
@@ -2738,6 +2659,109 @@ async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflic
   assert.match(picker.status.textContent, /Remaining staged changes/);
 }
 
+function makeCollectionMode() {
+  const Mode = customElements.get('kanvas-collection-mode');
+  const mode = new Mode();
+  mode.enabled = true;
+  mode.profileId = 1;
+  mode.activeId = 4;
+  mode.lookupLimit = 2;
+  mode.render = () => {};
+  mode.schedule = () => {};
+  return mode;
+}
+
+const modeState = (items = [], revision = 7) => ({
+  id: 4, name: 'Stargate', revision, itemCount: 1, artworkItemId: 7,
+  items: items.map((itemId) => ({itemId, state: itemId === 7 ? 'direct' : itemId === 9 ? 'inherited' : 'absent',
+    relationship: itemId === 7 ? 'primary' : null, inheritedFromId: itemId === 9 ? 7 : null,
+    inheritedFromTitle: itemId === 9 ? 'Stargate' : null}))
+});
+
+function modeControl(id) {
+  const control = new FakeHTMLElement();
+  control.setAttribute('item-id', String(id));
+  control.setAttribute('item-title', `Title ${id}`);
+  return control;
+}
+
+async function testCollectionModeBatchesAndPrunesMountedMemberships() {
+  const mode = makeCollectionMode();
+  const controls = [7, 8, 9, 9].map(modeControl);
+  controls.forEach((control) => mode.controls.add(control));
+  const requests = [];
+  mode.request = async (id, ids) => { assert.equal(id, 4); requests.push(ids); return modeState(ids); };
+  await mode.loadControls();
+  assert.deepEqual(requests, [[7, 8], [9]]);
+  assert.equal(mode.contexts.get(4).memberships.size, 3);
+  await mode.loadControls();
+  assert.equal(requests.length, 2);
+  controls.slice(0, 2).forEach((control) => mode.unregister(control));
+  await mode.loadControls();
+  assert.deepEqual([...mode.contexts.get(4).memberships.keys()], [9]);
+}
+
+async function testCollectionModeImmediateRemovalUndoAndConflict() {
+  const mode = makeCollectionMode();
+  mode.applyState(modeState([7, 9]));
+  const originalFetch = global.fetch;
+  const requests = [];
+  try {
+    global.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return response({body: {revision: requests.length + 7, warnings: []}});
+    };
+    await mode.change(modeControl(9));
+    assert.equal(requests.length, 0, 'Inherited membership cannot remove a parent implicitly');
+    await mode.change(modeControl(7));
+    assert.deepEqual(requests[0], {expected_revision: 7, removals: [7]});
+    const saved = JSON.parse(sessionStorage.getItem('kanvas-collection-mode'));
+    assert.equal(saved.profileId, 1);
+    assert.equal(saved.activeId, 4);
+    assert.equal(saved.undo.revision, 8);
+    const nextPage = makeCollectionMode();
+    nextPage.undo = saved.undo;
+    await nextPage.undoChange();
+    assert.deepEqual(requests[1], {expected_revision: 8,
+      additions: [{library_item_id: 7, relationship: 'primary'}], details: {artwork_item_id: 7}});
+    assert.equal(nextPage.undo, null);
+    nextPage.undo = saved.undo;
+    global.fetch = async () => response({status: 409, body: {currentRevision: 20}});
+    await nextPage.undoChange();
+    assert.equal(nextPage.undo, null, 'A stale undo cannot overwrite intervening changes');
+    assert.match(nextPage.message, /changed/);
+    assert.equal(nextPage.busy, false);
+  } finally { global.fetch = originalFetch; }
+}
+
+async function testCollectionModeSerialisesWritesAndClearsRevokedProfiles() {
+  const mode = makeCollectionMode();
+  mode.applyState(modeState([8]));
+  const originalFetch = global.fetch;
+  let finish;
+  let count = 0;
+  try {
+    global.fetch = async () => {
+      count += 1;
+      return new Promise((resolve) => { finish = resolve; });
+    };
+    const pending = mode.change(modeControl(8));
+    assert.equal(mode.busy, true);
+    await mode.change(modeControl(8));
+    assert.equal(count, 1);
+    finish(response({body: {revision: 8, warnings: []}}));
+    await pending;
+    assert.equal(mode.undo.added, true);
+    mode.applyState(modeState([8], 8));
+    global.fetch = async () => response({status: 403, body: {error: 'Forbidden'}});
+    await mode.change(modeControl(8));
+    assert.equal(mode.enabled, false);
+    assert.equal(mode.activeId, null);
+    assert.equal(mode.undo, null);
+    assert.equal(sessionStorage.getItem('kanvas-collection-mode'), null);
+  } finally { global.fetch = originalFetch; }
+}
+
 async function main() {
   testToastNormalisationAndPublishing();
   await testNativeActionFormKeepsTheClickedSubmitter();
@@ -2766,7 +2790,6 @@ async function main() {
   testPosterStatusBadgeMarkup();
   testRailControlsHideWhenViewportDoesNotOverflow();
   testPosterNormalisationAllowsOnlySafeItemAndResumeLinks();
-  testWatchOrderInsertionSlotsRejectOnlyNoOpMoves();
   await testCategorisedFailureAndRetry();
   await testMalformedResponsesAndPosters();
   await testCancellationStateAndDevelopmentDiagnostics();
@@ -2811,8 +2834,11 @@ async function main() {
   testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry();
   await testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave();
   testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightEdits();
-  testCollectionBuilderBoundsMemberCacheWithoutDroppingStagedChanges();
+  testCollectionBuilderKeepsPreviouslyLoadedMembersReachable();
   await testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflict();
+  await testCollectionModeBatchesAndPrunesMountedMemberships();
+  await testCollectionModeImmediateRemovalUndoAndConflict();
+  await testCollectionModeSerialisesWritesAndClearsRevokedProfiles();
   process.stdout.write('browser library grid checks passed\n');
 }
 

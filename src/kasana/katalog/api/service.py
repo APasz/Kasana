@@ -38,6 +38,7 @@ from kasana.katalog.api.contracts import (
     Availability,
     CollectionCreate,
     CollectionDetail,
+    CollectionDetailsUpdate,
     CollectionMembership,
     CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
@@ -54,6 +55,7 @@ from kasana.katalog.api.contracts import (
     DuplicateEpisodeIssue,
     EpisodeItemDetail,
     ExtraItemDetail,
+    InheritedCollectionMembership,
     ItemCollectionReference,
     LibraryItemDetail,
     LibraryItemEditAudit,
@@ -125,6 +127,7 @@ from kasana.katalog.api.contracts import (
     WatchOrderEntryCreate,
     WatchOrderEntryDetail,
     WatchOrderEntryMove,
+    WatchOrderGenerationApplyMode,
     WatchOrderGenerationMode,
     WatchOrderGenerationPreview,
     WatchOrderGenerationRequest,
@@ -147,6 +150,7 @@ from kasana.katalog.filesystem import is_library_root_accessible
 from kasana.katalog.limits import (
     MAX_ARTWORK_PER_ITEM,
     MAX_LIBRARY_ITEM_EXTERNAL_IDENTIFIERS,
+    MAX_WATCH_ORDER_ENTRIES,
     PLAYBACK_SESSION_PROGRESS_GRACE_PERIOD_DURATION_FRACTION,
     PLAYBACK_SESSION_PROGRESS_MAX_GRACE_PERIOD_SECONDS,
 )
@@ -1547,7 +1551,7 @@ class KatalogQueryService:
                 collection_id=collection.id, revision=collection.revision
             )
 
-        return self._database.run_transaction(create)
+        return self._database.run_transaction(create, immediate=True)
 
     def update_collection(
         self, collection_id: int, request: CollectionUpdate
@@ -1555,25 +1559,14 @@ class KatalogQueryService:
         def update_collection(session: Session) -> CollectionMutationResult:
             collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, request.expected_revision, "Collection")
-            if "name" in request.model_fields_set:
-                collection.name = request.name or ""
-            if "overview" in request.model_fields_set:
-                collection.overview = request.overview
-            if "artwork_item_id" in request.model_fields_set:
-                collection.artwork_item_id = _validated_collection_artwork_item_id(
-                    session, collection, request.artwork_item_id
-                )
-            if "default_watch_order_id" in request.model_fields_set:
-                collection.default_watch_order_id = _validated_default_watch_order_id(
-                    session, collection, request.default_watch_order_id
-                )
+            _apply_collection_details(session, collection, request)
             collection.revision += 1
             session.flush()
             return CollectionMutationResult(
                 collection_id=collection.id, revision=collection.revision
             )
 
-        return self._database.run_transaction(update_collection)
+        return self._database.run_transaction(update_collection, immediate=True)
 
     def delete_collection(
         self, collection_id: int, *, expected_revision: int
@@ -1587,7 +1580,7 @@ class KatalogQueryService:
                 collection_id=collection_id, revision=expected_revision + 1, deleted=True
             )
 
-        return self._database.run_transaction(delete_collection)
+        return self._database.run_transaction(delete_collection, immediate=True)
 
     def list_collection_members(
         self, collection_id: int, *, cursor: str | None, limit: int
@@ -1620,6 +1613,32 @@ class KatalogQueryService:
                     _encode_cursor("collection-members", {"id": page[-1][0].id})
                     if has_next
                     else None
+                ),
+                limit=normalised_limit,
+            )
+
+        return self._database.run_transaction(load)
+
+    def list_collection_sources(
+        self, collection_id: int, *, cursor: str | None, limit: int
+    ) -> PaginatedResponse[LibraryItemSummary]:
+        """Page a collection's hierarchy with one recursive query per page."""
+
+        normalised_limit = _page_limit(limit)
+        cursor_value = _decode_cursor(cursor, "collection-sources")
+
+        def load(session: Session) -> PaginatedResponse[LibraryItemSummary]:
+            _require(session, Collection, collection_id, "Collection")
+            statement = _collection_source_statement(collection_id)
+            if cursor_value is not None:
+                statement = statement.where(Zaisan.id > _cursor_int(cursor_value, "id"))
+            rows = tuple(session.scalars(statement.order_by(Zaisan.id).limit(normalised_limit + 1)))
+            page, has_next = _split_page(rows, normalised_limit)
+            summaries = _summaries_for(session, page)
+            return PaginatedResponse[LibraryItemSummary](
+                items=tuple(summaries[item.id] for item in page),
+                next_cursor=(
+                    _encode_cursor("collection-sources", {"id": page[-1].id}) if has_next else None
                 ),
                 limit=normalised_limit,
             )
@@ -1662,7 +1681,7 @@ class KatalogQueryService:
                 membership=_membership_detail(membership, summary),
             )
 
-        return self._database.run_transaction(add)
+        return self._database.run_transaction(add, immediate=True)
 
     def batch_collection_memberships(
         self, collection_id: int, request: CollectionMembershipBatchRequest
@@ -1745,12 +1764,17 @@ class KatalogQueryService:
                 session.delete(memberships_by_item_id[item_id])
             if collection.artwork_item_id in removal_item_ids:
                 collection.artwork_item_id = None
+            if request.details is not None:
+                session.flush()
+                _apply_collection_details(session, collection, request.details)
             collection.revision += 1
             session.flush()
             return CollectionMutationResult(
                 collection_id=collection.id,
                 revision=collection.revision,
-                warnings=tuple(warnings_by_item_id[item_id] for item_id in sorted(warnings_by_item_id)),
+                warnings=tuple(
+                    warnings_by_item_id[item_id] for item_id in sorted(warnings_by_item_id)
+                ),
             )
 
         return self._database.run_transaction(batch, immediate=True)
@@ -1758,10 +1782,10 @@ class KatalogQueryService:
     def lookup_collection_memberships(
         self, collection_id: int, request: CollectionMembershipLookupRequest
     ) -> CollectionMembershipLookupResponse:
-        """Load direct memberships for a bounded caller-selected item page."""
+        """Resolve a bounded page's direct and optional inherited memberships."""
 
         def lookup(session: Session) -> CollectionMembershipLookupResponse:
-            _require(session, Collection, collection_id, "Collection")
+            collection = _require(session, Collection, collection_id, "Collection")
             statement: Select[tuple[CollectionKin, Zaisan]] = (
                 select(CollectionKin, Zaisan)
                 .join(Zaisan, CollectionKin.library_item_id == Zaisan.id)
@@ -1776,11 +1800,19 @@ class KatalogQueryService:
                 membership.library_item_id: membership for membership, _ in rows
             }
             return CollectionMembershipLookupResponse(
+                collection=_collection_summary(session, collection),
                 memberships=tuple(
                     _membership_detail(memberships_by_item_id[item_id], items_by_id[item_id])
                     for item_id in request.library_item_ids
                     if item_id in memberships_by_item_id
-                )
+                ),
+                inherited_memberships=(
+                    _inherited_collection_memberships(
+                        session, collection_id, request.library_item_ids
+                    )
+                    if request.include_ancestors
+                    else ()
+                ),
             )
 
         return self._database.run_transaction(lookup)
@@ -1832,7 +1864,7 @@ class KatalogQueryService:
                 warnings=tuple(warnings_by_item_id.values()),
             )
 
-        return self._database.run_transaction(remove)
+        return self._database.run_transaction(remove, immediate=True)
 
     def list_collection_watch_orders(
         self, collection_id: int, *, cursor: str | None, limit: int, user_id: int | None = None
@@ -1899,13 +1931,39 @@ class KatalogQueryService:
             session.flush()
             if collection.default_watch_order_id is None:
                 collection.default_watch_order_id = watch_order.id
+            if request.copy_from_order_id is not None:
+                source: Keiro = _require(session, Keiro, request.copy_from_order_id, "Watch order")
+                if source.collection_id != collection.id:
+                    raise CatalogueValidationError("Choose an order from this collection.")
+                item_ids = tuple(
+                    session.scalars(
+                        select(KeiroEntry.library_item_id)
+                        .where(KeiroEntry.watch_order_id == source.id)
+                        .order_by(KeiroEntry.position)
+                    )
+                )
+                _replace_watch_order_entries(session, watch_order.id, item_ids)
+            elif request.generation_mode is not None:
+                preview = _generation_preview(
+                    session,
+                    watch_order,
+                    WatchOrderGenerationRequest(
+                        expected_revision=watch_order.revision,
+                        mode=request.generation_mode,
+                        apply_mode=WatchOrderGenerationApplyMode.REPLACE,
+                    ),
+                )
+                _replace_watch_order_entries(
+                    session, watch_order.id, tuple(item.id for item in preview.entries)
+                )
+            session.flush()
             return WatchOrderMutationResult(
                 watch_order_id=watch_order.id,
                 revision=watch_order.revision,
                 collection_revision=collection.revision,
             )
 
-        return self._database.run_transaction(create)
+        return self._database.run_transaction(create, immediate=True)
 
     def update_watch_order(
         self, watch_order_id: int, request: WatchOrderUpdate
@@ -1927,6 +1985,8 @@ class KatalogQueryService:
                 watch_order.name = name
             if "kind" in request.model_fields_set and request.kind is not None:
                 watch_order.order_kind = KeiroKind(request.kind.value)
+            if request.item_ids is not None:
+                _replace_watch_order_entries(session, watch_order.id, request.item_ids)
             watch_order.revision += 1
             session.flush()
             collection: Collection = _require(
@@ -1938,7 +1998,7 @@ class KatalogQueryService:
                 collection_revision=collection.revision,
             )
 
-        return self._database.run_transaction(update_watch_order)
+        return self._database.run_transaction(update_watch_order, immediate=True)
 
     def delete_watch_order(
         self, watch_order_id: int, *, expected_revision: int
@@ -1973,7 +2033,7 @@ class KatalogQueryService:
                 deleted=True,
             )
 
-        return self._database.run_transaction(delete_watch_order)
+        return self._database.run_transaction(delete_watch_order, immediate=True)
 
     def get_watch_order(
         self, watch_order_id: int, *, cursor: str | None, limit: int, user_id: int | None = None
@@ -2060,6 +2120,10 @@ class KatalogQueryService:
                 after_entry_id=request.insert_after_entry_id,
             )
             highest: int = _highest_position(session, watch_order.id)
+            if highest + 2 > MAX_WATCH_ORDER_ENTRIES:
+                raise CatalogueValidationError(
+                    f"Watch orders support at most {MAX_WATCH_ORDER_ENTRIES} entries."
+                )
             if position <= highest:
                 _shift_positions(session, watch_order.id, position, highest, 1)
             entry: KeiroEntry = KeiroEntry(
@@ -2080,7 +2144,7 @@ class KatalogQueryService:
                 entry=_entry_detail(entry, _summaries_for(session, (item,))[item.id]),
             )
 
-        return self._database.run_transaction(add)
+        return self._database.run_transaction(add, immediate=True)
 
     def add_watch_order_entries(
         self, watch_order_id: int, request: WatchOrderEntriesCreate
@@ -2104,6 +2168,10 @@ class KatalogQueryService:
                 )
             )
             duplicate_ids = existing_ids.intersection(item.id for item in items)
+            if len(existing_ids) + len(items) > MAX_WATCH_ORDER_ENTRIES:
+                raise CatalogueValidationError(
+                    f"Watch orders support at most {MAX_WATCH_ORDER_ENTRIES} entries."
+                )
             if duplicate_ids:
                 raise CatalogueValidationError(
                     "A batch contains an item already in this watch order."
@@ -2136,7 +2204,7 @@ class KatalogQueryService:
                 collection_revision=collection.revision,
             )
 
-        return self._database.run_transaction(add)
+        return self._database.run_transaction(add, immediate=True)
 
     def move_watch_order_entry(
         self,
@@ -2199,7 +2267,7 @@ class KatalogQueryService:
                 entry=_entry_detail(entry, _summaries_for(session, (item,))[item.id]),
             )
 
-        return self._database.run_transaction(move)
+        return self._database.run_transaction(move, immediate=True)
 
     def remove_watch_order_entry(
         self, watch_order_id: int, entry_id: int, *, expected_revision: int
@@ -2225,7 +2293,7 @@ class KatalogQueryService:
                 collection_revision=collection.revision,
             )
 
-        return self._database.run_transaction(remove)
+        return self._database.run_transaction(remove, immediate=True)
 
     def preview_watch_order_generation(
         self, watch_order_id: int, request: WatchOrderGenerationRequest
@@ -2233,8 +2301,7 @@ class KatalogQueryService:
         def preview(session: Session) -> WatchOrderGenerationPreview:
             watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
-            _require_generation_allowed(watch_order)
-            return _generation_preview(session, watch_order, request.mode)
+            return _generation_preview(session, watch_order, request)
 
         return self._database.run_transaction(preview)
 
@@ -2244,38 +2311,12 @@ class KatalogQueryService:
         def apply(session: Session) -> WatchOrderMutationResult:
             watch_order: Keiro = _require(session, Keiro, watch_order_id, "Watch order")
             _require_revision(watch_order.revision, request.expected_revision, "Watch order")
-            _require_generation_allowed(watch_order)
-            generated: _GeneratedWatchOrderItems = _generated_watch_order_items(
-                session, watch_order, request.mode
+            preview = _generation_preview(session, watch_order, request)
+            if request.preview_token is not None and request.preview_token != preview.preview_token:
+                raise CatalogueConflictError("The preview changed. Preview the order again.")
+            _replace_watch_order_entries(
+                session, watch_order.id, tuple(item.id for item in preview.entries)
             )
-            existing: tuple[KeiroEntry, ...] = tuple(
-                session.scalars(
-                    select(KeiroEntry)
-                    .where(KeiroEntry.watch_order_id == watch_order.id)
-                    .order_by(KeiroEntry.position)
-                )
-            )
-            if request.apply_mode.value == "replace":
-                for entry in existing:
-                    session.delete(entry)
-                session.flush()
-                existing_item_ids: set[int] = set[int]()
-                next_position = 0
-            else:
-                existing_item_ids = {entry.library_item_id for entry in existing}
-                next_position = _highest_position(session, watch_order.id) + 1
-            for item in generated.items:
-                if item.id in existing_item_ids:
-                    continue
-                session.add(
-                    KeiroEntry(
-                        watch_order_id=watch_order.id,
-                        library_item_id=item.id,
-                        position=next_position,
-                    )
-                )
-                existing_item_ids.add(item.id)
-                next_position += 1
             watch_order.revision += 1
             session.flush()
             collection: Collection = _require(
@@ -2287,7 +2328,7 @@ class KatalogQueryService:
                 collection_revision=collection.revision,
             )
 
-        return self._database.run_transaction(apply)
+        return self._database.run_transaction(apply, immediate=True)
 
     def continue_watching(
         self, user_id: int, *, cursor: str | None, limit: int
@@ -2707,6 +2748,7 @@ class KatalogQueryService:
                 context_item_id=context.item_id,
                 watch_order_id=context.watch_order_id,
                 current_entry_position=0,
+                response_window_size=request.response_window_size,
                 created_at=now,
                 expires_at=now + self._playback_session_ttl,
                 closed_at=None,
@@ -3333,9 +3375,14 @@ class KatalogQueryService:
             skipped_unavailable_titles = ()
         if not planned:
             raise CatalogueValidationError("A playback plan requires at least one available item.")
-        if len(planned) > self._max_playback_queue_size:
+        maximum = (
+            MAX_WATCH_ORDER_ENTRIES
+            if isinstance(context, WatchOrderPlaybackContext)
+            else self._max_playback_queue_size
+        )
+        if len(planned) > maximum:
             raise CatalogueValidationError(
-                f"Playback queues cannot contain more than {self._max_playback_queue_size} entries."
+                f"Playback queues cannot contain more than {maximum} entries."
             )
         return planned, response_context, skipped_unavailable_titles
 
@@ -3385,6 +3432,32 @@ class KatalogQueryService:
     def _watch_order_entries(
         self, session: Session, user_id: int, context: WatchOrderPlaybackContext
     ) -> tuple[tuple[_PlannedPlaybackEntry, ...], tuple[str, ...]]:
+        if context.source_session_id is not None:
+            source: ModelPlaybackSession = _require(
+                session, ModelPlaybackSession, context.source_session_id, "Playback session"
+            )
+            _require_active_session(source, datetime.now(UTC))
+            if source.user_id != user_id or source.watch_order_id != context.watch_order_id:
+                raise CatalogueValidationError(
+                    "The playback session does not match this user and order."
+                )
+            entries = tuple(
+                session.scalars(
+                    select(PlaybackSessionEntry)
+                    .where(
+                        PlaybackSessionEntry.playback_session_id == source.id,
+                        PlaybackSessionEntry.position >= source.current_entry_position,
+                    )
+                    .order_by(PlaybackSessionEntry.position)
+                )
+            )
+            continued_entries = self._manual_queue_entries(
+                session, tuple(entry.library_item_id for entry in entries)
+            )
+            return tuple(
+                replace(item, source_watch_order_position=entry.source_watch_order_position)
+                for item, entry in zip(continued_entries, entries, strict=True)
+            ), tuple(source.skipped_unavailable_titles)
         _require(session, Keiro, context.watch_order_id, "Watch order")
         rows = tuple(
             session.execute(
@@ -3456,13 +3529,15 @@ class KatalogQueryService:
     def _playback_session_response(
         self, session: Session, playback_session: ModelPlaybackSession, now: datetime
     ) -> PlaybackSessionResponse:
-        entries = tuple(
-            session.scalars(
-                select(PlaybackSessionEntry)
-                .where(PlaybackSessionEntry.playback_session_id == playback_session.id)
-                .order_by(PlaybackSessionEntry.position)
-            )
+        statement = select(PlaybackSessionEntry).where(
+            PlaybackSessionEntry.playback_session_id == playback_session.id
         )
+        window_size = playback_session.response_window_size
+        if window_size is not None:
+            statement = statement.where(
+                PlaybackSessionEntry.position >= max(0, playback_session.current_entry_position - 1)
+            ).limit(window_size + 1)
+        entries = tuple(session.scalars(statement.order_by(PlaybackSessionEntry.position)))
         if not entries:
             raise CatalogueNotFoundError("Playback session is unavailable.")
         items = {
@@ -3494,7 +3569,9 @@ class KatalogQueryService:
         }
         series_titles_by_item_id = _series_titles_by_item_id(session, tuple(items.values()))
         response_entries: list[PlaybackPlanEntry] = []
-        for index, entry in enumerate(entries):
+        for index, entry in enumerate(
+            entries[:window_size] if window_size is not None else entries
+        ):
             item = items.get(entry.library_item_id)
             media_file = media_files.get(entry.media_file_id)
             if item is None or media_file is None:
@@ -3582,6 +3659,11 @@ class KatalogQueryService:
             current_entry_position=playback_session.current_entry_position,
             current_item=current_item,
             entries=tuple(response_entries),
+            total_entry_count=session.scalar(
+                select(func.count())
+                .select_from(PlaybackSessionEntry)
+                .where(PlaybackSessionEntry.playback_session_id == playback_session.id)
+            ),
             created_at=playback_session.created_at,
             expires_at=playback_session.expires_at,
             closed_at=playback_session.closed_at,
@@ -4463,6 +4545,13 @@ def _playback_plan_entry(
 def _series_titles_by_item_id(session: Session, items: tuple[Zaisan, ...]) -> dict[int, str | None]:
     """Resolve queue item series titles without loading each ancestry chain separately."""
 
+    ancestors_by_id = _items_with_ancestors(session, items)
+    return {item.id: _series_title_from_ancestors(item, ancestors_by_id) for item in items}
+
+
+def _items_with_ancestors(session: Session, items: tuple[Zaisan, ...]) -> dict[int, Zaisan]:
+    """Load a page's ancestry once per hierarchy level."""
+
     ancestors_by_id: dict[int, Zaisan] = {item.id: item for item in items}
     pending_parent_ids = {
         parent_id
@@ -4482,7 +4571,40 @@ def _series_titles_by_item_id(session: Session, items: tuple[Zaisan, ...]) -> di
             for parent in parents.values()
             if (parent_id := parent.parent_id) is not None and parent_id not in ancestors_by_id
         }
-    return {item.id: _series_title_from_ancestors(item, ancestors_by_id) for item in items}
+    return ancestors_by_id
+
+
+def _inherited_collection_memberships(
+    session: Session, collection_id: int, item_ids: tuple[int, ...]
+) -> tuple[InheritedCollectionMembership, ...]:
+    items = tuple(session.scalars(select(Zaisan).where(Zaisan.id.in_(item_ids))))
+    ancestors = _items_with_ancestors(session, items)
+    member_ids = set(
+        session.scalars(
+            select(CollectionKin.library_item_id).where(
+                CollectionKin.collection_id == collection_id,
+                CollectionKin.library_item_id.in_(ancestors),
+            )
+        )
+    )
+    inherited: list[InheritedCollectionMembership] = []
+    for item in items:
+        parent_id = item.parent_id
+        seen = {item.id}
+        while parent_id is not None and parent_id not in seen:
+            seen.add(parent_id)
+            parent = ancestors.get(parent_id)
+            if parent is None:
+                break
+            if parent_id in member_ids:
+                inherited.append(
+                    InheritedCollectionMembership(
+                        library_item_id=item.id, ancestor_id=parent.id, ancestor_title=parent.title
+                    )
+                )
+                break
+            parent_id = parent.parent_id
+    return tuple(inherited)
 
 
 def _series_title_from_ancestors(item: Zaisan, ancestors_by_id: Mapping[int, Zaisan]) -> str | None:
@@ -5535,6 +5657,68 @@ def _language_tag(value: str | None) -> str | None:
     }.get(primary, primary) or None
 
 
+def _apply_collection_details(
+    session: Session, collection: Collection, request: CollectionDetailsUpdate
+) -> None:
+    if "name" in request.model_fields_set:
+        collection.name = request.name or ""
+    if "overview" in request.model_fields_set:
+        collection.overview = request.overview
+    if "artwork_item_id" in request.model_fields_set:
+        collection.artwork_item_id = _validated_collection_artwork_item_id(
+            session, collection, request.artwork_item_id
+        )
+    if "default_watch_order_id" in request.model_fields_set:
+        collection.default_watch_order_id = _validated_default_watch_order_id(
+            session, collection, request.default_watch_order_id
+        )
+
+
+def _collection_source_statement(collection_id: int) -> Select[tuple[Zaisan]]:
+    direct_ids = select(CollectionKin.library_item_id).where(
+        CollectionKin.collection_id == collection_id
+    )
+    hierarchy = select(Zaisan.id).where(Zaisan.id.in_(direct_ids)).cte(recursive=True)
+    hierarchy = hierarchy.union(
+        select(Zaisan.id).join(hierarchy, Zaisan.parent_id == hierarchy.c.id)
+    )
+    return select(Zaisan).where(Zaisan.id.in_(select(hierarchy.c.id)))
+
+
+def _replace_watch_order_entries(
+    session: Session, watch_order_id: int, item_ids: tuple[int, ...]
+) -> None:
+    """Save one explicit sequence, retaining identities for entries that still exist."""
+
+    items = _library_items_by_id(session, item_ids)
+    missing_ids = set(item_ids).difference(items)
+    if missing_ids:
+        raise CatalogueNotFoundError(f"Library item {min(missing_ids)} does not exist.")
+    if any(item.item_kind not in PLAYABLE_ITEM_KINDS for item in items.values()):
+        raise CatalogueValidationError("Only playable items can appear in a watch order.")
+    existing = tuple(
+        session.scalars(select(KeiroEntry).where(KeiroEntry.watch_order_id == watch_order_id))
+    )
+    by_item_id = {entry.library_item_id: entry for entry in existing}
+    offset = max((entry.position for entry in existing), default=0) + len(item_ids) + 1
+    for entry in existing:
+        if entry.library_item_id not in items:
+            session.delete(entry)
+        else:
+            entry.position += offset
+    session.flush()
+    for position, item_id in enumerate(item_ids):
+        entry = by_item_id.get(item_id)
+        if entry is None:
+            session.add(
+                KeiroEntry(
+                    watch_order_id=watch_order_id, library_item_id=item_id, position=position
+                )
+            )
+        else:
+            entry.position = position
+
+
 def _collection_detail(
     session: Session, collection: Collection, *, user_id: int | None = None
 ) -> CollectionDetail:
@@ -5792,13 +5976,6 @@ def _require_revision(actual: int, expected: int, label: str) -> None:
         )
 
 
-def _require_generation_allowed(watch_order: Keiro) -> None:
-    if watch_order.order_kind in {KeiroKind.CHRONOLOGICAL, KeiroKind.RECOMMENDED}:
-        raise CatalogueValidationError(
-            "Chronological and recommended watch orders must remain manually curated."
-        )
-
-
 def _require_membership(
     session: Session, collection_id: int, library_item_id: int
 ) -> CollectionKin:
@@ -5822,24 +5999,30 @@ def _collection_membership_removal_warnings(
 
     if not library_item_ids:
         return {}
-    entry_counts = {
-        item_id: entry_count
-        for item_id, entry_count in session.execute(
-            select(KeiroEntry.library_item_id, func.count())
-            .join(Keiro, KeiroEntry.watch_order_id == Keiro.id)
-            .where(
-                Keiro.collection_id == collection_id,
-                KeiroEntry.library_item_id.in_(library_item_ids),
-            )
-            .group_by(KeiroEntry.library_item_id)
+    descendants = (
+        select(Zaisan.id.label("source_id"), Zaisan.id)
+        .where(Zaisan.id.in_(library_item_ids))
+        .cte(recursive=True)
+    )
+    descendants = descendants.union(
+        select(descendants.c.source_id, Zaisan.id).join(
+            descendants, Zaisan.parent_id == descendants.c.id
         )
-    }
+    )
+    entry_counts = session.execute(
+        select(descendants.c.source_id, func.count(KeiroEntry.id))
+        .join(KeiroEntry, KeiroEntry.library_item_id == descendants.c.id)
+        .join(Keiro, KeiroEntry.watch_order_id == Keiro.id)
+        .where(Keiro.collection_id == collection_id)
+        .group_by(descendants.c.source_id)
+    )
+    items = _library_items_by_id(session, tuple(library_item_ids))
     return {
         item_id: (
-            f"The item remains in {entry_count} watch-order "
-            f"{'entry' if entry_count == 1 else 'entries'}."
+            f"{items[item_id].title}: {entry_count} watch-order "
+            f"{'entry remains' if entry_count == 1 else 'entries remain'}."
         )
-        for item_id, entry_count in entry_counts.items()
+        for item_id, entry_count in entry_counts
         if entry_count
     }
 
@@ -5962,26 +6145,60 @@ def _shift_positions(
 
 
 def _generation_preview(
-    session: Session, watch_order: Keiro, mode: WatchOrderGenerationMode
+    session: Session, watch_order: Keiro, request: WatchOrderGenerationRequest
 ) -> WatchOrderGenerationPreview:
-    generated = _generated_watch_order_items(session, watch_order, mode)
+    generated = _generated_watch_order_items(session, watch_order, request.mode)
+    result_items = generated.items
+    if request.apply_mode is WatchOrderGenerationApplyMode.MERGE:
+        existing_items = tuple(
+            session.scalars(
+                select(Zaisan)
+                .join(KeiroEntry, KeiroEntry.library_item_id == Zaisan.id)
+                .where(KeiroEntry.watch_order_id == watch_order.id)
+                .order_by(KeiroEntry.position)
+            )
+        )
+        existing_ids = {item.id for item in existing_items}
+        result_items = existing_items + tuple(
+            item for item in result_items if item.id not in existing_ids
+        )
+    if len(result_items) > MAX_WATCH_ORDER_ENTRIES:
+        raise CatalogueValidationError(
+            f"Watch orders cannot contain more than {MAX_WATCH_ORDER_ENTRIES} entries."
+        )
     all_items = (
-        generated.items
+        result_items
         + generated.undated_items
         + generated.unavailable_items
         + generated.duplicate_items
         + generated.non_playable_items
     )
     summaries = _summaries_for(session, tuple({item.id: item for item in all_items}.values()))
-    return WatchOrderGenerationPreview(
+    preview = WatchOrderGenerationPreview(
         watch_order_id=watch_order.id,
         revision=watch_order.revision,
-        mode=mode,
-        entries=tuple(summaries[item.id] for item in generated.items),
+        mode=request.mode,
+        entries=tuple(summaries[item.id] for item in result_items),
         undated_items=tuple(summaries[item.id] for item in generated.undated_items),
         unavailable_items=tuple(summaries[item.id] for item in generated.unavailable_items),
         duplicate_items=tuple(summaries[item.id] for item in generated.duplicate_items),
         non_playable_items=tuple(summaries[item.id] for item in generated.non_playable_items),
+    )
+    collection = _require(session, Collection, watch_order.collection_id, "Collection")
+    fingerprint = json.dumps(
+        {
+            "collection_revision": collection.revision,
+            "apply_mode": request.apply_mode.value,
+            "dates": [
+                (item.id, str(_generation_date(item, request.mode)))
+                for item in sorted(result_items, key=lambda item: item.id)
+            ],
+            "preview": preview.model_dump(mode="json"),
+        },
+        sort_keys=True,
+    )
+    return preview.model_copy(
+        update={"preview_token": hashlib.sha256(fingerprint.encode()).hexdigest()}
     )
 
 
@@ -5995,7 +6212,9 @@ def _generated_watch_order_items(
             .order_by(CollectionKin.id)
         )
     )
-    library_items = tuple(session.scalars(select(Zaisan).order_by(Zaisan.id)))
+    library_items = tuple(
+        session.scalars(_collection_source_statement(watch_order.collection_id).order_by(Zaisan.id))
+    )
     by_id = {item.id: item for item in library_items}
     children: dict[int, list[Zaisan]] = {}
     for item in library_items:
@@ -6030,8 +6249,19 @@ def _generated_watch_order_items(
             unique.append(item)
     dated = [item for item in unique if _generation_date(item, mode) is not None]
     undated = [item for item in unique if _generation_date(item, mode) is None]
-    dated.sort(key=lambda item: (_generation_date(item, mode), item.sort_title.casefold(), item.id))
-    undated.sort(key=lambda item: (item.sort_title.casefold(), item.id))
+    series_titles = _series_titles_by_item_id(session, tuple(unique))
+
+    def sequence_key(item: Zaisan) -> tuple[str, int, int, str, int]:
+        return (
+            (series_titles[item.id] or item.sort_title).casefold(),
+            item.season_number if item.season_number is not None else -1,
+            item.episode_number if item.episode_number is not None else -1,
+            item.sort_title.casefold(),
+            item.id,
+        )
+
+    dated.sort(key=lambda item: (_generation_date(item, mode), sequence_key(item)))
+    undated.sort(key=sequence_key)
     availability_by_item_id = effective_item_availabilities(session, tuple(unique))
     unavailable = tuple(
         item
@@ -6061,7 +6291,7 @@ def _playable_descendants(item: Zaisan, children: dict[int, list[Zaisan]]) -> tu
 def _generation_date(item: Zaisan, mode: WatchOrderGenerationMode) -> date | None:
     if mode is WatchOrderGenerationMode.AIR:
         return item.air_date or item.release_date
-    return item.release_date
+    return item.release_date or item.air_date
 
 
 def _playback(state: PlaybackState) -> PlaybackStateResponse:

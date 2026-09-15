@@ -985,6 +985,7 @@ class PlaybackSession(Base):
         ForeignKey("watch_order.id", ondelete="SET NULL")
     )
     current_entry_position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    response_window_size: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
