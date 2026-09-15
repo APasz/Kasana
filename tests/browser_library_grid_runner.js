@@ -2485,55 +2485,7 @@ function testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults() {
   assert.equal(payload.forceDefaultSubtitleFontScale, false);
 }
 
-function testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry() {
-  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
-  const builder = new KanvasCollectionBuilder();
-  builder.collectionRevision = 7;
-  builder.currentMembers.set(7, {poster: validPoster(7), kind: 'movie', relationship: 'primary'});
-  builder.changeRelationship(7, 'related');
-  assert.deepEqual(builder.batchPayload(), {expected_revision: 7, relationship_updates: [{library_item_id: 7, relationship: 'related'}]});
-  let retried = false;
-  builder.conflict = {revision: 12};
-  builder.save = () => { retried = true; };
-  builder.retryConflict();
-  assert.equal(retried, true);
-  assert.equal(builder.collectionRevision, 12);
-  assert.equal(builder.batchPayload().relationship_updates[0].relationship, 'related');
-}
-
-async function testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave() {
-  const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
-  const builder = new KanvasCollectionBuilder();
-  assert.equal('revision' in builder, false);
-  builder.setAttribute('revision', '7');
-  builder.setAttribute('action', '/kanvas/actions/collections/4/members/batch');
-  builder.relationshipUpdates.set(8, 'related');
-  builder.memberStatus = new FakeHTMLElement('div');
-  builder.renderWorkspace = () => {};
-  builder.resetMembers = async () => {};
-  const originalFetch = global.fetch;
-  let request = null;
-  try {
-    global.fetch = async (url, options) => {
-      request = {url, body: JSON.parse(options.body)};
-      return response({body: {revision: 8, warnings: []}});
-    };
-    await builder.save();
-  } finally {
-    global.fetch = originalFetch;
-  }
-
-  assert.deepEqual(request, {
-    url: '/kanvas/actions/collections/4/members/batch',
-    body: {
-      expected_revision: 7,
-      relationship_updates: [{library_item_id: 8, relationship: 'related'}]
-    }
-  });
-  assert.equal(builder.collectionRevision, 8);
-}
-
-function testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightEdits() {
+function testCollectionBuilderSynchronisesRelatedFormRevisions() {
   const {KanvasCollectionBuilder} = globalThis.__collectionBuilderTest;
   const builder = new KanvasCollectionBuilder();
   builder.collectionRevision = 12;
@@ -2562,14 +2514,6 @@ function testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightE
   assert.equal(deleteRevision.value, '12');
   assert.equal(artworkPicker.value, '');
   builder.removals.clear();
-
-  const existing = {poster: validPoster(7), kind: 'movie', relationship: 'primary'};
-  builder.currentMembers.set(7, existing);
-  builder.saving = true;
-  builder.changeRelationship(7, 'related');
-
-  assert.equal(builder.removals.size, 0);
-  assert.equal(builder.relationshipUpdates.size, 0);
 }
 
 function testCollectionBuilderKeepsPreviouslyLoadedMembersReachable() {
@@ -2604,7 +2548,6 @@ async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflic
     name: 'Stargate',
     revision: 8,
     isMember: true,
-    relationship: 'primary',
     initialMember: true,
     member: false
   });
@@ -2613,7 +2556,6 @@ async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflic
     name: 'Atlantis',
     revision: 3,
     isMember: false,
-    relationship: null,
     initialMember: false,
     member: true
   });
@@ -2638,7 +2580,6 @@ async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflic
       body: {
         expected_revision: 8,
         additions: [],
-        relationship_updates: [],
         removals: [7]
       }
     },
@@ -2646,8 +2587,7 @@ async function testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflic
       url: '/kanvas/actions/collections/5/members/batch',
       body: {
         expected_revision: 3,
-        additions: [{library_item_id: 7, relationship: null}],
-        relationship_updates: [],
+        additions: [{library_item_id: 7}],
         removals: []
       }
     }
@@ -2674,7 +2614,7 @@ function makeCollectionMode() {
 const modeState = (items = [], revision = 7) => ({
   id: 4, name: 'Stargate', revision, itemCount: 1, artworkItemId: 7,
   items: items.map((itemId) => ({itemId, state: itemId === 7 ? 'direct' : itemId === 9 ? 'inherited' : 'absent',
-    relationship: itemId === 7 ? 'primary' : null, inheritedFromId: itemId === 9 ? 7 : null,
+    inheritedFromId: itemId === 9 ? 7 : null,
     inheritedFromTitle: itemId === 9 ? 'Stargate' : null}))
 });
 
@@ -2723,7 +2663,7 @@ async function testCollectionModeImmediateRemovalUndoAndConflict() {
     nextPage.undo = saved.undo;
     await nextPage.undoChange();
     assert.deepEqual(requests[1], {expected_revision: 8,
-      additions: [{library_item_id: 7, relationship: 'primary'}], details: {artwork_item_id: 7}});
+      additions: [{library_item_id: 7}], details: {artwork_item_id: 7}});
     assert.equal(nextPage.undo, null);
     nextPage.undo = saved.undo;
     global.fetch = async () => response({status: 409, body: {currentRevision: 20}});
@@ -2831,9 +2771,7 @@ async function main() {
   testItemEditorHidesForceControlsForAutomaticDefaults();
   testItemEditorPayloadPreservesHiddenState();
   testItemEditorPayloadDoesNotForceAutomaticPlaybackDefaults();
-  testCollectionBuilderStagesMixedChangesAndPreservesThemForConflictRetry();
-  await testCollectionBuilderUsesMountedRevisionForItsFirstBatchSave();
-  testCollectionBuilderSynchronisesRelatedFormRevisionsAndBlocksInFlightEdits();
+  testCollectionBuilderSynchronisesRelatedFormRevisions();
   testCollectionBuilderKeepsPreviouslyLoadedMembersReachable();
   await testItemCollectionPickerBatchesMembershipTogglesAndRetainsConflict();
   await testCollectionModeBatchesAndPrunesMountedMemberships();

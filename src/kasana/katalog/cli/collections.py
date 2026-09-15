@@ -11,7 +11,6 @@ from pydantic import BaseModel, ValidationError
 from kasana.katalog.api.contracts import (
     CollectionCreate,
     CollectionMembershipCreate,
-    CollectionRelationship,
     CollectionUpdate,
     WatchOrderCreate,
     WatchOrderEntryCreate,
@@ -148,7 +147,6 @@ def add_collection_item(
     collection_id: Annotated[int, typer.Argument(min=1)],
     library_item_id: Annotated[int, typer.Argument(min=1)],
     revision: Annotated[int, typer.Option("--revision", min=1)],
-    relationship: Annotated[CollectionRelationship | None, typer.Option("--relationship")] = None,
 ) -> None:
     """Add any catalogued item to a collection."""
 
@@ -158,7 +156,6 @@ def add_collection_item(
         lambda: CollectionMembershipCreate(
             expected_revision=revision,
             library_item_id=library_item_id,
-            relationship=relationship,
         ),
     )
     result = with_catalogue_queries(

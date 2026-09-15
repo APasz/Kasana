@@ -92,7 +92,6 @@ from kasana.kanvas.dashboard import (
     library_data,
     remove_collection_member_action,
     update_collection_action,
-    update_collection_member_action,
     update_watch_order_action,
     watch_order_data,
     watch_order_entry_action,
@@ -197,7 +196,6 @@ from kasana.katalog.public import (
     CollectionDetail,
     CollectionMembership,
     CollectionMembershipBatchRequest,
-    CollectionRelationship,
     CollectionSummary,
     ContinueWatchingEntry,
     DirectoryEntry,
@@ -2561,8 +2559,7 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
     )
     payload = {
         "expected_revision": 7,
-        "additions": [{"library_item_id": 12, "relationship": None}],
-        "relationship_updates": [{"library_item_id": 7, "relationship": "related"}],
+        "additions": [{"library_item_id": 12}],
         "removals": [9],
     }
     saved = await collection_members_batch_action(4, cast(Request, JsonRequest(payload)))
@@ -2578,8 +2575,7 @@ async def test_collection_builder_pages_and_batch_action_are_bounded_and_conflic
             "batch",
             {
                 "expected_revision": 7,
-                "additions": [{"library_item_id": 12, "relationship": None}],
-                "relationship_updates": [{"library_item_id": 7, "relationship": "related"}],
+                "additions": [{"library_item_id": 12}],
                 "removals": [9],
             },
         ),
@@ -2626,7 +2622,6 @@ async def test_item_collection_targets_are_paged_and_admin_only(monkeypatch: Mon
                         name="Stargate",
                         revision=8,
                         isMember=True,
-                        relationship="primary",
                     ),
                     ItemCollectionTargetView(
                         id=5,
@@ -2657,14 +2652,12 @@ async def test_item_collection_targets_are_paged_and_admin_only(monkeypatch: Mon
                 "name": "Stargate",
                 "revision": 8,
                 "isMember": True,
-                "relationship": "primary",
             },
             {
                 "id": 5,
                 "name": "Atlantis",
                 "revision": 3,
                 "isMember": False,
-                "relationship": None,
             },
         ],
         "nextCursor": "next-page",
@@ -2713,7 +2706,7 @@ async def test_collection_member_conflict_preserves_browser_intent_for_reapply(
 
 
 async def test_collection_member_action_adds_a_picker_item(monkeypatch: MonkeyPatch) -> None:
-    calls: list[tuple[int, int, int, object]] = []
+    calls: list[tuple[int, int, int]] = []
 
     class Catalogue:
         def __init__(self, _settings: Kanvas_Settings, _user_id: int | None = None) -> None:
@@ -2725,9 +2718,8 @@ async def test_collection_member_action_adds_a_picker_item(monkeypatch: MonkeyPa
             *,
             revision: int,
             item_id: int,
-            relationship: CollectionRelationship | None,
         ) -> int:
-            calls.append((collection_id, revision, item_id, relationship))
+            calls.append((collection_id, revision, item_id))
             return 8
 
     class JsonRequest:
@@ -2740,7 +2732,7 @@ async def test_collection_member_action_adds_a_picker_item(monkeypatch: MonkeyPa
 
     assert response.status_code == 200
     assert json.loads(bytes(response.body)) == {"revision": 8}
-    assert calls == [(4, 7, 12, None)]
+    assert calls == [(4, 7, 12)]
 
 
 async def test_collection_and_watch_order_action_routes_use_explicit_public_mutations(
@@ -2762,10 +2754,6 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
 
         async def delete_collection(self, collection_id: int, *, revision: int) -> None:
             calls.append(("delete-collection", (collection_id, revision)))
-
-        async def update_collection_member(self, collection_id: int, **arguments: object) -> int:
-            calls.append(("update-member", (collection_id, arguments)))
-            return 4
 
         async def remove_collection_member(
             self, collection_id: int, **arguments: object
@@ -2804,11 +2792,6 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
     updated = await update_collection_action(
         4, cast(Request, FormRequest(revision="2", name="Stargate SG-1", overview=""))
     )
-    member = await update_collection_member_action(
-        4,
-        7,
-        cast(Request, FormRequest(revision="3", relationship="spinoff")),
-    )
     removed = await remove_collection_member_action(4, 7, cast(Request, FormRequest(revision="4")))
     collection_deleted = await delete_collection_action(
         4, cast(Request, FormRequest(revision="5", confirm="DELETE"))
@@ -2836,7 +2819,6 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
 
     assert created.headers["location"] == "/library?editCollection=4"
     assert updated.headers["location"] == "/collections/4"
-    assert member.headers["location"] == "/collections/4/edit"
     assert removed.headers["location"] == "/collections/4/edit"
     assert collection_deleted.headers["location"] == "/collections"
     assert order_created.headers["location"] == "/watch-orders/9/edit"
@@ -2846,7 +2828,6 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
     assert [name for name, _ in calls] == [
         "create-collection",
         "update-collection",
-        "update-member",
         "remove-member",
         "delete-collection",
         "create-order",
@@ -4397,15 +4378,6 @@ async def test_item_edit_endpoints_report_data_and_validation(
             "confidence": 0.98,
         }
     ]
-    assert json.loads(bytes(detail_response.body))["collectionRelationships"] == [
-        "primary",
-        "sequel",
-        "prequel",
-        "spinoff",
-        "remake",
-        "alternate_continuity",
-        "related",
-    ]
     assert json.loads(bytes(action_response.body))["audit"]["changed_fields"] == ["title", "tags"]
     assert invalid_action_response.status_code == 422
     assert json.loads(bytes(delete_response.body)) == {"itemId": 7, "action": "deleted"}
@@ -4989,7 +4961,6 @@ async def test_visual_routes_render_with_fake_katalog_data(monkeypatch: MonkeyPa
                         id=4,
                         name="Stargate",
                         revision=8,
-                        relationship="primary",
                     ),
                 ),
                 availableCollections=(CollectionChoiceView(id=5, name="Atlantis", revision=3),),
@@ -5147,7 +5118,7 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         posterUrl="/kanvas/artwork/7/8",
         available=True,
     )
-    member = CollectionMemberView(poster=poster, kind="movie", relationship="primary")
+    member = CollectionMemberView(poster=poster, kind="movie")
     collection = CollectionDetailView(
         id=4,
         name="Stargate",

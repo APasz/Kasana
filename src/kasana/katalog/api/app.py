@@ -30,7 +30,6 @@ from kasana.katalog.api.contracts import (
     CollectionMembershipCreate,
     CollectionMembershipLookupRequest,
     CollectionMembershipLookupResponse,
-    CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionSummary,
     CollectionUpdate,
@@ -756,25 +755,6 @@ def create_app(
     ) -> CollectionMembershipLookupResponse:
         return await run_blocking(
             runtime.queries.lookup_collection_memberships, collection_id, request
-        )
-
-    @app.patch(
-        "/api/v1/collections/{collection_id}/items/{item_id}",
-        response_model=CollectionMutationResult,
-        operation_id="v1_update_collection_member",
-        responses=_ERROR_RESPONSES,
-    )
-    async def update_collection_member(
-        collection_id: Annotated[int, Path(gt=0)],
-        item_id: Annotated[int, Path(gt=0)],
-        membership: CollectionMembershipUpdate,
-        runtime: KatalogApiRuntime = Depends(_runtime),
-    ) -> CollectionMutationResult:
-        return await run_blocking(
-            runtime.queries.update_collection_membership,
-            collection_id,
-            item_id,
-            membership,
         )
 
     @app.delete(

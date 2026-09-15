@@ -11,7 +11,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -129,6 +129,70 @@ def test_migration_head_matches_katalog_orm_metadata(tmp_path: Path) -> None:
 
     assert revision == head_revision
     assert differences == []
+
+
+def test_collection_membership_relationship_migration_discards_legacy_labels(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "catalogue.sqlite3"
+    repository_root = Path(__file__).parents[1]
+    config = Config(str(repository_root / "alembic.ini"))
+    config.set_main_option("script_location", str(repository_root / "alembic"))
+    database_url = f"sqlite:///{database_path}"
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260915_0032")
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            root_id = _insert_historical_root(
+                session,
+                path=tmp_path / "Movies",
+                expected_media_kind=ZaisanKind.MOVIE,
+            )
+            item_id = _insert_historical_item(
+                session,
+                library_root_id=root_id,
+                item_kind=ZaisanKind.MOVIE,
+                title="Legacy relationship",
+            )
+            session.execute(text("INSERT INTO collection (name) VALUES ('Legacy collection')"))
+            collection_id = _last_insert_id(session)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO collection_membership (collection_id, library_item_id, relationship)
+                    VALUES (:collection_id, :item_id, 'primary')
+                    """
+                ),
+                {"collection_id": collection_id, "item_id": item_id},
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("collection_membership")}
+        with engine.connect() as connection:
+            memberships = tuple(
+                connection.execute(
+                    text(
+                        """
+                        SELECT collection_id, library_item_id
+                        FROM collection_membership
+                        """
+                    )
+                ).tuples()
+            )
+    finally:
+        engine.dispose()
+
+    assert "relationship" not in columns
+    assert memberships == ((collection_id, item_id),)
 
 
 def test_initial_migration_is_immutable_and_does_not_import_runtime_metadata() -> None:

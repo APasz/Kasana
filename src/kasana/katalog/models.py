@@ -56,16 +56,6 @@ class AuditCategory(StrEnum):
     INVALID_METADATA_SIDECAR = "invalid_metadata_sidecar"
 
 
-class Kinship(StrEnum):
-    PRIMARY = "primary"
-    SEQUEL = "sequel"
-    PREQUEL = "prequel"
-    SPINOFF = "spinoff"
-    REMAKE = "remake"
-    ALTERNATE_CONTINUITY = "alternate_continuity"
-    RELATED = "related"
-
-
 class KeiroKind(StrEnum):
     AIR = "air"
     CHRONOLOGICAL = "chronological"
@@ -843,8 +833,6 @@ class CollectionKin(Base):
     library_item_id: Mapped[int] = mapped_column(
         ForeignKey("library_item.id", ondelete="CASCADE"), nullable=False
     )
-    relationship: Mapped[Kinship | None] = mapped_column(_enum(Kinship, "collection_relationship"))
-
     collection: Mapped[Collection] = orm_relationship(back_populates="memberships")
     library_item: Mapped[Zaisan] = orm_relationship(back_populates="collection_memberships")
 

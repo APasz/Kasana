@@ -37,7 +37,6 @@ from .common import (
     katalog_data_error,
     katalog_status,
     optional_integer,
-    optional_relationship,
     query_text,
     queue_success_toast,
     require_administrator,
@@ -212,14 +211,12 @@ async def collection_member_action(collection_id: int, request: Request) -> JSON
     try:
         revision = integer(payload, "revision")
         item_id = integer(payload, "itemId")
-        relationship = optional_relationship(payload.get("relationship"))
         next_revision = await KanvasKatalogService(
             runtime.settings, profile.user.id
         ).add_collection_member(
             collection_id,
             revision=revision,
             item_id=item_id,
-            relationship=relationship,
         )
     except KatalogClientError as error:
         return await collection_mutation_error(collection_id, profile, error, payload)
@@ -393,24 +390,6 @@ async def delete_collection_action(collection_id: int, request: Request) -> Redi
         collection_id, revision=form_integer(form, "revision")
     )
     return toast_redirect(request, "/collections", "Collection deleted")
-
-
-@app.post("/kanvas/actions/collections/{collection_id}/members/{item_id}", include_in_schema=False)
-async def update_collection_member_action(
-    collection_id: int, item_id: int, request: Request
-) -> RedirectResponse:
-    """Update an optional relationship with an explicit collection revision."""
-
-    profile = await require_profile(request)
-    require_administrator(profile)
-    form = await request.form()
-    await KanvasKatalogService(runtime.settings, profile.user.id).update_collection_member(
-        collection_id,
-        revision=form_integer(form, "revision"),
-        item_id=item_id,
-        relationship=optional_relationship(form_optional(form, "relationship")),
-    )
-    return toast_redirect(request, f"/collections/{collection_id}/edit", "Collection member saved")
 
 
 @app.post(

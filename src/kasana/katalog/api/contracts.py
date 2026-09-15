@@ -71,16 +71,6 @@ class WatchOrderKind(StrEnum):
     CUSTOM = "custom"
 
 
-class CollectionRelationship(StrEnum):
-    PRIMARY = "primary"
-    SEQUEL = "sequel"
-    PREQUEL = "prequel"
-    SPINOFF = "spinoff"
-    REMAKE = "remake"
-    ALTERNATE_CONTINUITY = "alternate_continuity"
-    RELATED = "related"
-
-
 class WatchOrderGenerationMode(StrEnum):
     AIR = "air"
     RELEASE = "release"
@@ -464,7 +454,6 @@ class ItemCollectionReference(APIModel):
     id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=1_000)
     revision: int = Field(ge=1)
-    relationship: CollectionRelationship | None = None
 
 
 class LibraryItemPlaybackDefaults(APIModel):
@@ -770,38 +759,17 @@ class CollectionMembership(APIModel):
     id: int = Field(gt=0)
     collection_id: int = Field(gt=0)
     item: LibraryItemSummary
-    relationship: CollectionRelationship | None = None
 
 
 class CollectionMembershipCreate(APIModel):
     expected_revision: int = Field(ge=1)
     library_item_id: int = Field(gt=0)
-    relationship: CollectionRelationship | None = None
-
-
-class CollectionMembershipUpdate(APIModel):
-    expected_revision: int = Field(ge=1)
-    relationship: CollectionRelationship | None = None
-
-    @model_validator(mode="after")
-    def require_relationship(self) -> Self:
-        if "relationship" not in self.model_fields_set:
-            raise ValueError("Collection membership update must include relationship.")
-        return self
 
 
 class CollectionMembershipAddition(APIModel):
     """One direct member selected for a collection membership batch."""
 
     library_item_id: int = Field(gt=0)
-    relationship: CollectionRelationship | None = None
-
-
-class CollectionMembershipRelationshipUpdate(APIModel):
-    """One explicit relationship value selected for a current direct member."""
-
-    library_item_id: int = Field(gt=0)
-    relationship: CollectionRelationship | None
 
 
 class CollectionMembershipBatchRequest(APIModel):
@@ -812,9 +780,6 @@ class CollectionMembershipBatchRequest(APIModel):
     additions: tuple[CollectionMembershipAddition, ...] = Field(
         default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
     )
-    relationship_updates: tuple[CollectionMembershipRelationshipUpdate, ...] = Field(
-        default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
-    )
     removals: tuple[Annotated[int, Field(gt=0)], ...] = Field(
         default=(), max_length=MAX_COLLECTION_MEMBERSHIP_BATCH_SIZE
     )
@@ -822,21 +787,12 @@ class CollectionMembershipBatchRequest(APIModel):
     @model_validator(mode="after")
     def validate_operations(self) -> Self:
         addition_ids = tuple(addition.library_item_id for addition in self.additions)
-        relationship_update_ids = tuple(
-            update.library_item_id for update in self.relationship_updates
-        )
         removal_ids = self.removals
         operation_ids = (
             ("additions", addition_ids),
-            ("relationship_updates", relationship_update_ids),
             ("removals", removal_ids),
         )
-        if (
-            not addition_ids
-            and not relationship_update_ids
-            and not removal_ids
-            and self.details is None
-        ):
+        if not addition_ids and not removal_ids and self.details is None:
             raise ValueError("Collection membership batch must include a change.")
         if (
             sum(len(item_ids) for _, item_ids in operation_ids)
@@ -847,14 +803,9 @@ class CollectionMembershipBatchRequest(APIModel):
             if len(set(item_ids)) != len(item_ids):
                 raise ValueError(f"Collection membership batch {label} must not repeat items.")
         additions = set(addition_ids)
-        relationship_updates = set(relationship_update_ids)
         removals = set(removal_ids)
-        if additions & relationship_updates:
-            raise ValueError("Added collection members cannot also receive relationship updates.")
         if additions & removals:
             raise ValueError("Collection members cannot be added and removed together.")
-        if relationship_updates & removals:
-            raise ValueError("Removed collection members cannot receive relationship updates.")
         return self
 
 

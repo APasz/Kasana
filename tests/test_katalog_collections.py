@@ -16,9 +16,6 @@ from kasana.katalog.api.contracts import (
     CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
     CollectionMembershipLookupRequest,
-    CollectionMembershipRelationshipUpdate,
-    CollectionMembershipUpdate,
-    CollectionRelationship,
     CollectionUpdate,
     WatchOrderCreate,
     WatchOrderEntriesCreate,
@@ -156,7 +153,6 @@ def test_collection_membership_revisions_and_deletion_safety(
         CollectionMembershipCreate(
             expected_revision=collection.revision,
             library_item_id=library["movie"],
-            relationship=CollectionRelationship.PRIMARY,
         ),
     )
     second = queries.add_collection_membership(
@@ -164,16 +160,12 @@ def test_collection_membership_revisions_and_deletion_safety(
         CollectionMembershipCreate(
             expected_revision=first.revision,
             library_item_id=library["series"],
-            relationship=CollectionRelationship.RELATED,
         ),
     )
     detail = queries.get_collection(collection.collection_id)
 
     assert detail.revision == second.revision
-    assert [(member.item.id, member.relationship) for member in detail.members] == [
-        (library["movie"], CollectionRelationship.PRIMARY),
-        (library["series"], CollectionRelationship.RELATED),
-    ]
+    assert [member.item.id for member in detail.members] == [library["movie"], library["series"]]
     assert "library" not in detail.model_dump_json()
     with pytest.raises(CatalogueValidationError, match="already"):
         queries.add_collection_membership(
@@ -199,34 +191,6 @@ def test_collection_membership_revisions_and_deletion_safety(
     )
 
 
-def test_collection_membership_updates_require_an_explicit_relationship(
-    database: KatalogDatabase, tmp_path: Path
-) -> None:
-    library = _library(database, tmp_path)
-    queries = _queries(database, tmp_path)
-    collection = queries.create_collection(CollectionCreate(name="Stargate"))
-    membership = queries.add_collection_membership(
-        collection.collection_id,
-        CollectionMembershipCreate(
-            expected_revision=collection.revision,
-            library_item_id=library["movie"],
-            relationship=CollectionRelationship.PRIMARY,
-        ),
-    )
-
-    with pytest.raises(ValueError, match="must include relationship"):
-        CollectionMembershipUpdate(expected_revision=membership.revision)
-
-    cleared = queries.update_collection_membership(
-        collection.collection_id,
-        library["movie"],
-        CollectionMembershipUpdate(expected_revision=membership.revision, relationship=None),
-    )
-
-    assert cleared.membership is not None
-    assert cleared.membership.relationship is None
-
-
 def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
@@ -238,7 +202,6 @@ def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
         CollectionMembershipCreate(
             expected_revision=collection.revision,
             library_item_id=library["movie"],
-            relationship=CollectionRelationship.PRIMARY,
         ),
     )
     series = queries.add_collection_membership(
@@ -254,12 +217,6 @@ def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
         CollectionMembershipBatchRequest(
             expected_revision=series.revision,
             additions=(CollectionMembershipAddition(library_item_id=library["first_episode"]),),
-            relationship_updates=(
-                CollectionMembershipRelationshipUpdate(
-                    library_item_id=library["movie"],
-                    relationship=CollectionRelationship.RELATED,
-                ),
-            ),
             removals=(library["series"],),
         ),
     )
@@ -268,9 +225,9 @@ def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
     assert result.revision == series.revision + 1
     detail = queries.get_collection(collection.collection_id)
     assert detail.revision == result.revision
-    assert [(member.item.id, member.relationship) for member in detail.members] == [
-        (library["movie"], CollectionRelationship.RELATED),
-        (library["first_episode"], None),
+    assert [member.item.id for member in detail.members] == [
+        library["movie"],
+        library["first_episode"],
     ]
 
     with pytest.raises(CatalogueConflictError, match="expected revision"):
@@ -297,18 +254,12 @@ def test_collection_membership_batch_is_atomic_and_bumps_revision_once(
             CollectionMembershipBatchRequest(
                 expected_revision=result.revision,
                 additions=(CollectionMembershipAddition(library_item_id=999_999),),
-                relationship_updates=(
-                    CollectionMembershipRelationshipUpdate(
-                        library_item_id=library["movie"],
-                        relationship=CollectionRelationship.PRIMARY,
-                    ),
-                ),
             ),
         )
 
     unchanged = queries.get_collection(collection.collection_id)
     assert unchanged.revision == result.revision
-    assert unchanged.members[0].relationship is CollectionRelationship.RELATED
+    assert unchanged.members[0].item.id == library["movie"]
 
     with pytest.raises(ValueError, match="must not repeat"):
         CollectionMembershipBatchRequest(
@@ -605,9 +556,7 @@ def test_collection_preferences_select_artwork_and_default_order(
         (alternative.watch_order_id, True),
         (release.watch_order_id, False),
     ]
-    assert [(entry.id, entry.relationship) for entry in movie_detail.collections] == [
-        (collection.collection_id, None)
-    ]
+    assert [entry.id for entry in movie_detail.collections] == [collection.collection_id]
 
 
 def test_collection_preferences_reject_invalid_choices_and_reassign_a_deleted_default(

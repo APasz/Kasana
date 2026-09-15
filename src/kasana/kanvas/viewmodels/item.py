@@ -17,7 +17,6 @@ class IncludedCollectionView(BaseModel):
     id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=1_000)
     revision: int = Field(ge=1)
-    relationship: str | None = Field(default=None, max_length=32)
 
 
 class CollectionChoiceView(BaseModel):
@@ -39,7 +38,6 @@ class ItemCollectionTargetView(BaseModel):
     name: str = Field(min_length=1, max_length=1_000)
     revision: int = Field(ge=1)
     is_member: bool = Field(alias="isMember")
-    relationship: str | None = Field(default=None, max_length=32)
 
 
 class DownloadOptionView(BaseModel):

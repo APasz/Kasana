@@ -166,7 +166,6 @@
           payload.item,
           Array.isArray(payload.audit) ? payload.audit : [],
           Array.isArray(payload.collectionChoices) ? payload.collectionChoices : [],
-          Array.isArray(payload.collectionRelationships) ? payload.collectionRelationships : [],
           Array.isArray(payload.parentChoices) ? payload.parentChoices : [],
           payload.metadataBinding
         );
@@ -175,7 +174,7 @@
       }
     }
 
-    render(item, audit, collectionChoices, collectionRelationships, parentChoices, metadataBinding) {
+    render(item, audit, collectionChoices, parentChoices, metadataBinding) {
       const content = this.querySelector('[data-item-editor-content]');
       if (!content) return;
       this.currentItem = item;
@@ -191,9 +190,7 @@
       const artworkRows = this.renderArtworkRows(artworks, artworkKinds, selected);
       const auditRows = audit.length ? audit.map((entry) => `<li>${escapeHtml(entry.actor || 'administrator')} · ${escapeHtml((entry.changed_fields || []).join(', ') || 'updated')} · ${escapeHtml(entry.occurred_at || '')}</li>`).join('') : '<li>No local edits have been recorded.</li>';
       const kind = itemEditorKind(item.kind);
-      const collectionControls = this.renderCollectionControls(
-        item, collectionChoices, collectionRelationships
-      );
+      const collectionControls = this.renderCollectionControls(item, collectionChoices);
       this.parentChoices = parentChoices.map(normaliseItemEditorParentChoice).filter(Boolean);
       const playbackControls = this.renderPlaybackDefaults(item);
       const tabs = this.editorTabs(Boolean(playbackControls));
@@ -567,7 +564,7 @@
       });
     }
 
-    renderCollectionControls(item, collectionChoices, collectionRelationships) {
+    renderCollectionControls(item, collectionChoices) {
       const isCollection = (collection) => collection
         && Number.isSafeInteger(collection.id)
         && collection.id > 0
@@ -577,17 +574,11 @@
         && collection.revision > 0;
       const included = (Array.isArray(item.collections) ? item.collections : []).filter(isCollection);
       const choices = collectionChoices.filter(isCollection);
-      const relationships = collectionRelationships.filter((relationship) => (
-        typeof relationship === 'string' && relationship
-      ));
       const memberRows = included.length
-        ? included.map((collection) => `<div class="k-member-editor-row"><a href="/collections/${collection.id}" class="k-member-editor-row__title">${escapeHtml(collection.name)}</a>${collection.relationship ? `<span class="k-member-editor-row__relationship">${escapeHtml(String(collection.relationship).replaceAll('_', ' '))}</span>` : ''}<button type="button" class="k-button" data-item-collection-remove="${collection.id}" data-item-collection-revision="${collection.revision}">Remove</button></div>`).join('')
+        ? included.map((collection) => `<div class="k-member-editor-row"><a href="/collections/${collection.id}" class="k-member-editor-row__title">${escapeHtml(collection.name)}</a><button type="button" class="k-button" data-item-collection-remove="${collection.id}" data-item-collection-revision="${collection.revision}">Remove</button></div>`).join('')
         : '<p class="k-item-editor__muted">This item is not in a collection.</p>';
-      const relationshipOptions = ['<option value="">No relationship</option>']
-        .concat(relationships.map((relationship) => `<option value="${escapeHtml(relationship)}">${escapeHtml(relationship.replaceAll('_', ' '))}</option>`))
-        .join('');
       const addControl = choices.length
-        ? `<div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Add to collection" data-item-collection-target>${choices.map((collection) => `<option value="${collection.id}:${collection.revision}">${escapeHtml(collection.name)}</option>`).join('')}</select></label><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Collection relationship" data-item-collection-relationship>${relationshipOptions}</select></label><button type="button" class="k-button" data-item-collection-add>Add to collection</button></div>`
+        ? `<div class="k-item-editor__grid"><label class="k-control-shell k-select-wrap"><select class="k-select" aria-label="Add to collection" data-item-collection-target>${choices.map((collection) => `<option value="${collection.id}:${collection.revision}">${escapeHtml(collection.name)}</option>`).join('')}</select></label><button type="button" class="k-button" data-item-collection-add>Add to collection</button></div>`
         : '<p class="k-item-editor__muted">No other collections are available.</p>';
       return `<section class="k-item-editor__section"><div><h3 class="k-item-editor__section-heading">Collections</h3><p class="k-item-editor__muted">Place this item in one or more collections.</p></div>${memberRows}${addControl}</section>`;
     }
@@ -632,12 +623,10 @@
       });
       content.querySelector('[data-item-collection-add]')?.addEventListener('click', async () => {
         const target = content.querySelector('[data-item-collection-target]');
-        const relationship = content.querySelector('[data-item-collection-relationship]');
-        if (!(target instanceof HTMLSelectElement) || !(relationship instanceof HTMLSelectElement)) return;
+        if (!(target instanceof HTMLSelectElement)) return;
         if (!/^([1-9]\d*):([1-9]\d*)$/.test(target.value)) return;
         await this.mutateCollection(this.collectionActionSource(), {
-          collection_target: target.value,
-          relationship: relationship.value
+          collection_target: target.value
         });
       });
     }

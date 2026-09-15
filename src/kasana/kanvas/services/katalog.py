@@ -103,8 +103,6 @@ from kasana.katalog.public import (
     CollectionMembershipBatchRequest,
     CollectionMembershipCreate,
     CollectionMembershipLookupRequest,
-    CollectionMembershipUpdate,
-    CollectionRelationship,
     CollectionSummary,
     DirectoryListing,
     DownloadGrantRequest,
@@ -753,11 +751,6 @@ class KanvasKatalogService:
                     id=collection.id,
                     name=collection.name,
                     revision=collection.revision,
-                    relationship=(
-                        collection.relationship.value
-                        if collection.relationship is not None
-                        else None
-                    ),
                 )
                 for collection in item.collections
             ),
@@ -779,20 +772,14 @@ class KanvasKatalogService:
         item = conditional_item.item
         if item is None:
             raise RuntimeError("Katalog returned an unexpected empty item response.")
-        relationships_by_collection_id = {
-            membership.id: (
-                membership.relationship.value if membership.relationship is not None else None
-            )
-            for membership in item.collections
-        }
+        membership_collection_ids = {membership.id for membership in item.collections}
         return (
             tuple(
                 ItemCollectionTargetView(
                     id=collection.id,
                     name=collection.name,
                     revision=collection.revision,
-                    isMember=collection.id in relationships_by_collection_id,
-                    relationship=relationships_by_collection_id.get(collection.id),
+                    isMember=collection.id in membership_collection_ids,
                 )
                 for collection in page.items
             ),
@@ -959,7 +946,6 @@ class KanvasKatalogService:
                         CollectionMembershipStateView(
                             itemId=item_id,
                             state="direct" if member else "inherited" if ancestor else "absent",
-                            relationship=member.relationship if member else None,
                             inheritedFromId=ancestor.ancestor_id if ancestor else None,
                             inheritedFromTitle=ancestor.ancestor_title if ancestor else None,
                         )
@@ -1011,10 +997,7 @@ class KanvasKatalogService:
                 collection_id, cursor=cursor, limit=_COLLECTION_BUILDER_PAGE_SIZE
             )
         return (
-            tuple(
-                collection_member(membership.item, membership.relationship)
-                for membership in page.items
-            ),
+            tuple(collection_member(membership.item) for membership in page.items),
             page.next_cursor,
         )
 
@@ -1154,7 +1137,6 @@ class KanvasKatalogService:
         *,
         revision: int,
         item_id: int,
-        relationship: CollectionRelationship | None,
     ) -> int:
         async with self._client() as client:
             result = await client.add_collection_member(
@@ -1162,7 +1144,6 @@ class KanvasKatalogService:
                 CollectionMembershipCreate(
                     expected_revision=revision,
                     library_item_id=item_id,
-                    relationship=relationship,
                 ),
             )
         return result.revision
@@ -1170,27 +1151,11 @@ class KanvasKatalogService:
     async def batch_collection_memberships(
         self, collection_id: int, request: CollectionMembershipBatchRequest
     ) -> tuple[int, tuple[str, ...]]:
-        """Commit a collection builder's staged add, relationship, and removal changes."""
+        """Commit a collection builder's staged add and removal changes."""
 
         async with self._client() as client:
             result = await client.batch_collection_memberships(collection_id, request)
         return result.revision, result.warnings
-
-    async def update_collection_member(
-        self,
-        collection_id: int,
-        *,
-        revision: int,
-        item_id: int,
-        relationship: CollectionRelationship | None,
-    ) -> int:
-        async with self._client() as client:
-            result = await client.update_collection_member(
-                collection_id,
-                item_id,
-                CollectionMembershipUpdate(expected_revision=revision, relationship=relationship),
-            )
-        return result.revision
 
     async def remove_collection_member(
         self, collection_id: int, *, revision: int, item_id: int
@@ -1711,7 +1676,6 @@ async def _collection_detail_view(
     members = tuple(
         collection_member(
             membership.item,
-            membership.relationship,
             playback_states.state_for(membership.item.id),
             partially_watched=playback_states.is_partially_watched(membership.item.id),
         )

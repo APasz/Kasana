@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from kasana.kanvas.viewmodels.library import PosterView
 from kasana.katalog.public import (
     MAX_WATCH_ORDER_ENTRIES,
-    CollectionRelationship,
     LibraryItemKind,
     WatchOrderKind,
 )
@@ -22,7 +21,6 @@ class CollectionMembershipStateView(BaseModel):
 
     item_id: int = Field(gt=0, alias="itemId")
     state: Literal["absent", "direct", "inherited"]
-    relationship: CollectionRelationship | None = None
     inherited_from_id: int | None = Field(default=None, gt=0, alias="inheritedFromId")
     inherited_from_title: str | None = Field(default=None, alias="inheritedFromTitle")
 
@@ -55,13 +53,12 @@ class CollectionTileView(BaseModel):
 
 
 class CollectionMemberView(BaseModel):
-    """A direct member and its optional collection relationship."""
+    """A direct member of a collection."""
 
     model_config = ConfigDict(frozen=True)
 
     poster: PosterView
     kind: str = Field(min_length=1, max_length=32)
-    relationship: str | None = Field(default=None, max_length=32)
 
 
 class WatchOrderCardView(BaseModel):

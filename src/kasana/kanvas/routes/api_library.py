@@ -20,7 +20,6 @@ from kasana.kanvas.viewmodels.library import (
     LibraryPageRequest,
 )
 from kasana.katalog.public import (
-    CollectionRelationship,
     KatalogClientError,
     LibraryItemKind,
     LibraryItemUpdate,
@@ -32,14 +31,12 @@ from .common import (
     data_profile,
     form_collection_target,
     form_integer,
-    form_optional,
     invalid_action,
     item_edit_error,
     json_object,
     katalog_data_error,
     katalog_status,
     library_item_update_payload,
-    optional_relationship,
     query_text,
     queue_success_toast,
     require_administrator,
@@ -157,9 +154,6 @@ async def item_edit_data(item_id: int, request: Request) -> JSONResponse:
             ),
             "collectionChoices": [choice.model_dump(mode="json") for choice in collection_choices],
             "parentChoices": [choice.model_dump(mode="json") for choice in parent_choices],
-            "collectionRelationships": [
-                relationship.value for relationship in CollectionRelationship
-            ],
         }
     )
 
@@ -336,7 +330,6 @@ async def add_item_to_collection_action(item_id: int, request: Request) -> Redir
         collection_id,
         revision=revision,
         item_id=item_id,
-        relationship=optional_relationship(form_optional(form, "relationship")),
     )
     return toast_redirect(request, f"/item/{item_id}", "Collection membership saved")
 

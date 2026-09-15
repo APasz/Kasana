@@ -20,7 +20,6 @@ from kasana.katalog.models import (
     Keiro,
     KeiroEntry,
     KeiroKind,
-    Kinship,
     Kura,
     MediaFile,
     MetadataField,
@@ -270,12 +269,10 @@ def add_collection_membership(
     *,
     collection_id: int,
     library_item_id: int,
-    relationship: Kinship | None = None,
 ) -> CollectionKin:
     membership: CollectionKin = CollectionKin(
         collection_id=collection_id,
         library_item_id=library_item_id,
-        relationship=relationship,
     )
     session.add(membership)
     session.flush()

@@ -60,7 +60,6 @@ from kasana.katalog.public import (
     CollectionDetailsUpdate,
     CollectionMembershipAddition,
     CollectionMembershipBatchRequest,
-    CollectionMembershipUpdate,
     CollectionUpdate,
     DuplicateResolutionBatchRequest,
     DuplicateResolutionPair,
@@ -522,14 +521,6 @@ async def test_typed_client_omits_unset_patch_fields(
     monkeypatch.setattr(client, "_request", request)
 
     await client.update_collection(1, CollectionUpdate(expected_revision=3, name="Renamed"))
-    await client.update_collection_member(
-        1,
-        2,
-        CollectionMembershipUpdate(
-            expected_revision=4,
-            relationship=None,
-        ),
-    )
     await client.update_watch_order(
         4,
         WatchOrderUpdate(expected_revision=6, kind=WatchOrderKind.AIR),
@@ -538,10 +529,6 @@ async def test_typed_client_omits_unset_patch_fields(
 
     assert requests == [
         ("/api/v1/collections/1", {"expected_revision": 3, "name": "Renamed"}),
-        (
-            "/api/v1/collections/1/items/2",
-            {"expected_revision": 4, "relationship": None},
-        ),
         ("/api/v1/watch-orders/4", {"expected_revision": 6, "kind": "air"}),
         ("/api/v1/library/roots/8", {"enabled": False}),
     ]
@@ -1484,8 +1471,7 @@ async def test_collection_membership_batch_endpoint_is_atomic_and_conflict_guard
         "/api/v1/collections/1/items/batch",
         json={
             "expected_revision": seeded_revision,
-            "additions": [{"library_item_id": 2, "relationship": None}],
-            "relationship_updates": [{"library_item_id": 1, "relationship": "related"}],
+            "additions": [{"library_item_id": 2}],
             "removals": [3],
         },
     )
@@ -1497,17 +1483,13 @@ async def test_collection_membership_batch_endpoint_is_atomic_and_conflict_guard
         json={"library_item_ids": [1, 2, 3]},
     )
     assert memberships.status_code == 200
-    assert [
-        (membership["item"]["id"], membership["relationship"])
-        for membership in memberships.json()["memberships"]
-    ] == [(1, "related"), (2, None)]
+    assert [membership["item"]["id"] for membership in memberships.json()["memberships"]] == [1, 2]
 
     stale = await api_fixture.client.post(
         "/api/v1/collections/1/items/batch",
         json={
             "expected_revision": seeded_revision,
             "additions": [{"library_item_id": 3}],
-            "relationship_updates": [],
             "removals": [],
         },
     )
@@ -1516,13 +1498,47 @@ async def test_collection_membership_batch_endpoint_is_atomic_and_conflict_guard
         json={
             "expected_revision": batch.json()["revision"],
             "additions": [{"library_item_id": 2}],
-            "relationship_updates": [],
             "removals": [],
         },
     )
 
     assert stale.status_code == 409
     assert duplicate.status_code == 422
+
+
+async def test_collection_relationship_inputs_and_endpoint_are_unavailable(
+    api_fixture: ApiFixture,
+) -> None:
+    initial = await api_fixture.client.get("/api/v1/collections/1")
+    assert initial.status_code == 200
+    revision = initial.json()["revision"]
+
+    legacy_add = await api_fixture.client.post(
+        "/api/v1/collections/1/items",
+        json={
+            "expected_revision": revision,
+            "library_item_id": 2,
+            "relationship": "primary",
+        },
+    )
+    legacy_batch = await api_fixture.client.post(
+        "/api/v1/collections/1/items/batch",
+        json={
+            "expected_revision": revision,
+            "additions": [{"library_item_id": 2, "relationship": "primary"}],
+            "relationship_updates": [{"library_item_id": 1, "relationship": "related"}],
+        },
+    )
+    legacy_update = await api_fixture.client.patch(
+        "/api/v1/collections/1/items/1",
+        json={"expected_revision": revision, "relationship": "primary"},
+    )
+    unchanged = await api_fixture.client.get("/api/v1/collections/1")
+
+    assert legacy_add.status_code == 422
+    assert legacy_batch.status_code == 422
+    assert legacy_update.status_code == 405
+    assert unchanged.json()["revision"] == revision
 
 
 async def test_duplicate_episode_issues_only_returns_unresolved_duplicate_findings(

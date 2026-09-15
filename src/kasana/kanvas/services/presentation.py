@@ -25,7 +25,6 @@ from kasana.katalog.public import (
     ArtworkSelection,
     Availability,
     CollectionDetail,
-    CollectionRelationship,
     CollectionUpdate,
     LibraryItemKind,
     LibraryItemSummary,
@@ -80,7 +79,6 @@ def collection_tile(detail: CollectionDetail) -> CollectionTileView:
 
 def collection_member(
     item: LibraryItemSummary,
-    relationship: CollectionRelationship | None,
     playback: PlaybackStateResponse | None = None,
     *,
     partially_watched: bool = False,
@@ -94,7 +92,6 @@ def collection_member(
             partially_watched=partially_watched,
         ),
         kind=item.kind.value,
-        relationship=relationship.value if relationship is not None else None,
     )
 
 

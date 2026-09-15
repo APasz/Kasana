@@ -349,7 +349,3 @@ def _included_collections(detail: ItemDetailView) -> None:
             with ui.element("div").classes("k-member-editor-row"):
                 with ui.element("a").props(f'href="/collections/{collection.id}"'):
                     ui.label(collection.name).classes("k-member-editor-row__title")
-                if collection.relationship is not None:
-                    ui.label(collection.relationship.replace("_", " ")).classes(
-                        "k-member-editor-row__relationship"
-                    )

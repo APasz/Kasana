@@ -44,9 +44,7 @@ from kasana.katalog.api.contracts import (
     CollectionMembershipCreate,
     CollectionMembershipLookupRequest,
     CollectionMembershipLookupResponse,
-    CollectionMembershipUpdate,
     CollectionMutationResult,
-    CollectionRelationship,
     CollectionSummary,
     CollectionUpdate,
     ContinueWatchingEntry,
@@ -167,7 +165,6 @@ from kasana.katalog.models import (
     Keiro,
     KeiroEntry,
     KeiroKind,
-    Kinship,
     Kura,
     LibraryItemEditEvent,
     MediaAccessOperation,
@@ -1665,11 +1662,6 @@ class KatalogQueryService:
             membership: CollectionKin = CollectionKin(
                 collection_id=collection_id,
                 library_item_id=item.id,
-                relationship=(
-                    Kinship(request.relationship.value)
-                    if request.relationship is not None
-                    else None
-                ),
             )
             session.add(membership)
             collection.revision += 1
@@ -1692,37 +1684,28 @@ class KatalogQueryService:
             collection: Collection = _require(session, Collection, collection_id, "Collection")
             _require_revision(collection.revision, request.expected_revision, "Collection")
 
-            additions_by_item_id = {
-                addition.library_item_id: addition for addition in request.additions
-            }
-            relationship_updates_by_item_id = {
-                update.library_item_id: update for update in request.relationship_updates
-            }
+            addition_item_ids = tuple(addition.library_item_id for addition in request.additions)
+            addition_item_id_set = set(addition_item_ids)
             removal_item_ids = set(request.removals)
-            referenced_item_ids = set(additions_by_item_id)
-            referenced_item_ids.update(relationship_updates_by_item_id)
+            referenced_item_ids = set(addition_item_id_set)
             referenced_item_ids.update(removal_item_ids)
-            memberships_by_item_id = {
-                membership.library_item_id: membership
-                for membership in session.scalars(
-                    select(CollectionKin).where(
-                        CollectionKin.collection_id == collection.id,
-                        CollectionKin.library_item_id.in_(referenced_item_ids),
+            memberships_by_item_id = (
+                {
+                    membership.library_item_id: membership
+                    for membership in session.scalars(
+                        select(CollectionKin).where(
+                            CollectionKin.collection_id == collection.id,
+                            CollectionKin.library_item_id.in_(referenced_item_ids),
+                        )
                     )
-                )
-            }
+                }
+                if referenced_item_ids
+                else {}
+            )
 
-            duplicate_additions = set(additions_by_item_id).intersection(memberships_by_item_id)
+            duplicate_additions = addition_item_id_set.intersection(memberships_by_item_id)
             if duplicate_additions:
                 raise CatalogueValidationError("That library item is already in this collection.")
-            missing_relationship_updates = set(relationship_updates_by_item_id).difference(
-                memberships_by_item_id
-            )
-            if missing_relationship_updates:
-                missing_item_id = min(missing_relationship_updates)
-                raise CatalogueNotFoundError(
-                    f"Library item {missing_item_id} is not a member of collection {collection.id}."
-                )
             missing_removals = removal_item_ids.difference(memberships_by_item_id)
             if missing_removals:
                 missing_item_id = min(missing_removals)
@@ -1730,13 +1713,17 @@ class KatalogQueryService:
                     f"Library item {missing_item_id} is not a member of collection {collection.id}."
                 )
 
-            added_items_by_id = {
-                item.id: item
-                for item in session.scalars(
-                    select(Zaisan).where(Zaisan.id.in_(additions_by_item_id))
-                )
-            }
-            missing_additions = set(additions_by_item_id).difference(added_items_by_id)
+            added_items_by_id = (
+                {
+                    item.id: item
+                    for item in session.scalars(
+                        select(Zaisan).where(Zaisan.id.in_(addition_item_ids))
+                    )
+                }
+                if addition_item_id_set
+                else {}
+            )
+            missing_additions = addition_item_id_set.difference(added_items_by_id)
             if missing_additions:
                 missing_item_id = min(missing_additions)
                 raise CatalogueNotFoundError(f"Library item {missing_item_id} does not exist.")
@@ -1744,21 +1731,12 @@ class KatalogQueryService:
             warnings_by_item_id = _collection_membership_removal_warnings(
                 session, collection.id, removal_item_ids
             )
-            for item_id, addition in additions_by_item_id.items():
+            for item_id in addition_item_ids:
                 session.add(
                     CollectionKin(
                         collection_id=collection.id,
                         library_item_id=added_items_by_id[item_id].id,
-                        relationship=(
-                            Kinship(addition.relationship.value)
-                            if addition.relationship is not None
-                            else None
-                        ),
                     )
-                )
-            for item_id, update in relationship_updates_by_item_id.items():
-                memberships_by_item_id[item_id].relationship = (
-                    Kinship(update.relationship.value) if update.relationship is not None else None
                 )
             for item_id in removal_item_ids:
                 session.delete(memberships_by_item_id[item_id])
@@ -1816,32 +1794,6 @@ class KatalogQueryService:
             )
 
         return self._database.run_transaction(lookup)
-
-    def update_collection_membership(
-        self,
-        collection_id: int,
-        library_item_id: int,
-        request: CollectionMembershipUpdate,
-    ) -> CollectionMutationResult:
-        def update_membership(session: Session) -> CollectionMutationResult:
-            collection: Collection = _require(session, Collection, collection_id, "Collection")
-            _require_revision(collection.revision, request.expected_revision, "Collection")
-            membership: CollectionKin = _require_membership(session, collection.id, library_item_id)
-            membership.relationship = (
-                Kinship(request.relationship.value) if request.relationship is not None else None
-            )
-            collection.revision += 1
-            session.flush()
-            item: Zaisan = _require(session, Zaisan, membership.library_item_id, "Library item")
-            return CollectionMutationResult(
-                collection_id=collection.id,
-                revision=collection.revision,
-                membership=_membership_detail(
-                    membership, _summaries_for(session, (item,))[item.id]
-                ),
-            )
-
-        return self._database.run_transaction(update_membership)
 
     def remove_collection_membership(
         self, collection_id: int, library_item_id: int, *, expected_revision: int
@@ -5241,9 +5193,9 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
         )
         .order_by(MediaFile.id)
     )
-    collection_rows = tuple(
-        session.execute(
-            select(Collection, CollectionKin)
+    collections = tuple(
+        session.scalars(
+            select(Collection)
             .join(CollectionKin, CollectionKin.collection_id == Collection.id)
             .where(CollectionKin.library_item_id == item.id)
             .order_by(Collection.name, Collection.id)
@@ -5270,13 +5222,8 @@ def _detail(session: Session, item: Zaisan) -> LibraryItemDetail:
                 id=collection.id,
                 name=collection.name,
                 revision=collection.revision,
-                relationship=(
-                    CollectionRelationship(membership.relationship.value)
-                    if membership.relationship is not None
-                    else None
-                ),
             )
-            for collection, membership in collection_rows
+            for collection in collections
         ),
         "playback_defaults": LibraryItemPlaybackDefaults(
             audio_stream_index=item.default_audio_stream_index,
@@ -5957,11 +5904,6 @@ def _membership_detail(membership: CollectionKin, item: LibraryItemSummary) -> C
         id=membership.id,
         collection_id=membership.collection_id,
         item=item,
-        relationship=(
-            CollectionRelationship(membership.relationship.value)
-            if membership.relationship is not None
-            else None
-        ),
     )
 
 

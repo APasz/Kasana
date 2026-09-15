@@ -27,7 +27,6 @@ from kasana.katalog.api.contracts import (
     CollectionMembershipCreate,
     CollectionMembershipLookupRequest,
     CollectionMembershipLookupResponse,
-    CollectionMembershipUpdate,
     CollectionMutationResult,
     CollectionSummary,
     CollectionUpdate,
@@ -649,17 +648,6 @@ class KatalogClient:
             f"/api/v1/collections/{collection_id}/items/lookup",
             request,
             CollectionMembershipLookupResponse,
-        )
-
-    async def update_collection_member(
-        self, collection_id: int, library_item_id: int, request: CollectionMembershipUpdate
-    ) -> CollectionMutationResult:
-        return await self._send_model(
-            "PATCH",
-            f"/api/v1/collections/{collection_id}/items/{library_item_id}",
-            request,
-            CollectionMutationResult,
-            exclude_unset=True,
         )
 
     async def remove_collection_member(

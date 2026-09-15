@@ -2897,32 +2897,7 @@
     const member = value;
     const poster = normalisePoster(member.poster);
     if (!poster || typeof member.kind !== 'string' || !COLLECTION_BUILDER_KINDS.includes(member.kind)) return null;
-    if (member.relationship != null && typeof member.relationship !== 'string') return null;
-    return {poster, kind: member.kind, relationship: member.relationship ?? null};
-  };
-
-  const collectionBuilderRelationshipSelect = (itemId, relationship, title) => {
-    const label = document.createElement('label');
-    label.className = 'k-collection-builder__relationship';
-    const visuallyHidden = document.createElement('span');
-    visuallyHidden.className = 'k-sr-only';
-    visuallyHidden.textContent = `Relationship for ${title}`;
-    const select = document.createElement('select');
-    select.className = 'k-select';
-    select.dataset.builderRelationship = String(itemId);
-    const options = [['', 'No relationship']].concat(
-      ['primary', 'sequel', 'prequel', 'spinoff', 'remake', 'alternate_continuity', 'related']
-        .map((value) => [value, value.replaceAll('_', ' ')])
-    );
-    for (const [value, labelText] of options) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = labelText;
-      option.selected = value === (relationship || '');
-      select.append(option);
-    }
-    label.append(visuallyHidden, select);
-    return label;
+    return {poster, kind: member.kind};
   };
 
   const collectionBuilderIdentity = (poster) => {
@@ -2949,7 +2924,6 @@
       this.currentMembers = new Map();
       this.memberOrder = [];
       this.removals = new Set();
-      this.relationshipUpdates = new Map();
       this.saving = false;
       this.conflict = null;
       this.memberResults = null;
@@ -2990,7 +2964,6 @@
       this.conflictState = this.querySelector('[data-builder-conflict]');
       this.renderSummary();
       this.addEventListener('click', (event) => this.onClick(event));
-      this.addEventListener('change', (event) => this.onChange(event));
       void this.resetMembers();
     }
 
@@ -3009,10 +2982,7 @@
       }
       if (change.itemId) {
         if (change.member) this.removals.delete(change.itemId);
-        else {
-          this.removals.add(change.itemId);
-          this.relationshipUpdates.delete(change.itemId);
-        }
+        else this.removals.add(change.itemId);
         if ('artworkItemId' in change) {
           const artwork = this.details?.querySelector('[name="artwork_item_id"]');
           if (artwork) {
@@ -3061,15 +3031,6 @@
       if (action === 'save') void this.save();
       if (action === 'retry') this.retryConflict();
       if (action === 'discard') window.location.reload();
-    }
-
-    onChange(event) {
-      if (this.saving) return;
-      const target = event.target;
-      if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
-      if (target instanceof HTMLSelectElement && target.matches('[data-builder-relationship]')) {
-        this.changeRelationship(Number(target.dataset.builderRelationship), target.value || null);
-      }
     }
 
     async resetMembers() {
@@ -3123,22 +3084,8 @@
       if (!this.memberOrder.includes(itemId)) this.memberOrder.push(itemId);
     }
 
-    relationshipFor(itemId) {
-      if (this.relationshipUpdates.has(itemId)) return this.relationshipUpdates.get(itemId);
-      return this.currentMembers.get(itemId)?.relationship || null;
-    }
-
-    changeRelationship(itemId, relationship) {
-      if (this.saving || this.removals.has(itemId)) return;
-      const member = this.currentMembers.get(itemId);
-      if (!member) return;
-      if (member.relationship === relationship) this.relationshipUpdates.delete(itemId);
-      else this.relationshipUpdates.set(itemId, relationship);
-      this.renderSummary();
-    }
-
     stagedChangeCount() {
-      return this.relationshipUpdates.size + Object.keys(this.detailChanges()).length;
+      return Object.keys(this.detailChanges()).length;
     }
 
     detailValues() {
@@ -3158,11 +3105,7 @@
     batchPayload() {
       return {
         expected_revision: this.collectionRevision,
-        ...(Object.keys(this.detailChanges()).length ? {details: this.detailChanges()} : {}),
-        relationship_updates: Array.from(this.relationshipUpdates, ([libraryItemId, relationship]) => ({
-          library_item_id: libraryItemId,
-          relationship
-        }))
+        ...(Object.keys(this.detailChanges()).length ? {details: this.detailChanges()} : {})
       };
     }
 
@@ -3215,7 +3158,6 @@
         this.syncPageMembershipState();
         this.initialDetails = this.detailValues();
         this.removals.clear();
-        this.relationshipUpdates.clear();
         this.conflict = null;
         publishKanvasToast({severity: 'success', title: 'Collection saved'});
         window.dispatchEvent(new CustomEvent('kanvas:collection-changed', {detail: {
@@ -3255,7 +3197,6 @@
       if (!this.summary) return;
       const parts = [];
       if (Object.keys(this.detailChanges()).length) parts.push("Details changed");
-      if (this.relationshipUpdates.size) parts.push(`${this.relationshipUpdates.size} relationship update${this.relationshipUpdates.size === 1 ? '' : 's'}`);
       this.summary.textContent = parts.length ? parts.join(' · ') : '';
       this.details?.querySelectorAll('input, textarea, select').forEach((input) => { input.disabled = this.saving; });
       const save = this.querySelector('[data-builder-action="save"]');
@@ -3284,23 +3225,12 @@
       const poster = collectionBuilderIdentity(member.poster);
       const controls = document.createElement('div');
       controls.className = 'k-collection-builder__member-controls';
-      const relationship = collectionBuilderRelationshipSelect(
-        itemId, this.relationshipFor(itemId), member.poster.title
-      );
-      relationship.querySelector('select')?.toggleAttribute(
-        'disabled', this.saving || this.removals.has(itemId)
-      );
       const action = document.createElement('kanvas-collection-toggle');
       action.setAttribute('collection-id', this.getAttribute('collection-id'));
       action.setAttribute('item-id', String(itemId));
       action.setAttribute('item-title', member.poster.title);
       action.toggleAttribute('disabled', this.saving);
-      const options = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = 'Relationship';
-      options.append(summary, relationship);
-      options.hidden = removed;
-      controls.append(options, action);
+      controls.append(action);
       card.append(poster, controls);
       return card;
     }
@@ -3337,13 +3267,11 @@
     if (typeof target.name !== 'string' || !target.name.trim()) return null;
     if (!Number.isSafeInteger(target.revision) || target.revision <= 0) return null;
     if (typeof target.isMember !== 'boolean') return null;
-    if (target.relationship != null && typeof target.relationship !== 'string') return null;
     return {
       id: target.id,
       name: target.name,
       revision: target.revision,
-      isMember: target.isMember,
-      relationship: target.relationship ?? null
+      isMember: target.isMember
     };
   };
 
@@ -3511,8 +3439,8 @@
       try {
         for (const target of changes) {
           const body = target.member
-            ? {expected_revision: target.revision, additions: [{library_item_id: itemId, relationship: null}], relationship_updates: [], removals: []}
-            : {expected_revision: target.revision, additions: [], relationship_updates: [], removals: [itemId]};
+            ? {expected_revision: target.revision, additions: [{library_item_id: itemId}], removals: []}
+            : {expected_revision: target.revision, additions: [], removals: [itemId]};
           try {
             const response = await fetch(`${actionPrefix}/${encodeURIComponent(String(target.id))}/members/batch`, {
               method: 'POST',
@@ -3577,8 +3505,7 @@
         name.textContent = target.name;
         const facts = document.createElement('small');
         const staged = target.member !== target.initialMember ? ' · staged' : '';
-        const relationship = target.relationship ? ` · ${target.relationship.replaceAll('_', ' ')}` : '';
-        facts.textContent = `${target.initialMember ? 'Already in collection' : 'Not in collection'}${relationship}${staged}`;
+        facts.textContent = `${target.initialMember ? 'Already in collection' : 'Not in collection'}${staged}`;
         detail.append(name, facts);
         row.append(input, detail);
         if (this.conflicts.has(target.id)) {

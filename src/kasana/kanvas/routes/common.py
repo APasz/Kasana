@@ -16,7 +16,6 @@ from kasana.kanvas.profiles import ProfileSessions, SessionProfile
 from kasana.kanvas.services.katalog import KanvasKatalogService
 from kasana.kanvas.viewmodels.toasts import ToastSeverity, ToastView
 from kasana.katalog.public import (
-    CollectionRelationship,
     KatalogClientError,
     KatalogClientErrorKind,
     LibraryItemUpdate,
@@ -327,19 +326,6 @@ def optional_integer(value: object) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError("Optional identifiers must be positive integers.")
     return value
-
-
-def optional_relationship(value: object) -> CollectionRelationship | None:
-    """Parse the optional finite membership relationship from form or JSON input."""
-
-    if value is None or value == "":
-        return None
-    if not isinstance(value, str):
-        raise ValueError("relationship must be a string.")
-    try:
-        return CollectionRelationship(value)
-    except ValueError as error:
-        raise ValueError("Invalid collection relationship.") from error
 
 
 def form_value(form: FormData, field: str) -> str | None:

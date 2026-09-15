@@ -18,7 +18,6 @@ from kasana.katalog.models import (
     CollectionKin,
     KeiroEntry,
     KeiroKind,
-    Kinship,
     Kura,
     MediaFile,
     PlaybackState,
@@ -257,7 +256,6 @@ def test_collection_membership_and_mixed_watch_order(
             session,
             collection_id=collection.id,
             library_item_id=movie_id,
-            relationship=Kinship.PRIMARY,
         )
         watch_order = create_watch_order(
             session,
@@ -271,7 +269,7 @@ def test_collection_membership_and_mixed_watch_order(
         second = append_watch_order_entry(
             session, watch_order_id=watch_order.id, library_item_id=episode.id
         )
-        assert membership.relationship is Kinship.PRIMARY
+        assert membership.library_item_id == movie_id
         assert (first.position, second.position) == (0, 1)
         with pytest.raises(ValueError, match="cannot appear"):
             append_watch_order_entry(

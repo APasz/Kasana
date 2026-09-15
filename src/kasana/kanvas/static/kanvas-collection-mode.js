@@ -5,9 +5,9 @@
   const CHANGED_EVENT = 'kanvas:collection-changed';
   const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 
-  /** @typedef {{itemId: number, state: 'absent'|'direct'|'inherited', relationship: string|null, inheritedFromId: number|null, inheritedFromTitle: string|null}} Membership */
+  /** @typedef {{itemId: number, state: 'absent'|'direct'|'inherited', inheritedFromId: number|null, inheritedFromTitle: string|null}} Membership */
   /** @typedef {{id: number, name: string, itemCount: number, revision: number, artworkItemId: number|null, items: Membership[]}} CollectionState */
-  /** @typedef {{collectionId: number, revision: number, itemId: number, title: string, added: boolean, relationship: string|null, artwork: boolean}} MembershipUndo */
+  /** @typedef {{collectionId: number, revision: number, itemId: number, title: string, added: boolean, artwork: boolean}} MembershipUndo */
 
   const collectionState = (value) => {
     if (!value || !positiveInteger(value.id) || !positiveInteger(value.revision)
@@ -19,7 +19,6 @@
     for (const item of value.items) {
       if (!item || !positiveInteger(item.itemId) || seen.has(item.itemId)
           || !['absent', 'direct', 'inherited'].includes(item.state)
-          || (item.relationship !== null && typeof item.relationship !== 'string')
           || (item.inheritedFromId !== null && !positiveInteger(item.inheritedFromId))
           || (item.inheritedFromTitle !== null && typeof item.inheritedFromTitle !== 'string')
           || (item.state === 'inherited' && (!item.inheritedFromId || !item.inheritedFromTitle))) {
@@ -33,8 +32,7 @@
   const membershipUndo = (value) => value && positiveInteger(value.collectionId)
     && positiveInteger(value.revision) && positiveInteger(value.itemId)
     && typeof value.title === 'string' && typeof value.added === 'boolean'
-    && typeof value.artwork === 'boolean'
-    && (value.relationship === null || typeof value.relationship === 'string') ? value : null;
+    && typeof value.artwork === 'boolean' ? value : null;
 
   class CollectionRequestError extends Error {
     constructor(message, status) { super(message); this.status = status; }
@@ -251,7 +249,7 @@
       const added = member.state === 'absent';
       const undo = {collectionId: id, revision: context.revision, itemId,
         title: control.getAttribute('item-title') || `Item ${itemId}`, added,
-        relationship: member.relationship, artwork: context.artworkItemId === itemId};
+        artwork: context.artworkItemId === itemId};
       const payload = added ? {additions: [{library_item_id: itemId}]} : {removals: [itemId]};
       await this.mutate(id, context.revision, payload, undo);
     }
@@ -260,7 +258,7 @@
       if (!this.undo || this.busy) return;
       const undo = this.undo;
       const payload = undo.added ? {removals: [undo.itemId]} : {
-        additions: [{library_item_id: undo.itemId, relationship: undo.relationship}],
+        additions: [{library_item_id: undo.itemId}],
         ...(undo.artwork ? {details: {artwork_item_id: undo.itemId}} : {})
       };
       await this.mutate(undo.collectionId, undo.revision, payload, null, undo.itemId);
