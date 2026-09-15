@@ -35,7 +35,6 @@ from kasana.kanvas.settings import Kanvas_Settings
 from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
-    WatchOrderKind,
 )
 
 
@@ -249,7 +248,7 @@ def _collection_delete_form(collection_id: int, revision: int) -> None:
 async def render_watch_order_new(
     settings: Kanvas_Settings, profile: SessionProfile, collection_id: int
 ) -> None:
-    """Choose dates, an existing order, or an empty starting point."""
+    """Choose the original-release generator, an existing route, or an empty route."""
 
     with page_shell(settings, "/collections", "New watch order", profile):
         if not profile.is_administrator:
@@ -272,33 +271,26 @@ async def render_watch_order_new(
             text_input(
                 name="name",
                 aria_label="Watch-order name",
-                placeholder="Release order",
+                placeholder="My route",
                 autofocus=True,
-            )
-            select_input(
-                name="kind",
-                aria_label="Watch-order kind",
-                options=tuple(
-                    SelectOption(kind.value, kind.value.replace("_", " ").title())
-                    for kind in WatchOrderKind
-                ),
-                value=WatchOrderKind.CUSTOM.value,
             )
             select_input(
                 name="start",
                 aria_label="Start with",
                 options=(
-                    SelectOption("release", "Release dates"),
-                    SelectOption("air", "Air dates"),
+                    SelectOption("original_release", "Original release"),
                     SelectOption("empty", "Empty order"),
                     *(
                         SelectOption(f"copy:{order.id}", f"Copy · {order.name}")
                         for order in detail.watch_orders
                     ),
                 ),
-                value="release",
+                value="original_release",
             )
-            quiet_copy("Dates are a starting point. You can arrange episodes and films next.")
+            quiet_copy(
+                "Only canonical original-release dates are used. "
+                "Undated titles need manual placement."
+            )
             action_button("Create", primary=True, button_type=ButtonType.SUBMIT)
 
 
@@ -308,8 +300,6 @@ async def render_watch_order(
     watch_order_id: int,
     *,
     editable: bool,
-    preview_mode: str | None = None,
-    apply_mode: str | None = None,
 ) -> None:
     """Render the saved order or its separate draft editor."""
 

@@ -93,8 +93,8 @@ def watch_order_card(card: WatchOrderCardView, *, href: str | None = None) -> No
         ):
             with ui.element("div").classes("k-watch-order-card__topline"):
                 ui.label(card.name).classes("k-watch-order-card__title")
-                label = "Default" if card.is_default else card.kind
-                ui.label(label).classes("k-watch-order-card__kind")
+                if card.is_default:
+                    ui.label("Default").classes("k-watch-order-card__badge")
             detail = f"{card.entry_count} entries"
             if card.completed_entry_count is not None:
                 detail += f" · {card.completed_entry_count} complete"
@@ -196,14 +196,13 @@ def generation_preview(preview: GenerationPreviewView, *, apply_action: str) -> 
             "k-generation-preview__summary"
         )
         _preview_rows(preview)
-        _preview_list("Missing dates", preview.undated_titles)
+        _preview_list("Undated — add manually", preview.undated_titles)
         _preview_list("Unavailable", preview.unavailable_titles)
         _preview_list("Duplicates", preview.duplicate_titles)
         _preview_list("Ignored non-playable", preview.non_playable_titles)
         _preview_list("Existing entries removed", preview.removed_entry_titles)
         with ui.element("form").classes("k-action-row").props(action_form_props(apply_action)):
             hidden_input(name="revision", value=str(preview.revision))
-            hidden_input(name="mode", value=preview.mode)
             hidden_input(name="apply_mode", value=preview.apply_mode)
             hidden_input(name="preview_token", value=preview.preview_token or "")
             action_button("Apply generated order", primary=True, button_type=ButtonType.SUBMIT)
@@ -220,9 +219,9 @@ def watch_order_header(editor: WatchOrderEditorView, *, show_facts: bool = True)
         ):
             ui.label(editor.collection_name)
         if show_facts:
-            ui.label(f"{editor.entry_count} entries · {editor.kind}").classes(
-                "k-watch-order-header__facts"
-            ).props("data-watch-order-facts")
+            ui.label(f"{editor.entry_count} entries").classes("k-watch-order-header__facts").props(
+                "data-watch-order-facts"
+            )
 
 
 def collection_form_query(*, search: str | None) -> str:

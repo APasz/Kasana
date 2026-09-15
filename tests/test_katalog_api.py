@@ -40,7 +40,6 @@ from kasana.katalog.models import (
     AvailabilityState,
     CachedArtwork,
     CachedArtworkKind,
-    KeiroKind,
     Kura,
     MaintenanceJob,
     MaintenanceJobStatus,
@@ -72,7 +71,6 @@ from kasana.katalog.public import (
     UserAuthentication,
     UserCreate,
     UserUpdate,
-    WatchOrderKind,
     WatchOrderSummary,
     WatchOrderUpdate,
 )
@@ -230,9 +228,7 @@ async def api_fixture(tmp_path: Path) -> AsyncIterator[ApiFixture]:
         )
         collection = create_collection(session, name="Letters")
         add_collection_membership(session, collection_id=collection.id, library_item_id=alpha.id)
-        order = create_watch_order(
-            session, collection_id=collection.id, name="Release", order_kind=KeiroKind.AIR
-        )
+        order = create_watch_order(session, collection_id=collection.id, name="Release")
         append_watch_order_entry(session, watch_order_id=order.id, library_item_id=alpha.id)
         append_watch_order_entry(session, watch_order_id=order.id, library_item_id=beta.id)
         user = create_user(session, username="tester")
@@ -523,13 +519,13 @@ async def test_typed_client_omits_unset_patch_fields(
     await client.update_collection(1, CollectionUpdate(expected_revision=3, name="Renamed"))
     await client.update_watch_order(
         4,
-        WatchOrderUpdate(expected_revision=6, kind=WatchOrderKind.AIR),
+        WatchOrderUpdate(expected_revision=6, name="Renamed order"),
     )
     await client.update_library_root(8, LibraryRootUpdate(enabled=False))
 
     assert requests == [
         ("/api/v1/collections/1", {"expected_revision": 3, "name": "Renamed"}),
-        ("/api/v1/watch-orders/4", {"expected_revision": 6, "kind": "air"}),
+        ("/api/v1/watch-orders/4", {"expected_revision": 6, "name": "Renamed order"}),
         ("/api/v1/library/roots/8", {"enabled": False}),
     ]
 
@@ -543,7 +539,6 @@ async def test_typed_client_iterates_every_collection_watch_order_page(
             id=1,
             collection_id=7,
             name="Air",
-            kind=WatchOrderKind.AIR,
             entry_count=0,
             revision=1,
         ),
@@ -551,7 +546,6 @@ async def test_typed_client_iterates_every_collection_watch_order_page(
             id=2,
             collection_id=7,
             name="Recommended",
-            kind=WatchOrderKind.RECOMMENDED,
             entry_count=0,
             revision=1,
         ),

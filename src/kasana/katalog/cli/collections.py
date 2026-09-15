@@ -16,9 +16,7 @@ from kasana.katalog.api.contracts import (
     WatchOrderEntryCreate,
     WatchOrderEntryMove,
     WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
-    WatchOrderKind,
     WatchOrderUpdate,
 )
 from kasana.katalog.cli.app import (
@@ -209,16 +207,13 @@ def create_watch_order(
     collection_id: Annotated[int, typer.Argument(min=1)],
     name: Annotated[str, typer.Argument()],
     collection_revision: Annotated[int, typer.Option("--collection-revision", min=1)],
-    kind: Annotated[WatchOrderKind, typer.Option("--kind")] = WatchOrderKind.CUSTOM,
 ) -> None:
     """Create a manually curated watch order."""
 
     cli = context_from(context)
     request = _validated(
         cli,
-        lambda: WatchOrderCreate(
-            expected_collection_revision=collection_revision, name=name, kind=kind
-        ),
+        lambda: WatchOrderCreate(expected_collection_revision=collection_revision, name=name),
     )
     result = with_catalogue_queries(
         cli, lambda queries: queries.create_watch_order(collection_id, request)
@@ -250,23 +245,12 @@ def update_watch_order(
     context: typer.Context,
     watch_order_id: Annotated[int, typer.Argument(min=1)],
     revision: Annotated[int, typer.Option("--revision", min=1)],
-    name: Annotated[str | None, typer.Option("--name")] = None,
-    kind: Annotated[WatchOrderKind | None, typer.Option("--kind")] = None,
+    name: Annotated[str, typer.Option("--name")],
 ) -> None:
-    """Change watch-order metadata."""
+    """Rename a watch order."""
 
     cli = context_from(context)
-    if name is not None and kind is not None:
-        request = _validated(
-            cli,
-            lambda: WatchOrderUpdate(expected_revision=revision, name=name, kind=kind),
-        )
-    elif name is not None:
-        request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision, name=name))
-    elif kind is not None:
-        request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision, kind=kind))
-    else:
-        request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision))
+    request = _validated(cli, lambda: WatchOrderUpdate(expected_revision=revision, name=name))
     result = with_catalogue_queries(
         cli, lambda queries: queries.update_watch_order(watch_order_id, request)
     )
@@ -370,13 +354,13 @@ def remove_watch_order_entry(
 def _generation_request(
     cli: CLIContext,
     revision: int,
-    mode: WatchOrderGenerationMode,
     apply_mode: WatchOrderGenerationApplyMode,
 ) -> WatchOrderGenerationRequest:
     return _validated(
         cli,
         lambda: WatchOrderGenerationRequest(
-            expected_revision=revision, mode=mode, apply_mode=apply_mode
+            expected_revision=revision,
+            apply_mode=apply_mode,
         ),
     )
 
@@ -386,12 +370,11 @@ def preview_generation(
     context: typer.Context,
     watch_order_id: Annotated[int, typer.Argument(min=1)],
     revision: Annotated[int, typer.Option("--revision", min=1)],
-    mode: Annotated[WatchOrderGenerationMode, typer.Option("--mode")],
 ) -> None:
-    """Preview deterministic air or release ordering without changing entries."""
+    """Preview the original-release route without changing entries."""
 
     cli = context_from(context)
-    request = _generation_request(cli, revision, mode, WatchOrderGenerationApplyMode.REPLACE)
+    request = _generation_request(cli, revision, WatchOrderGenerationApplyMode.REPLACE)
     result = with_catalogue_queries(
         cli, lambda queries: queries.preview_watch_order_generation(watch_order_id, request)
     )
@@ -403,15 +386,14 @@ def apply_generation(
     context: typer.Context,
     watch_order_id: Annotated[int, typer.Argument(min=1)],
     revision: Annotated[int, typer.Option("--revision", min=1)],
-    mode: Annotated[WatchOrderGenerationMode, typer.Option("--mode")],
     apply_mode: Annotated[
         WatchOrderGenerationApplyMode, typer.Option("--apply-mode")
     ] = WatchOrderGenerationApplyMode.REPLACE,
 ) -> None:
-    """Apply a deterministic generated order by explicit replace or merge."""
+    """Apply the original-release route by explicit replace or merge."""
 
     cli = context_from(context)
-    request = _generation_request(cli, revision, mode, apply_mode)
+    request = _generation_request(cli, revision, apply_mode)
     result = with_catalogue_queries(
         cli, lambda queries: queries.apply_watch_order_generation(watch_order_id, request)
     )

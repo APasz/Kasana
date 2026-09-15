@@ -17,8 +17,6 @@ from kasana.katalog.public import (
     KatalogClientError,
     KatalogClientErrorKind,
     WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
-    WatchOrderKind,
     WatchOrderUpdate,
 )
 
@@ -42,7 +40,6 @@ from .common import (
     require_administrator,
     require_confirmation,
     require_profile,
-    string,
     toast_redirect,
     watch_order_mutation_error,
 )
@@ -263,7 +260,6 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
                     {
                         "expected_revision": revision,
                         "name": payload.get("name"),
-                        "kind": payload.get("kind"),
                         "item_ids": payload.get("itemIds"),
                     }
                 ),
@@ -272,7 +268,6 @@ async def watch_order_entry_action(watch_order_id: int, request: Request) -> JSO
             preview = await service.generation_preview(
                 watch_order_id,
                 revision=revision,
-                mode=WatchOrderGenerationMode(string(payload, "mode", maximum_length=32)),
                 apply_mode=WatchOrderGenerationApplyMode.REPLACE,
             )
             return JSONResponse(preview.model_dump(mode="json", by_alias=True))
@@ -420,22 +415,27 @@ async def create_watch_order_action(collection_id: int, request: Request) -> Red
     require_administrator(profile)
     form = await request.form()
     try:
-        kind = WatchOrderKind(form_required(form, "kind"))
         start = form_optional(form, "start") or "empty"
-        generation_mode = WatchOrderGenerationMode(start) if start in {"air", "release"} else None
-        copy_from_order_id = int(start.removeprefix("copy:")) if start.startswith("copy:") else None
-        if start != "empty" and generation_mode is None and copy_from_order_id is None:
+        generate_original_release = start == "original_release"
+        copy_from_order_id: int | None = None
+        if start.startswith("copy:"):
+            copy_from_order_id = int(start.removeprefix("copy:"))
+        if copy_from_order_id is not None and copy_from_order_id <= 0:
+            raise ValueError("A copied route must have a positive identifier.")
+        if start != "empty" and not generate_original_release and copy_from_order_id is None:
             raise ValueError("Invalid starting point.")
     except ValueError as error:
-        raise HTTPException(status_code=422, detail="Invalid watch-order kind.") from error
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid watch-order starting point.",
+        ) from error
     watch_order_id = await KanvasKatalogService(
         runtime.settings, profile.user.id
     ).create_watch_order(
         collection_id,
         collection_revision=form_integer(form, "collection_revision"),
         name=form_required(form, "name"),
-        kind=kind,
-        generation_mode=generation_mode,
+        generate_original_release=generate_original_release,
         copy_from_order_id=copy_from_order_id,
     )
     return toast_redirect(request, f"/watch-orders/{watch_order_id}/edit", "Watch order created")
@@ -443,21 +443,16 @@ async def create_watch_order_action(collection_id: int, request: Request) -> Red
 
 @app.post("/kanvas/actions/watch-orders/{watch_order_id}", include_in_schema=False)
 async def update_watch_order_action(watch_order_id: int, request: Request) -> RedirectResponse:
-    """Update the name or kind of an existing watch order."""
+    """Update the name of an existing watch order."""
 
     profile = await require_profile(request)
     require_administrator(profile)
     form = await request.form()
     try:
-        kind = WatchOrderKind(form_required(form, "kind"))
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail="Invalid watch-order kind.") from error
-    try:
         await KanvasKatalogService(runtime.settings, profile.user.id).update_watch_order(
             watch_order_id,
             revision=form_integer(form, "revision"),
             name=form_required(form, "name"),
-            kind=kind,
         )
     except KatalogClientError as error:
         message = (
@@ -498,14 +493,12 @@ async def apply_watch_order_generation_action(
     require_administrator(profile)
     form = await request.form()
     try:
-        mode = WatchOrderGenerationMode(form_required(form, "mode"))
         apply_mode = WatchOrderGenerationApplyMode(form_required(form, "apply_mode"))
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Invalid generation request.") from error
     await KanvasKatalogService(runtime.settings, profile.user.id).apply_generation(
         watch_order_id,
         revision=form_integer(form, "revision"),
-        mode=mode,
         apply_mode=apply_mode,
         preview_token=form_required(form, "preview_token"),
     )

@@ -322,19 +322,12 @@ async def watch_order_page(watch_order_id: int, request: Request) -> Response | 
 
 
 async def watch_order_edit_page(watch_order_id: int, request: Request) -> Response | None:
-    """Serve the virtualised watch-order editor and optional generation preview."""
+    """Serve the virtualised watch-order editor."""
 
     profile = await page_profile(request)
     if isinstance(profile, RedirectResponse):
         return profile
-    await render_watch_order(
-        runtime.settings,
-        profile,
-        watch_order_id,
-        editable=True,
-        preview_mode=query_text(request, "preview", maximum_length=32),
-        apply_mode=query_text(request, "apply", maximum_length=32),
-    )
+    await render_watch_order(runtime.settings, profile, watch_order_id, editable=True)
 
 
 async def administration_page(request: Request) -> Response | None:

@@ -56,13 +56,6 @@ class AuditCategory(StrEnum):
     INVALID_METADATA_SIDECAR = "invalid_metadata_sidecar"
 
 
-class KeiroKind(StrEnum):
-    AIR = "air"
-    CHRONOLOGICAL = "chronological"
-    RECOMMENDED = "recommended"
-    CUSTOM = "custom"
-
-
 class PlaybackContextKind(StrEnum):
     STANDALONE = "standalone"
     SERIES = "series"
@@ -854,9 +847,6 @@ class Keiro(Base):
         ForeignKey("collection.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
-    order_kind: Mapped[KeiroKind] = mapped_column(
-        _enum(KeiroKind, "watch_order_kind"), nullable=False
-    )
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     collection: Mapped[Collection] = orm_relationship(

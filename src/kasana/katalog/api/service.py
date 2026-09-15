@@ -126,10 +126,8 @@ from kasana.katalog.api.contracts import (
     WatchOrderEntryDetail,
     WatchOrderEntryMove,
     WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
     WatchOrderGenerationPreview,
     WatchOrderGenerationRequest,
-    WatchOrderKind,
     WatchOrderMutationResult,
     WatchOrderPlaybackContext,
     WatchOrderProgress,
@@ -164,7 +162,6 @@ from kasana.katalog.models import (
     JSONValue,
     Keiro,
     KeiroEntry,
-    KeiroKind,
     Kura,
     LibraryItemEditEvent,
     MediaAccessOperation,
@@ -1876,7 +1873,6 @@ class KatalogQueryService:
             watch_order: Keiro = Keiro(
                 collection_id=collection.id,
                 name=request.name,
-                order_kind=KeiroKind(request.kind.value),
             )
             session.add(watch_order)
             collection.revision += 1
@@ -1895,13 +1891,12 @@ class KatalogQueryService:
                     )
                 )
                 _replace_watch_order_entries(session, watch_order.id, item_ids)
-            elif request.generation_mode is not None:
+            elif request.generate_original_release:
                 preview = _generation_preview(
                     session,
                     watch_order,
                     WatchOrderGenerationRequest(
                         expected_revision=watch_order.revision,
-                        mode=request.generation_mode,
                         apply_mode=WatchOrderGenerationApplyMode.REPLACE,
                     ),
                 )
@@ -1935,8 +1930,6 @@ class KatalogQueryService:
                 if duplicate is not None:
                     raise CatalogueValidationError("A watch order with that name already exists.")
                 watch_order.name = name
-            if "kind" in request.model_fields_set and request.kind is not None:
-                watch_order.order_kind = KeiroKind(request.kind.value)
             if request.item_ids is not None:
                 _replace_watch_order_entries(session, watch_order.id, request.item_ids)
             watch_order.revision += 1
@@ -5773,7 +5766,6 @@ def _watch_order_summary(
         id=watch_order.id,
         collection_id=watch_order.collection_id,
         name=watch_order.name,
-        kind=WatchOrderKind(watch_order.order_kind.value),
         entry_count=resolved_entry_count,
         revision=watch_order.revision,
         is_default=watch_order.collection.default_watch_order_id == watch_order.id,
@@ -6089,7 +6081,7 @@ def _shift_positions(
 def _generation_preview(
     session: Session, watch_order: Keiro, request: WatchOrderGenerationRequest
 ) -> WatchOrderGenerationPreview:
-    generated = _generated_watch_order_items(session, watch_order, request.mode)
+    generated = _generated_watch_order_items(session, watch_order)
     result_items = generated.items
     if request.apply_mode is WatchOrderGenerationApplyMode.MERGE:
         existing_items = tuple(
@@ -6119,7 +6111,6 @@ def _generation_preview(
     preview = WatchOrderGenerationPreview(
         watch_order_id=watch_order.id,
         revision=watch_order.revision,
-        mode=request.mode,
         entries=tuple(summaries[item.id] for item in result_items),
         undated_items=tuple(summaries[item.id] for item in generated.undated_items),
         unavailable_items=tuple(summaries[item.id] for item in generated.unavailable_items),
@@ -6132,7 +6123,7 @@ def _generation_preview(
             "collection_revision": collection.revision,
             "apply_mode": request.apply_mode.value,
             "dates": [
-                (item.id, str(_generation_date(item, request.mode)))
+                (item.id, str(_generation_date(item)))
                 for item in sorted(result_items, key=lambda item: item.id)
             ],
             "preview": preview.model_dump(mode="json"),
@@ -6144,9 +6135,7 @@ def _generation_preview(
     )
 
 
-def _generated_watch_order_items(
-    session: Session, watch_order: Keiro, mode: WatchOrderGenerationMode
-) -> _GeneratedWatchOrderItems:
+def _generated_watch_order_items(session: Session, watch_order: Keiro) -> _GeneratedWatchOrderItems:
     memberships = tuple(
         session.scalars(
             select(CollectionKin)
@@ -6189,21 +6178,22 @@ def _generated_watch_order_items(
         else:
             seen.add(item.id)
             unique.append(item)
-    dated = [item for item in unique if _generation_date(item, mode) is not None]
-    undated = [item for item in unique if _generation_date(item, mode) is None]
-    series_titles = _series_titles_by_item_id(session, tuple(unique))
+    dated: list[tuple[date, Zaisan]] = []
+    undated: list[Zaisan] = []
+    for item in unique:
+        generation_date = _generation_date(item)
+        if generation_date is None:
+            undated.append(item)
+        else:
+            dated.append((generation_date, item))
 
-    def sequence_key(item: Zaisan) -> tuple[str, int, int, str, int]:
-        return (
-            (series_titles[item.id] or item.sort_title).casefold(),
-            item.season_number if item.season_number is not None else -1,
-            item.episode_number if item.episode_number is not None else -1,
-            item.sort_title.casefold(),
-            item.id,
-        )
+    def tie_breaker(item: Zaisan) -> tuple[str, int]:
+        """Keep equal canonical dates stable without asserting a chronology between them."""
 
-    dated.sort(key=lambda item: (_generation_date(item, mode), sequence_key(item)))
-    undated.sort(key=sequence_key)
+        return (item.sort_title.casefold(), item.id)
+
+    dated.sort(key=lambda candidate: (candidate[0], tie_breaker(candidate[1])))
+    undated.sort(key=tie_breaker)
     availability_by_item_id = effective_item_availabilities(session, tuple(unique))
     unavailable = tuple(
         item
@@ -6211,7 +6201,7 @@ def _generated_watch_order_items(
         if availability_by_item_id[item.id] is not AvailabilityState.AVAILABLE
     )
     return _GeneratedWatchOrderItems(
-        items=tuple(dated + undated),
+        items=tuple(item for _, item in dated),
         undated_items=tuple(undated),
         unavailable_items=unavailable,
         duplicate_items=tuple(duplicate),
@@ -6230,10 +6220,16 @@ def _playable_descendants(item: Zaisan, children: dict[int, list[Zaisan]]) -> tu
     return tuple(found)
 
 
-def _generation_date(item: Zaisan, mode: WatchOrderGenerationMode) -> date | None:
-    if mode is WatchOrderGenerationMode.AIR:
-        return item.air_date or item.release_date
-    return item.release_date or item.air_date
+def _generation_date(item: Zaisan) -> date | None:
+    """Return only the canonical original-release date appropriate to one media item."""
+
+    if item.item_kind is ZaisanKind.MOVIE:
+        return item.release_date
+    if item.item_kind is ZaisanKind.EPISODE:
+        return item.air_date
+    if item.item_kind is ZaisanKind.SPECIAL:
+        return item.air_date if item.air_date is not None else item.release_date
+    return None
 
 
 def _playback(state: PlaybackState) -> PlaybackStateResponse:

@@ -1569,7 +1569,7 @@ kanvas-poster-grid { overflow-anchor: none; }
 .k-watch-order-card__link { display: block; min-height: 96px; padding: 11px; }
 .k-watch-order-card__topline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .k-watch-order-card__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82rem; font-weight: 620; }
-.k-watch-order-card__kind { color: var(--k-text-faint); font-size: 0.66rem; text-transform: uppercase; }
+.k-watch-order-card__badge { color: var(--k-text-faint); font-size: 0.66rem; text-transform: uppercase; }
 .k-watch-order-card__facts,
 .k-watch-order-card__warning { display: block; margin-top: 10px; }
 .k-watch-order-card__warning,

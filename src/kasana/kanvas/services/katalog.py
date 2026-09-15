@@ -146,9 +146,7 @@ from kasana.katalog.public import (
     WatchOrderEntryDetail,
     WatchOrderEntryMove,
     WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
-    WatchOrderKind,
     WatchOrderSummary,
     WatchOrderUpdate,
 )
@@ -1014,7 +1012,6 @@ class KanvasKatalogService:
             collectionId=detail.watch_order.collection_id,
             collectionName=collection.name,
             name=detail.watch_order.name,
-            kind=detail.watch_order.kind.value,
             entryCount=detail.watch_order.entry_count,
             revision=detail.watch_order.revision,
         )
@@ -1062,7 +1059,6 @@ class KanvasKatalogService:
         return WatchOrderWorkspaceView(
             revision=detail.watch_order.revision,
             name=detail.watch_order.name,
-            kind=detail.watch_order.kind,
             entries=tuple(watch_order_row(entry) for entry in existing_entries),
             sources=tuple(source for source, _ in sources),
         )
@@ -1172,8 +1168,7 @@ class KanvasKatalogService:
         *,
         collection_revision: int,
         name: str,
-        kind: WatchOrderKind,
-        generation_mode: WatchOrderGenerationMode | None = None,
+        generate_original_release: bool = False,
         copy_from_order_id: int | None = None,
     ) -> int:
         async with self._client() as client:
@@ -1182,23 +1177,20 @@ class KanvasKatalogService:
                 WatchOrderCreate(
                     expected_collection_revision=collection_revision,
                     name=name,
-                    kind=kind,
-                    generation_mode=generation_mode,
+                    generate_original_release=generate_original_release,
                     copy_from_order_id=copy_from_order_id,
                 ),
             )
         return result.watch_order_id
 
-    async def update_watch_order(
-        self, watch_order_id: int, *, revision: int, name: str | None, kind: WatchOrderKind | None
-    ) -> int:
-        request = watch_order_update_request(revision=revision, name=name, kind=kind)
+    async def update_watch_order(self, watch_order_id: int, *, revision: int, name: str) -> int:
+        request = watch_order_update_request(revision=revision, name=name)
         async with self._client() as client:
             result = await client.update_watch_order(watch_order_id, request)
         return result.revision
 
     async def save_watch_order(self, watch_order_id: int, request: WatchOrderUpdate) -> int:
-        """Commit the reviewed name, kind and complete sequence in one revision."""
+        """Commit the reviewed name and complete sequence in one revision."""
 
         async with self._client() as client:
             result = await client.update_watch_order(watch_order_id, request)
@@ -1358,11 +1350,11 @@ class KanvasKatalogService:
         watch_order_id: int,
         *,
         revision: int,
-        mode: WatchOrderGenerationMode,
         apply_mode: WatchOrderGenerationApplyMode,
     ) -> GenerationPreviewView:
         request = WatchOrderGenerationRequest(
-            expected_revision=revision, mode=mode, apply_mode=apply_mode
+            expected_revision=revision,
+            apply_mode=apply_mode,
         )
         async with self._client() as client:
             preview = await client.preview_watch_order_generation(watch_order_id, request)
@@ -1377,7 +1369,6 @@ class KanvasKatalogService:
         return GenerationPreviewView(
             watchOrderId=preview.watch_order_id,
             revision=preview.revision,
-            mode=preview.mode.value,
             applyMode=apply_mode.value,
             previewToken=preview.preview_token,
             entries=tuple(
@@ -1400,7 +1391,6 @@ class KanvasKatalogService:
         watch_order_id: int,
         *,
         revision: int,
-        mode: WatchOrderGenerationMode,
         apply_mode: WatchOrderGenerationApplyMode,
         preview_token: str | None = None,
     ) -> int:
@@ -1409,7 +1399,6 @@ class KanvasKatalogService:
                 watch_order_id,
                 WatchOrderGenerationRequest(
                     expected_revision=revision,
-                    mode=mode,
                     apply_mode=apply_mode,
                     preview_token=preview_token,
                 ),

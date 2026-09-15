@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -43,6 +44,7 @@ def _create_movie(database_path: Path, library_path: Path) -> int:
                 item_kind=ZaisanKind.MOVIE,
                 title="CLI Film",
                 release_year=2020,
+                release_date=date(2020, 1, 1),
             ).id
 
         return database.run_transaction(create)
@@ -70,7 +72,7 @@ def test_database_and_library_commands_emit_stable_json(tmp_path: Path) -> None:
 
     current = runner.invoke(katalog_cli.app, ["--json", "database", "current"], env=environment)
     assert current.exit_code == 0, current.output
-    assert json.loads(current.output) == {"revision": "20260916_0033"}
+    assert json.loads(current.output) == {"revision": "20260916_0034"}
 
     added = runner.invoke(
         katalog_cli.app,
@@ -315,9 +317,25 @@ def test_collection_and_watch_order_commands_emit_stable_json(tmp_path: Path) ->
         ).exit_code
         == 0
     )
+    renamed_order = runner.invoke(
+        katalog_cli.app,
+        [
+            "--json",
+            "watch-order",
+            "update",
+            "1",
+            "--revision",
+            "1",
+            "--name",
+            "Renamed CLI order",
+        ],
+        env=environment,
+    )
+    assert renamed_order.exit_code == 0, renamed_order.output
+    assert json.loads(renamed_order.output)["revision"] == 2
     added_entry = runner.invoke(
         katalog_cli.app,
-        ["--json", "watch-order", "add", "1", str(movie_id), "--revision", "1"],
+        ["--json", "watch-order", "add", "1", str(movie_id), "--revision", "2"],
         env=environment,
     )
     assert added_entry.exit_code == 0, added_entry.output
@@ -325,21 +343,21 @@ def test_collection_and_watch_order_commands_emit_stable_json(tmp_path: Path) ->
     assert (
         runner.invoke(
             katalog_cli.app,
-            ["--json", "watch-order", "move", "1", str(entry_id), "--revision", "2"],
+            ["--json", "watch-order", "move", "1", str(entry_id), "--revision", "3"],
             env=environment,
         ).exit_code
         == 0
     )
     preview = runner.invoke(
         katalog_cli.app,
-        ["--json", "watch-order", "preview-generation", "1", "--revision", "3", "--mode", "air"],
+        ["--json", "watch-order", "preview-generation", "1", "--revision", "4"],
         env=environment,
     )
     assert preview.exit_code == 0, preview.output
     assert json.loads(preview.output)["entries"][0]["id"] == movie_id
     applied = runner.invoke(
         katalog_cli.app,
-        ["--json", "watch-order", "apply-generation", "1", "--revision", "3", "--mode", "release"],
+        ["--json", "watch-order", "apply-generation", "1", "--revision", "4"],
         env=environment,
     )
     assert applied.exit_code == 0, applied.output
@@ -350,13 +368,13 @@ def test_collection_and_watch_order_commands_emit_stable_json(tmp_path: Path) ->
     assert json.loads(shown_order.output)["entries"]["items"][0]["item"]["id"] == movie_id
     removed_entry = runner.invoke(
         katalog_cli.app,
-        ["--json", "watch-order", "remove", "1", str(entry_id), "--revision", "4"],
+        ["--json", "watch-order", "remove", "1", str(entry_id), "--revision", "5"],
         env=environment,
     )
     assert removed_entry.exit_code == 0, removed_entry.output
     deleted_order = runner.invoke(
         katalog_cli.app,
-        ["--json", "watch-order", "delete", "1", "--revision", "5", "--yes"],
+        ["--json", "watch-order", "delete", "1", "--revision", "6", "--yes"],
         env=environment,
     )
     assert deleted_order.exit_code == 0, deleted_order.output

@@ -64,18 +64,6 @@ class MetadataField(StrEnum):
     EPISODE_NUMBER = "episode_number"
 
 
-class WatchOrderKind(StrEnum):
-    AIR = "air"
-    CHRONOLOGICAL = "chronological"
-    RECOMMENDED = "recommended"
-    CUSTOM = "custom"
-
-
-class WatchOrderGenerationMode(StrEnum):
-    AIR = "air"
-    RELEASE = "release"
-
-
 class WatchOrderGenerationApplyMode(StrEnum):
     REPLACE = "replace"
     MERGE = "merge"
@@ -856,7 +844,6 @@ class WatchOrderSummary(APIModel):
     id: int = Field(gt=0)
     collection_id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=1_000)
-    kind: WatchOrderKind
     entry_count: int = Field(ge=0)
     revision: int = Field(ge=1)
     is_default: bool = False
@@ -875,14 +862,13 @@ class WatchOrderProgress(APIModel):
 class WatchOrderCreate(APIModel):
     expected_collection_revision: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=1_000)
-    kind: WatchOrderKind
-    generation_mode: WatchOrderGenerationMode | None = None
+    generate_original_release: bool = False
     copy_from_order_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_start(self) -> WatchOrderCreate:
-        if self.generation_mode is not None and self.copy_from_order_id is not None:
-            raise ValueError("Choose dates or an existing order as the starting point.")
+        if self.generate_original_release and self.copy_from_order_id is not None:
+            raise ValueError("Choose Original release or an existing route as the starting point.")
         return self
 
     @field_validator("name")
@@ -897,7 +883,6 @@ class WatchOrderCreate(APIModel):
 class WatchOrderUpdate(APIModel):
     expected_revision: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=1_000)
-    kind: WatchOrderKind | None = None
     item_ids: tuple[Annotated[int, Field(gt=0)], ...] | None = Field(
         default=None, max_length=MAX_WATCH_ORDER_ENTRIES
     )
@@ -914,7 +899,7 @@ class WatchOrderUpdate(APIModel):
 
     @model_validator(mode="after")
     def require_change(self) -> Self:
-        if not {"name", "kind", "item_ids"}.intersection(self.model_fields_set):
+        if not {"name", "item_ids"}.intersection(self.model_fields_set):
             raise ValueError("Watch-order update must include a change.")
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("Watch-order name cannot be null.")
@@ -971,7 +956,6 @@ class WatchOrderEntryMove(APIModel):
 
 class WatchOrderGenerationRequest(APIModel):
     expected_revision: int = Field(ge=1)
-    mode: WatchOrderGenerationMode
     apply_mode: WatchOrderGenerationApplyMode = WatchOrderGenerationApplyMode.REPLACE
     preview_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
@@ -985,7 +969,6 @@ class WatchOrderEntryDetail(APIModel):
 class WatchOrderGenerationPreview(APIModel):
     watch_order_id: int = Field(gt=0)
     revision: int = Field(ge=1)
-    mode: WatchOrderGenerationMode
     entries: tuple[LibraryItemSummary, ...]
     undated_items: tuple[LibraryItemSummary, ...] = ()
     unavailable_items: tuple[LibraryItemSummary, ...] = ()

@@ -175,7 +175,6 @@
     connectedCallback() {
       this.innerHTML = `<section class="k-order-editor" aria-label="Watch-order editor">
         <div class="k-order-toolbar"><label class="k-order-name"><span class="k-sr-only">Order name</span><input class="k-input" data-order-name maxlength="1000" aria-label="Order name" required></label>
-          <label><span class="k-sr-only">Order kind</span><select class="k-select" data-order-kind aria-label="Order kind"></select></label>
           ${button('undo', 'Undo')}${button('save', 'Save')}
         </div>
         <div class="k-order-message"><p class="k-order-status" data-order-status role="status">Loading…</p>${button('reload', 'Reload', 'hidden')}${button('compare', 'Review saved order', 'hidden')}</div>
@@ -199,8 +198,7 @@
             <div class="k-order-pagination">${button('previous', 'Previous')}<span data-order-page></span>${button('next', 'Next')}</div>
           </section>
         </div>
-        <details class="k-order-dates"><summary>Use dates</summary><div class="k-action-row">
-          <select class="k-select" data-date-mode aria-label="Date order"><option value="release">Release dates</option><option value="air">Air dates</option></select>
+        <details class="k-order-dates"><summary>Generate original release</summary><div class="k-action-row">
           <select class="k-select" data-date-apply aria-label="Use generated order"><option value="replace">Replace order</option><option value="merge">Add missing</option></select>${button('preview', 'Preview')}
         </div><div data-order-preview hidden></div></details>
       </section>`;
@@ -236,7 +234,7 @@
     }
 
     disconnectedCallback() { window.removeEventListener('beforeunload', this.beforeUnload); }
-    snapshot() { return {ids: [...this.ids], name: this.querySelector('[data-order-name]').value, kind: this.querySelector('[data-order-kind]').value}; }
+    snapshot() { return {ids: [...this.ids], name: this.querySelector('[data-order-name]').value}; }
     dirty() { return this.baseline !== null && JSON.stringify(this.snapshot()) !== this.baseline; }
     status(message) { this.querySelector('[data-order-status]').textContent = message; }
 
@@ -253,8 +251,6 @@
           const item = parseItem(entry, true); this.items.set(item.id, {...this.items.get(item.id), ...item}); return item.id;
         });
         this.querySelector('[data-order-name]').value = payload.name;
-        this.querySelector('[data-order-kind]').innerHTML = payload.kinds.map((kind) => `<option value="${escapeHtml(kind)}">${escapeHtml(kind[0].toUpperCase() + kind.slice(1))}</option>`).join('');
-        this.querySelector('[data-order-kind]').value = payload.kind;
         this.baseline = JSON.stringify(this.snapshot());
         if (this.ids.length && window.matchMedia('(max-width: 1000px)').matches) this.querySelector('.k-order-picker').open = false;
         this.status('');
@@ -322,7 +318,7 @@
           <span class="k-watch-row__position">${group.position + 1}${group.ids.length > 1 ? `–${group.position + group.ids.length}` : ''}</span>
           <div class="k-order-identity"><strong>${escapeHtml(label.title)}</strong><small>${escapeHtml(label.detail)}${missing ? ` · ${missing === group.ids.length ? 'Unavailable' : `${missing} unavailable`}` : ''}</small></div>
           ${group.ids.length > 1 ? button('expand', group.heading ? 'Collapse' : 'Expand', `aria-expanded="${Boolean(group.heading)}" data-group-id="${group.ids[0]}"`) : ''}</div>`;
-      }).join('') : '<p class="k-order-hint">Add titles from this collection, or start with release dates.</p>';
+      }).join('') : '<p class="k-order-hint">Add titles from this collection, or generate an original-release route.</p>';
       for (const [index, row] of this.querySelectorAll('[data-group]').entries()) {
         const group = rows[index];
         row.querySelector('input').indeterminate = group.ids.some((id) => this.selected.has(id)) && !group.ids.every((id) => this.selected.has(id));
@@ -388,7 +384,7 @@
         for (const id of targets) { if (input.checked) this.selected.add(id); else this.selected.delete(id); }
         this.renderOrder();
       }
-      if (input.matches('[data-date-mode], [data-date-apply]')) {
+      if (input.matches('[data-date-apply]')) {
         this.preview = null;
         this.querySelector('[data-order-preview]').hidden = true;
       }
@@ -418,7 +414,7 @@
       if (action === 'cancel-preview') this.querySelector('[data-order-preview]').hidden = true;
       if (action === 'undo' && this.history.length) {
         const snapshot = this.history.pop();
-        this.ids = snapshot.ids; this.querySelector('[data-order-name]').value = snapshot.name; this.querySelector('[data-order-kind]').value = snapshot.kind;
+        this.ids = snapshot.ids; this.querySelector('[data-order-name]').value = snapshot.name;
         this.selected.clear(); this.preview = null; this.querySelector('[data-order-preview]').hidden = true; this.status(this.dirty() ? 'Unsaved changes' : '');
       }
       if (action === 'expand') { const id = Number(target.dataset.groupId); if (this.expanded.has(id)) this.expanded.delete(id); else this.expanded.add(id); }
@@ -473,7 +469,7 @@
       const draft = this.snapshot();
       this.busy = true; this.renderState(); this.status('Saving…');
       try {
-        const result = await orderRequest(this.getAttribute('action'), {operation: 'save', revision: this.revision, name: draft.name, kind: draft.kind, itemIds: draft.ids});
+        const result = await orderRequest(this.getAttribute('action'), {operation: 'save', revision: this.revision, name: draft.name, itemIds: draft.ids});
         this.revision = result.revision;
         this.baseline = JSON.stringify(draft);
         this.history = [];
@@ -485,7 +481,7 @@
         const title = document.querySelector('[data-watch-order-title]');
         if (title) title.textContent = draft.name.trim();
         const facts = document.querySelector('[data-watch-order-facts]');
-        if (facts) facts.textContent = `${draft.ids.length} entries · ${draft.kind}`;
+        if (facts) facts.textContent = `${draft.ids.length} entries`;
       } catch (error) {
         this.failed = true;
         this.conflict = error instanceof OrderConflictError;
@@ -503,7 +499,7 @@
         const saved = await orderRequest(this.getAttribute('source'));
         const items = new Map(saved.entries.map((entry) => { const item = parseItem(entry, true); return [item.id, item]; }));
         this.reviewedRevision = saved.revision;
-        this.querySelector('[data-saved-order]').innerHTML = `<h3>${escapeHtml(saved.name)}</h3><p>${items.size} saved entries · ${escapeHtml(saved.kind)}</p>${sequenceMarkup(saved.entries.map((entry) => entry.itemId), items)}<p>Save my draft replaces this saved order with your current draft.</p>`;
+        this.querySelector('[data-saved-order]').innerHTML = `<h3>${escapeHtml(saved.name)}</h3><p>${items.size} saved entries</p>${sequenceMarkup(saved.entries.map((entry) => entry.itemId), items)}<p>Save my draft replaces this saved order with your current draft.</p>`;
         this.querySelector('[data-order-conflict]').hidden = false;
       } catch (error) { this.status(error.message); }
       finally { this.busy = false; this.renderState(); }
@@ -513,16 +509,15 @@
       if (this.busy) return;
       this.busy = true; this.renderState(); this.status('Loading dates…');
       try {
-        const mode = this.querySelector('[data-date-mode]').value;
-        const result = await orderRequest(this.getAttribute('action'), {operation: 'preview', mode, revision: this.revision});
+        const result = await orderRequest(this.getAttribute('action'), {operation: 'preview', revision: this.revision});
         const generatedIds = result.entries.map((entry) => { const item = parseItem(entry, true); this.items.set(item.id, {...this.items.get(item.id), ...item}); return item.id; });
         const current = new Set(this.ids);
         this.preview = this.querySelector('[data-date-apply]').value === 'merge' ? [...this.ids, ...generatedIds.filter((id) => !current.has(id))] : generatedIds;
         const preview = this.querySelector('[data-order-preview]');
         preview.hidden = false;
-        preview.innerHTML = `<p>${this.preview.length} entries${result.undatedTitles.length ? ` · ${result.undatedTitles.length} without dates, placed last` : ''}${result.unavailableTitles.length ? ` · ${result.unavailableTitles.length} unavailable` : ''}</p>
+        preview.innerHTML = `<p>${this.preview.length} entries${result.undatedTitles.length ? ` · ${result.undatedTitles.length} undated; add manually` : ''}${result.unavailableTitles.length ? ` · ${result.unavailableTitles.length} unavailable` : ''}</p>
           ${sequenceMarkup(this.preview, this.items)}
-          ${result.undatedItemIds.length ? `<details><summary>Missing dates (${result.undatedItemIds.length})</summary><ul class="k-order-preview-list">${result.undatedItemIds.map((id) => `<li>${escapeHtml(itemLabel(this.items.get(id)))}</li>`).join('')}</ul></details>` : ''}
+          ${result.undatedItemIds.length ? `<details><summary>Undated — manual placement required (${result.undatedItemIds.length})</summary><ul class="k-order-preview-list">${result.undatedItemIds.map((id) => `<li>${escapeHtml(itemLabel(this.items.get(id)))}</li>`).join('')}</ul></details>` : ''}
           <div class="k-action-row">${button('use-preview', 'Use this order')}${button('cancel-preview', 'Cancel')}</div>`;
         this.status('Preview ready. Use this order, then Save.');
       } catch (error) { this.status(error.message); }

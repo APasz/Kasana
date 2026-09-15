@@ -19,7 +19,6 @@ from kasana.katalog.models import (
     JSONObject,
     Keiro,
     KeiroEntry,
-    KeiroKind,
     Kura,
     MediaFile,
     MetadataField,
@@ -284,12 +283,10 @@ def create_watch_order(
     *,
     collection_id: int,
     name: str,
-    order_kind: KeiroKind,
 ) -> Keiro:
     watch_order: Keiro = Keiro(
         collection_id=collection_id,
         name=_require_text(name, "A watch order name"),
-        order_kind=order_kind,
     )
     session.add(watch_order)
     session.flush()

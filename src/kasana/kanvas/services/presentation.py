@@ -31,7 +31,6 @@ from kasana.katalog.public import (
     MediaTechnicalSummary,
     PlaybackStateResponse,
     WatchOrderEntryDetail,
-    WatchOrderKind,
     WatchOrderSummary,
     WatchOrderUpdate,
     parse_numeral,
@@ -136,7 +135,6 @@ def watch_order_card(summary: WatchOrderSummary) -> WatchOrderCardView:
         id=summary.id,
         collectionId=summary.collection_id,
         name=summary.name,
-        kind=summary.kind.value,
         entryCount=summary.entry_count,
         revision=summary.revision,
         isDefault=summary.is_default,
@@ -230,16 +228,10 @@ def collection_update_request(
     return CollectionUpdate(expected_revision=revision, name=name, overview=overview)
 
 
-def watch_order_update_request(
-    *, revision: int, name: str | None, kind: WatchOrderKind | None
-) -> WatchOrderUpdate:
-    if name is not None and kind is not None:
-        return WatchOrderUpdate(expected_revision=revision, name=name, kind=kind)
-    if name is not None:
-        return WatchOrderUpdate(expected_revision=revision, name=name)
-    if kind is not None:
-        return WatchOrderUpdate(expected_revision=revision, kind=kind)
-    return WatchOrderUpdate(expected_revision=revision)
+def watch_order_update_request(*, revision: int, name: str) -> WatchOrderUpdate:
+    """Build the sole editable watch-order metadata mutation: its name."""
+
+    return WatchOrderUpdate(expected_revision=revision, name=name)
 
 
 def poster_from_summary(

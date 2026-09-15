@@ -36,7 +36,6 @@ from kasana.katalog.models import (
     AvailabilityState,
     DownloadGrant,
     KeiroEntry,
-    KeiroKind,
     MediaFile,
     PlaybackLaunchToken,
     PlaybackSession,
@@ -272,7 +271,6 @@ async def playback_fixture(tmp_path: Path) -> AsyncIterator[PlaybackFixture]:
             session,
             collection_id=collection.id,
             name="Mixed release order",
-            order_kind=KeiroKind.CUSTOM,
         )
         for item in (movie, episode_one, episode_two):
             append_watch_order_entry(
@@ -1148,7 +1146,6 @@ async def test_large_playback_plans_batch_item_and_media_queries(
             session,
             collection_id=collection.id,
             name="Large playback queue",
-            order_kind=KeiroKind.CUSTOM,
         )
         for item_id in queue_item_ids:
             append_watch_order_entry(
@@ -1892,7 +1889,6 @@ async def test_collection_order_workflow_preserves_default_resume_and_explicit_s
         json={
             "expected_collection_revision": collection_revision,
             "name": "Stargate release order",
-            "kind": "custom",
         },
     )
     assert order.status_code == 201
@@ -2001,7 +1997,6 @@ async def test_collection_order_workflow_preserves_default_resume_and_explicit_s
         json={
             "expected_collection_revision": membership.json()["revision"],
             "name": "Missing media order",
-            "kind": "custom",
         },
     )
     assert missing_media_order.status_code == 201

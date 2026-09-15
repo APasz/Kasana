@@ -19,7 +19,6 @@ from kasana.katalog.models import (
     JSONObject,
     Keiro,
     KeiroEntry,
-    KeiroKind,
     MediaFile,
     MetadataBinding,
     MetadataCandidate,
@@ -127,9 +126,7 @@ def test_hierarchy_repair_serialises_writers_before_building_its_plan(
     competing_writer_finished = Event()
     errors: list[Exception] = []
 
-    def paused_build_plan(
-        session: Session, filters: HierarchyRepairFilters
-    ) -> HierarchyRepairPlan:
+    def paused_build_plan(session: Session, filters: HierarchyRepairFilters) -> HierarchyRepairPlan:
         planning_started.set()
         assert release_plan.wait(timeout=2)
         return original_build_plan(session, filters)
@@ -246,7 +243,6 @@ def test_hierarchy_repair_merge_preserves_playback_collections_and_watch_order_e
             session,
             collection_id=collection.id,
             name="Repair order",
-            order_kind=KeiroKind.CUSTOM,
         )
         append_watch_order_entry(
             session,
@@ -373,7 +369,6 @@ def test_duplicate_resolution_merges_unambiguous_media_less_movie_into_file_back
             session,
             collection_id=collection.id,
             name="Duplicate resolution order",
-            order_kind=KeiroKind.CUSTOM,
         )
         append_watch_order_entry(
             session,
@@ -586,7 +581,6 @@ def test_manual_item_merge_keeps_selected_fields_and_retains_series_branches(
             session,
             collection_id=collection.id,
             name="Release order",
-            order_kind=KeiroKind.CUSTOM,
         )
         append_watch_order_entry(
             session,
@@ -798,7 +792,6 @@ def test_item_deletion_advances_dependent_state_revisions(
             session,
             collection_id=collection.id,
             name="Episode order",
-            order_kind=KeiroKind.CUSTOM,
         )
         append_watch_order_entry(
             session,
@@ -2037,13 +2030,17 @@ def test_hierarchy_repair_uses_a_matched_series_directory_alias(
     def repaired(session: Session) -> tuple[int | None, ZaisanKind, int]:
         episode = session.get(Zaisan, malformed_id)
         assert episode is not None
-        return episode.parent_id, episode.item_kind, len(
-            session.scalars(
-                select(Zaisan).where(
-                    Zaisan.library_root_id == episode.library_root_id,
-                    Zaisan.item_kind == ZaisanKind.SERIES,
-                )
-            ).all()
+        return (
+            episode.parent_id,
+            episode.item_kind,
+            len(
+                session.scalars(
+                    select(Zaisan).where(
+                        Zaisan.library_root_id == episode.library_root_id,
+                        Zaisan.item_kind == ZaisanKind.SERIES,
+                    )
+                ).all()
+            ),
         )
 
     parent_id, item_kind, series_count = database.run_transaction(repaired)

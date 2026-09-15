@@ -22,9 +22,7 @@ from kasana.katalog.api.contracts import (
     WatchOrderEntryCreate,
     WatchOrderEntryMove,
     WatchOrderGenerationApplyMode,
-    WatchOrderGenerationMode,
     WatchOrderGenerationRequest,
-    WatchOrderKind,
     WatchOrderUpdate,
 )
 from kasana.katalog.api.service import (
@@ -289,7 +287,6 @@ def test_watch_order_entry_moves_and_generation_preview(
         WatchOrderCreate(
             expected_collection_revision=revision,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
         ),
     )
     first = queries.add_watch_order_entry(
@@ -319,38 +316,22 @@ def test_watch_order_entry_moves_and_generation_preview(
         order.watch_order_id,
         WatchOrderGenerationRequest(
             expected_revision=moved.revision,
-            mode=WatchOrderGenerationMode.RELEASE,
         ),
     )
     assert [item.id for item in preview.entries] == [
         library["movie"],
-        library["second_episode"],
         library["first_episode"],
-        library["unavailable_extra"],
+        library["second_episode"],
     ]
     assert [item.id for item in preview.undated_items] == [library["unavailable_extra"]]
     assert [item.id for item in preview.unavailable_items] == [library["unavailable_extra"]]
     assert [item.id for item in preview.duplicate_items] == [library["first_episode"]]
     assert [item.id for item in preview.non_playable_items] == [library["empty_season"]]
 
-    air_preview = queries.preview_watch_order_generation(
-        order.watch_order_id,
-        WatchOrderGenerationRequest(
-            expected_revision=moved.revision,
-            mode=WatchOrderGenerationMode.AIR,
-        ),
-    )
-    assert [item.id for item in air_preview.entries] == [
-        library["movie"],
-        library["first_episode"],
-        library["second_episode"],
-        library["unavailable_extra"],
-    ]
     applied = queries.apply_watch_order_generation(
         order.watch_order_id,
         WatchOrderGenerationRequest(
             expected_revision=moved.revision,
-            mode=WatchOrderGenerationMode.AIR,
             apply_mode=WatchOrderGenerationApplyMode.REPLACE,
         ),
     )
@@ -368,7 +349,6 @@ def test_watch_order_entry_moves_and_generation_preview(
         library["movie"],
         library["first_episode"],
         library["second_episode"],
-        library["unavailable_extra"],
     ]
 
 
@@ -390,7 +370,6 @@ def test_deleting_an_item_compacts_watch_order_positions_before_a_merge(
         WatchOrderCreate(
             expected_collection_revision=revision,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
         ),
     )
     first = queries.add_watch_order_entry(
@@ -415,7 +394,6 @@ def test_deleting_an_item_compacts_watch_order_positions_before_a_merge(
         order.watch_order_id,
         WatchOrderGenerationRequest(
             expected_revision=after_deletion.watch_order.revision,
-            mode=WatchOrderGenerationMode.RELEASE,
             apply_mode=WatchOrderGenerationApplyMode.MERGE,
         ),
     )
@@ -439,7 +417,6 @@ def test_watch_order_batch_entry_insertion_is_contiguous_and_atomic(
         WatchOrderCreate(
             expected_collection_revision=collection.revision,
             name="Chronological",
-            kind=WatchOrderKind.CHRONOLOGICAL,
         ),
     )
     movie = queries.add_watch_order_entry(
@@ -502,7 +479,6 @@ def test_collection_preferences_select_artwork_and_default_order(
         WatchOrderCreate(
             expected_collection_revision=membership.revision,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
         ),
     )
     alternative = queries.create_watch_order(
@@ -510,7 +486,6 @@ def test_collection_preferences_select_artwork_and_default_order(
         WatchOrderCreate(
             expected_collection_revision=release.collection_revision,
             name="Chronological",
-            kind=WatchOrderKind.CHRONOLOGICAL,
         ),
     )
 
@@ -584,7 +559,6 @@ def test_collection_preferences_reject_invalid_choices_and_reassign_a_deleted_de
         WatchOrderCreate(
             expected_collection_revision=series_membership.revision,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
         ),
     )
     chronological = queries.create_watch_order(
@@ -592,7 +566,6 @@ def test_collection_preferences_reject_invalid_choices_and_reassign_a_deleted_de
         WatchOrderCreate(
             expected_collection_revision=release.collection_revision,
             name="Chronological",
-            kind=WatchOrderKind.CHRONOLOGICAL,
         ),
     )
     other_collection = queries.create_collection(CollectionCreate(name="Atlantis"))
@@ -601,7 +574,6 @@ def test_collection_preferences_reject_invalid_choices_and_reassign_a_deleted_de
         WatchOrderCreate(
             expected_collection_revision=other_collection.revision,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
         ),
     )
 
@@ -703,7 +675,7 @@ def test_full_order_save_preserves_entry_ids_and_rolls_back_invalid_edits(
     collection = queries.create_collection(CollectionCreate(name="Franchise"))
     order = queries.create_watch_order(
         collection.collection_id,
-        WatchOrderCreate(expected_collection_revision=1, name="Draft", kind=WatchOrderKind.CUSTOM),
+        WatchOrderCreate(expected_collection_revision=1, name="Draft"),
     )
     ids = (library["first_episode"], library["movie"], library["second_episode"])
     queries.update_watch_order(
@@ -715,7 +687,6 @@ def test_full_order_save_preserves_entry_ids_and_rolls_back_invalid_edits(
         WatchOrderUpdate(
             expected_revision=2,
             name="Recommended",
-            kind=WatchOrderKind.RECOMMENDED,
             item_ids=tuple(reversed(ids)),
         ),
     )
@@ -756,7 +727,6 @@ def test_generation_preview_matches_merge_and_rejects_changed_collection(
         WatchOrderCreate(
             expected_collection_revision=members.revision,
             name="Chronological",
-            kind=WatchOrderKind.CHRONOLOGICAL,
         ),
     )
     queries.update_watch_order(
@@ -765,7 +735,6 @@ def test_generation_preview_matches_merge_and_rejects_changed_collection(
     )
     request = WatchOrderGenerationRequest(
         expected_revision=2,
-        mode=WatchOrderGenerationMode.AIR,
         apply_mode=WatchOrderGenerationApplyMode.MERGE,
     )
     preview = queries.preview_watch_order_generation(order.watch_order_id, request)
@@ -794,7 +763,7 @@ def test_generation_preview_matches_merge_and_rejects_changed_collection(
     assert queries.get_watch_order(order.watch_order_id, cursor=None, limit=10) == saved
 
 
-def test_generated_orders_use_episode_dates_and_natural_ties_and_can_be_copied(
+def test_generated_orders_use_canonical_dates_and_stable_non_chronological_ties_and_can_be_copied(
     database: KatalogDatabase, tmp_path: Path
 ) -> None:
     library = _library(database, tmp_path)
@@ -817,18 +786,19 @@ def test_generated_orders_use_episode_dates_and_natural_ties_and_can_be_copied(
         WatchOrderCreate(
             expected_collection_revision=2,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
-            generation_mode=WatchOrderGenerationMode.RELEASE,
+            generate_original_release=True,
         ),
     )
     entries = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10).entries.items
     assert [entry.item.id for entry in entries] == [
-        library["first_episode"],
         library["second_episode"],
+        library["first_episode"],
     ]
     preview = queries.preview_watch_order_generation(
         order.watch_order_id,
-        WatchOrderGenerationRequest(expected_revision=1, mode=WatchOrderGenerationMode.RELEASE),
+        WatchOrderGenerationRequest(
+            expected_revision=1,
+        ),
     )
     assert not preview.undated_items
     copied = queries.create_watch_order(
@@ -836,7 +806,6 @@ def test_generated_orders_use_episode_dates_and_natural_ties_and_can_be_copied(
         WatchOrderCreate(
             expected_collection_revision=order.collection_revision,
             name="Alternative",
-            kind=WatchOrderKind.RECOMMENDED,
             copy_from_order_id=order.watch_order_id,
         ),
     )
@@ -851,11 +820,107 @@ def test_generated_orders_use_episode_dates_and_natural_ties_and_can_be_copied(
             WatchOrderCreate(
                 expected_collection_revision=copied.collection_revision,
                 name="Invalid copy",
-                kind=WatchOrderKind.CUSTOM,
                 copy_from_order_id=999_999,
             ),
         )
     assert queries.get_collection(collection.collection_id).watch_order_count == 2
+
+
+def test_original_release_generation_uses_only_canonical_dates_and_keeps_undated_manual(
+    database: KatalogDatabase, tmp_path: Path
+) -> None:
+    library = _library(database, tmp_path)
+    queries = _queries(database, tmp_path)
+
+    def create_date_cases(session: Session) -> dict[str, int]:
+        movie = session.get(Zaisan, library["movie"])
+        series = session.get(Zaisan, library["series"])
+        episode = session.get(Zaisan, library["first_episode"])
+        assert movie is not None and series is not None and episode is not None
+        assert episode.parent_id is not None
+        release_movie = create_library_item(
+            session,
+            library_root_id=movie.library_root_id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Movie release date",
+            release_date=date(2004, 1, 1),
+            air_date=date(1999, 1, 1),
+        )
+        fallback_special = create_library_item(
+            session,
+            library_root_id=series.library_root_id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SPECIAL,
+            title="Release fallback special",
+            release_date=date(2003, 1, 1),
+        )
+        air_special = create_library_item(
+            session,
+            library_root_id=series.library_root_id,
+            parent_id=series.id,
+            item_kind=ZaisanKind.SPECIAL,
+            title="Air-date special",
+            release_date=date(1998, 1, 1),
+            air_date=date(2005, 1, 1),
+        )
+        air_only_movie = create_library_item(
+            session,
+            library_root_id=movie.library_root_id,
+            item_kind=ZaisanKind.MOVIE,
+            title="Air-only movie",
+            air_date=date(2001, 1, 1),
+        )
+        release_only_episode = create_library_item(
+            session,
+            library_root_id=series.library_root_id,
+            parent_id=episode.parent_id,
+            item_kind=ZaisanKind.EPISODE,
+            title="Release-only episode",
+            season_number=1,
+            episode_number=3,
+            release_date=date(2002, 1, 1),
+        )
+        return {
+            "release_movie": release_movie.id,
+            "fallback_special": fallback_special.id,
+            "air_special": air_special.id,
+            "air_only_movie": air_only_movie.id,
+            "release_only_episode": release_only_episode.id,
+        }
+
+    items = database.run_transaction(create_date_cases)
+    collection = queries.create_collection(CollectionCreate(name="Canonical dates"))
+    members = queries.batch_collection_memberships(
+        collection.collection_id,
+        CollectionMembershipBatchRequest(
+            expected_revision=collection.revision,
+            additions=tuple(
+                CollectionMembershipAddition(library_item_id=item_id) for item_id in items.values()
+            ),
+        ),
+    )
+    order = queries.create_watch_order(
+        collection.collection_id,
+        WatchOrderCreate(expected_collection_revision=members.revision, name="Original release"),
+    )
+    request = WatchOrderGenerationRequest(expected_revision=order.revision)
+    preview = queries.preview_watch_order_generation(order.watch_order_id, request)
+
+    assert [item.id for item in preview.entries] == [
+        items["fallback_special"],
+        items["release_movie"],
+        items["air_special"],
+    ]
+    assert [item.id for item in preview.undated_items] == [
+        items["air_only_movie"],
+        items["release_only_episode"],
+    ]
+
+    queries.apply_watch_order_generation(order.watch_order_id, request)
+    persisted = queries.get_watch_order(order.watch_order_id, cursor=None, limit=10)
+    assert [entry.item.id for entry in persisted.entries.items] == [
+        item.id for item in preview.entries
+    ]
 
 
 def test_collection_sources_page_unique_descendants_and_warn_on_series_removal(
@@ -879,8 +944,7 @@ def test_collection_sources_page_unique_descendants_and_warn_on_series_removal(
         WatchOrderCreate(
             expected_collection_revision=2,
             name="Release",
-            kind=WatchOrderKind.CUSTOM,
-            generation_mode=WatchOrderGenerationMode.AIR,
+            generate_original_release=True,
         ),
     )
     cursor = None
@@ -910,9 +974,7 @@ def test_simultaneous_order_saves_cannot_share_a_revision(
     collection = queries.create_collection(CollectionCreate(name="Franchise"))
     order = queries.create_watch_order(
         collection.collection_id,
-        WatchOrderCreate(
-            expected_collection_revision=1, name="Original", kind=WatchOrderKind.CUSTOM
-        ),
+        WatchOrderCreate(expected_collection_revision=1, name="Original"),
     )
     barrier = Barrier(2)
 

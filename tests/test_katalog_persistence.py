@@ -17,7 +17,6 @@ from kasana.katalog.models import (
     AvailabilityState,
     CollectionKin,
     KeiroEntry,
-    KeiroKind,
     Kura,
     MediaFile,
     PlaybackState,
@@ -261,7 +260,6 @@ def test_collection_membership_and_mixed_watch_order(
             session,
             collection_id=collection.id,
             name="Recommended",
-            order_kind=KeiroKind.RECOMMENDED,
         )
         first = append_watch_order_entry(
             session, watch_order_id=watch_order.id, library_item_id=movie_id

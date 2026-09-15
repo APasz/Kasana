@@ -247,11 +247,12 @@ from kasana.katalog.public import (
     UserRole,
     UserSummary,
     WatchedFilter,
+    WatchOrderCreate,
     WatchOrderEntriesCreate,
     WatchOrderEntryDetail,
-    WatchOrderKind,
     WatchOrderPlaybackContext,
     WatchOrderSummary,
+    WatchOrderUpdate,
 )
 from kasana.shared.profile_rules import PROFILE_ACCENT_COLOUR_DEFAULT
 
@@ -1986,7 +1987,6 @@ async def test_library_and_collection_posters_show_partially_watched_series(
         id=21,
         collection_id=12,
         name="Air order",
-        kind=WatchOrderKind.AIR,
         entry_count=1,
         revision=1,
     )
@@ -2069,7 +2069,6 @@ async def test_collection_editor_loads_every_member_and_watch_order_without_play
             id=order_id,
             collection_id=12,
             name=f"Order {order_id}",
-            kind=WatchOrderKind.CUSTOM,
             entry_count=0,
             revision=1,
             is_default=order_id == 101,
@@ -2160,7 +2159,6 @@ async def test_collection_builder_context_preserves_selected_metadata_choices_bo
         id=1,
         collection_id=12,
         name="Visible order",
-        kind=WatchOrderKind.CUSTOM,
         entry_count=0,
         revision=1,
     )
@@ -2168,7 +2166,6 @@ async def test_collection_builder_context_preserves_selected_metadata_choices_bo
         id=99,
         collection_id=12,
         name="Default order",
-        kind=WatchOrderKind.CUSTOM,
         entry_count=0,
         revision=1,
         is_default=True,
@@ -2800,11 +2797,11 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
         4,
         cast(
             Request,
-            FormRequest(collection_revision="6", name="Release", kind="custom"),
+            FormRequest(collection_revision="6", name="Release", start="original_release"),
         ),
     )
     order_updated = await update_watch_order_action(
-        9, cast(Request, FormRequest(revision="1", name="Air", kind="air"))
+        9, cast(Request, FormRequest(revision="1", name="Air"))
     )
     order_deleted = await delete_watch_order_action(
         9, cast(Request, FormRequest(revision="2", confirm="delete"))
@@ -2813,7 +2810,7 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
         9,
         cast(
             Request,
-            FormRequest(revision="3", mode="air", apply_mode="replace", preview_token="0" * 64),
+            FormRequest(revision="3", apply_mode="replace", preview_token="0" * 64),
         ),
     )
 
@@ -2835,6 +2832,35 @@ async def test_collection_and_watch_order_action_routes_use_explicit_public_muta
         "delete-order",
         "apply-generation",
     ]
+    assert calls[4] == (
+        "create-order",
+        (
+            4,
+            {
+                "collection_revision": 6,
+                "name": "Release",
+                "generate_original_release": True,
+                "copy_from_order_id": None,
+            },
+        ),
+    )
+
+
+async def test_create_watch_order_action_rejects_nonpositive_copy_route_identifier() -> None:
+    class FormRequest:
+        async def form(self) -> FormData:
+            return FormData(
+                {
+                    "collection_revision": "1",
+                    "name": "Copied route",
+                    "start": "copy:0",
+                }
+            )
+
+    with pytest.raises(HTTPException, match="Invalid watch-order starting point") as error:
+        await create_watch_order_action(4, cast(Request, FormRequest()))
+
+    assert error.value.status_code == 422
 
 
 async def test_watch_order_save_reports_revision_conflicts_without_a_server_error(
@@ -2849,7 +2875,7 @@ async def test_watch_order_save_reports_revision_conflicts_without_a_server_erro
 
     class FormRequest:
         async def form(self) -> FormData:
-            return FormData({"revision": "24", "name": "Release", "kind": "custom"})
+            return FormData({"revision": "24", "name": "Release"})
 
     monkeypatch.setattr(api_collections, "KanvasKatalogService", ConflictCatalogue)
 
@@ -3327,9 +3353,7 @@ async def test_watch_order_workspace_keeps_partially_used_sources(
     class WorkspaceClient:
         async def get_watch_order(self, _watch_order_id: int, **_filters: object) -> object:
             return SimpleNamespace(
-                watch_order=SimpleNamespace(
-                    collection_id=4, revision=7, name="Release", kind=WatchOrderKind.CUSTOM
-                )
+                watch_order=SimpleNamespace(collection_id=4, revision=7, name="Release")
             )
 
         async def iter_watch_order_entries(
@@ -3385,14 +3409,22 @@ async def test_watch_order_service_mutation_wrappers_preserve_request_state(
             )
 
         async def create_collection_watch_order(
-            self, collection_id: int, _request: object
+            self, collection_id: int, request: WatchOrderCreate
         ) -> object:
             assert collection_id == 4
+            assert request == WatchOrderCreate(
+                expected_collection_revision=5,
+                name="Chronologic",
+                generate_original_release=True,
+            )
             calls.append("create")
             return SimpleNamespace(watch_order_id=10)
 
-        async def update_watch_order(self, watch_order_id: int, _request: object) -> object:
+        async def update_watch_order(
+            self, watch_order_id: int, request: WatchOrderUpdate
+        ) -> object:
             assert watch_order_id == 9
+            assert request == WatchOrderUpdate(expected_revision=7, name="Chronologic")
             calls.append("update")
             return SimpleNamespace(revision=8)
 
@@ -3440,16 +3472,14 @@ async def test_watch_order_service_mutation_wrappers_preserve_request_state(
     assert ([row.item_id for row in rows], next_cursor, revision) == ([episode.id], "after-3", 7)
     assert (
         await service.create_watch_order(
-            4, collection_revision=5, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
+            4,
+            collection_revision=5,
+            name="Chronologic",
+            generate_original_release=True,
         )
         == 10
     )
-    assert (
-        await service.update_watch_order(
-            9, revision=7, name="Chronologic", kind=WatchOrderKind.CHRONOLOGICAL
-        )
-        == 8
-    )
+    assert await service.update_watch_order(9, revision=7, name="Chronologic") == 8
     assert await service.delete_watch_order(9, revision=8) == 6
     assert await service.add_watch_order_entry(9, revision=8, item_id=43, before_entry_id=3) == 9
     assert await service.move_watch_order_entry(9, revision=9, entry_id=3, after_entry_id=4) == 10
@@ -3465,7 +3495,6 @@ async def test_watch_order_editor_loads_collection_identity(monkeypatch: MonkeyP
                     id=9,
                     collection_id=4,
                     name="Chronological",
-                    kind=SimpleNamespace(value="chronological"),
                     entry_count=12,
                     revision=7,
                 )
@@ -3489,7 +3518,6 @@ async def test_watch_order_editor_loads_collection_identity(monkeypatch: MonkeyP
         "collectionId": 4,
         "collectionName": "Stargate",
         "name": "Chronological",
-        "kind": "chronological",
         "entryCount": 12,
         "revision": 7,
     }
@@ -4890,7 +4918,6 @@ def test_collection_components_cover_empty_states_and_shared_textarea() -> None:
     empty_preview = GenerationPreviewView(
         watchOrderId=1,
         revision=1,
-        mode="air",
         applyMode="replace",
         entries=(),
     )
@@ -5136,7 +5163,6 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
                 id=9,
                 collectionId=4,
                 name="Release",
-                kind="custom",
                 entryCount=1,
                 revision=2,
                 progressPercent=25,
@@ -5149,30 +5175,8 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
         collectionId=4,
         collectionName="Stargate",
         name="Release",
-        kind="custom",
         entryCount=1,
         revision=2,
-    )
-    preview = GenerationPreviewView(
-        watchOrderId=9,
-        revision=2,
-        mode="air",
-        applyMode="replace",
-        entries=(
-            WatchOrderRowView(
-                id=1,
-                position=0,
-                itemId=7,
-                title="Pilot",
-                kind=LibraryItemKind.EPISODE,
-                available=True,
-            ),
-        ),
-        undatedTitles=("Special",),
-        unavailableTitles=("Missing",),
-        duplicateTitles=("Pilot",),
-        nonPlayableTitles=("Series",),
-        removedEntryTitles=("Old entry",),
     )
 
     class RouteCatalogue:
@@ -5197,13 +5201,6 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             assert watch_order_id == 9
             return editor
 
-        async def generation_preview(
-            self, watch_order_id: int, **arguments: object
-        ) -> GenerationPreviewView:
-            assert watch_order_id == 9
-            assert arguments["revision"] == 2
-            return preview
-
     monkeypatch.setattr(collections_route, "KanvasKatalogService", RouteCatalogue)
 
     with Client(page("")) as client:
@@ -5216,8 +5213,6 @@ async def test_collection_and_watch_order_routes_render_the_editor_states(
             _selected_profile(),
             9,
             editable=True,
-            preview_mode="air",
-            apply_mode="replace",
         )
 
         browser_components = [

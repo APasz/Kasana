@@ -10,7 +10,6 @@ from kasana.kanvas.viewmodels.library import PosterView
 from kasana.katalog.public import (
     MAX_WATCH_ORDER_ENTRIES,
     LibraryItemKind,
-    WatchOrderKind,
 )
 
 
@@ -69,7 +68,6 @@ class WatchOrderCardView(BaseModel):
     id: int = Field(gt=0)
     collection_id: int = Field(gt=0, alias="collectionId")
     name: str = Field(min_length=1, max_length=1_000)
-    kind: str = Field(min_length=1, max_length=32)
     entry_count: int = Field(ge=0, alias="entryCount")
     revision: int = Field(ge=1)
     is_default: bool = Field(default=False, alias="isDefault")
@@ -165,8 +163,6 @@ class WatchOrderWorkspaceView(BaseModel):
 
     revision: int = Field(ge=1)
     name: str = ""
-    kind: WatchOrderKind = WatchOrderKind.CUSTOM
-    kinds: tuple[WatchOrderKind, ...] = tuple(WatchOrderKind)
     entry_limit: int = Field(default=MAX_WATCH_ORDER_ENTRIES, alias="entryLimit")
     entries: tuple[WatchOrderRowView, ...] = Field(default=(), max_length=MAX_WATCH_ORDER_ENTRIES)
     sources: tuple[WatchOrderSourceView, ...] = ()
@@ -181,7 +177,6 @@ class WatchOrderEditorView(BaseModel):
     collection_id: int = Field(gt=0, alias="collectionId")
     collection_name: str = Field(min_length=1, max_length=1_000, alias="collectionName")
     name: str = Field(min_length=1, max_length=1_000)
-    kind: str = Field(min_length=1, max_length=32)
     entry_count: int = Field(ge=0, alias="entryCount")
     revision: int = Field(ge=1)
 
@@ -193,7 +188,6 @@ class GenerationPreviewView(BaseModel):
 
     watch_order_id: int = Field(gt=0, alias="watchOrderId")
     revision: int = Field(ge=1)
-    mode: str = Field(min_length=1, max_length=32)
     apply_mode: str = Field(min_length=1, max_length=32, alias="applyMode")
     entries: tuple[WatchOrderRowView, ...]
     undated_titles: tuple[str, ...] = Field(default=(), alias="undatedTitles")

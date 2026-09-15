@@ -195,6 +195,132 @@ def test_collection_membership_relationship_migration_discards_legacy_labels(
     assert memberships == ((collection_id, item_id),)
 
 
+def test_watch_order_migration_preserves_named_routes_and_entries(tmp_path: Path) -> None:
+    database_path = tmp_path / "catalogue.sqlite3"
+    repository_root = Path(__file__).parents[1]
+    config = Config(str(repository_root / "alembic.ini"))
+    config.set_main_option("script_location", str(repository_root / "alembic"))
+    database_url = f"sqlite:///{database_path}"
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260916_0033")
+
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            root_id = _insert_historical_root(
+                session,
+                path=tmp_path / "Movies",
+                expected_media_kind=ZaisanKind.MOVIE,
+            )
+            item_id = _insert_historical_item(
+                session,
+                library_root_id=root_id,
+                item_kind=ZaisanKind.MOVIE,
+                title="Legacy route entry",
+            )
+            session.execute(text("INSERT INTO collection (name) VALUES ('Legacy routes')"))
+            collection_id = _last_insert_id(session)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO watch_order (collection_id, name, order_kind, revision)
+                    VALUES (:collection_id, 'Air route', 'air', 3)
+                    """
+                ),
+                {"collection_id": collection_id},
+            )
+            watch_order_id = _last_insert_id(session)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO watch_order_entry (watch_order_id, library_item_id, position)
+                    VALUES (:watch_order_id, :item_id, 0)
+                    """
+                ),
+                {"watch_order_id": watch_order_id, "item_id": item_id},
+            )
+            session.execute(
+                text(
+                    """
+                    INSERT INTO watch_order (collection_id, name, order_kind, revision)
+                    VALUES (:collection_id, 'Release route', 'custom', 2)
+                    """
+                ),
+                {"collection_id": collection_id},
+            )
+            release_watch_order_id = _last_insert_id(session)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO watch_order_entry (watch_order_id, library_item_id, position)
+                    VALUES (:watch_order_id, :item_id, 0)
+                    """
+                ),
+                {"watch_order_id": release_watch_order_id, "item_id": item_id},
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE collection
+                    SET default_watch_order_id = :watch_order_id
+                    WHERE id = :collection_id
+                    """
+                ),
+                {"watch_order_id": watch_order_id, "collection_id": collection_id},
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("watch_order")}
+        with engine.connect() as connection:
+            routes = tuple(
+                connection.execute(
+                    text("SELECT id, collection_id, name, revision FROM watch_order ORDER BY id")
+                ).tuples()
+            )
+            defaults = tuple(
+                connection.execute(
+                    text(
+                        """
+                        SELECT id, default_watch_order_id
+                        FROM collection
+                        WHERE id = :collection_id
+                        """
+                    ),
+                    {"collection_id": collection_id},
+                ).tuples()
+            )
+            entries = tuple(
+                connection.execute(
+                    text(
+                        """
+                        SELECT watch_order_id, library_item_id, position
+                        FROM watch_order_entry
+                        ORDER BY watch_order_id, position
+                        """
+                    )
+                ).tuples()
+            )
+    finally:
+        engine.dispose()
+
+    assert "order_kind" not in columns
+    assert routes == (
+        (watch_order_id, collection_id, "Air route", 3),
+        (release_watch_order_id, collection_id, "Release route", 2),
+    )
+    assert defaults == ((collection_id, watch_order_id),)
+    assert entries == (
+        (watch_order_id, item_id, 0),
+        (release_watch_order_id, item_id, 0),
+    )
+
+
 def test_initial_migration_is_immutable_and_does_not_import_runtime_metadata() -> None:
     migration = (
         Path(__file__).parents[1] / "alembic" / "versions" / "20260722_0013_folded_katalog.py"

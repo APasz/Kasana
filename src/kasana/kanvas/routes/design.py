@@ -112,7 +112,6 @@ async def design_page() -> None:
                     id=1,
                     collectionId=1,
                     name="Release order",
-                    kind="custom",
                     entryCount=4,
                     revision=1,
                     progressPercent=42,
@@ -131,7 +130,6 @@ async def design_page() -> None:
             GenerationPreviewView(
                 watchOrderId=1,
                 revision=1,
-                mode="air",
                 applyMode="replace",
                 entries=(
                     WatchOrderRowView(
