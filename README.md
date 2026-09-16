@@ -30,14 +30,14 @@ uv run kasana-katalog scan
 Use `--expected-kind series` for a television root
 Katalog scans `.avi`, `.m4v`, `.mkv`, `.mov`, `.mp4`, and `.webm` files
 
-Start Katalog, then Kanvas in another terminal:
+Start Katalog and Kanvas together:
 ```bash
-uv run kasana-katalog-api
+./start.sh
 ```
 
-```bash
-uv run kasana-kanvas
-```
+The script upgrades the Katalog database before starting either service. Press Ctrl+C to stop
+both processes. To run them separately, use `uv run kasana-katalog-api` and
+`uv run kasana-kanvas` in separate terminals.
 
 Open <http://127.0.0.1:5370>. Kanvas binds to `0.0.0.0:5370` by default; Katalog
 binds to `127.0.0.1:5373`. Its OpenAPI documentation is at
